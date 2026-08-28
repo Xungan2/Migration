@@ -1,6 +1,6 @@
 """inputs.py — T1 输入解析。
 
-接收并校验启动参数，创建迁移工作区与 project.yaml（项目身份的真值源）。
+接收并校验启动参数，创建迁移工作区与 project.json（项目身份的真值源）。
 全部为确定性检查，不使用 agent。
 """
 
@@ -80,17 +80,24 @@ def target_os_baseline(target_os: Path) -> dict:
     return info
 
 
-def init_workspace(name: str, linux_driver: Path, target_os: Path,
-                   materials: list[Path], workroot: Path) -> Path:
-    """创建迁移工作区并写入 project.yaml。幂等：目录已存在则拒绝。"""
-    ws = workroot / name
-    if ws.exists():
-        raise InputError(f"工作区已存在: {ws}（如需重跑请删除或换 --name）")
-    ws.mkdir(parents=True)
+def init_workspace(output_dir: Path, linux_driver: Path, target_os: Path,
+                   materials: list[Path]) -> Path:
+    """创建迁移工作区并写入 project.json。幂等：目录已存在则拒绝。
+
+    在 output_dir 下创建 P0/ 子目录（含 logs/、reports/）。
+    project.json 写在 output_dir 根（跨阶段共享）。
+    """
+    ws = output_dir
+    if ws.exists() and any(ws.iterdir()):
+        raise InputError(f"工作区已存在且非空: {ws}（如需重跑请删除或换 --output-dir）")
+    ws.mkdir(parents=True, exist_ok=True)
+    # P0 阶段子目录
+    (ws / "P0" / "logs").mkdir(parents=True, exist_ok=True)
+    (ws / "P0" / "reports").mkdir(parents=True, exist_ok=True)
 
     summary = validate(linux_driver, target_os, materials)
     project = {
-        "name": name,
+        "name": ws.name,               # 从 output_dir basename 推断
         "created": _dt.datetime.now().isoformat(timespec="seconds"),
         "tool_version": "0.1.0",
         # 身份

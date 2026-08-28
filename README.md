@@ -23,6 +23,12 @@ driver_migration_tool/
 │       └── gate.py      #     T5 门禁（脚本，机器可检）
 ├── skills/              # SKILL：agent 行为指令（每轮注入，指令性、精瘦）
 ├── examples/            # 资料束样例（Asterinas；模拟开发者提供的自由资料）
+├── knowledge/           # 知识库（已沉淀；条目化、人审入库）
+│   └── splits/          #   拆分域
+│       └── strategies/  #     策略样例（= strategy.md 产物原样；
+│                        #     INDEX.json 目录 + README 沉淀规范）
+├── temp/                # 未沉淀知识暂存区（run_strategy 自动写入样例草稿；
+│                        #   P1 后人工决定，p1-promote 晋升入 knowledge/）
 └── migrations/          # 迁移项目工作区（运行时生成）
 ```
 
@@ -33,7 +39,7 @@ driver_migration_tool/
 | 阶段 | 职责 | 状态 |
 |---|---|---|
 | P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
-| P1 | Linux 驱动解剖 + **模块划分与依赖 DAG**（MVP 定界门禁在 P1 末：模块前缀+范围+全局约束，人工一次审定）；模块卡含 verify 草稿（now/deferred+needs） | 设计定稿，待实现 |
+| P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 knowledge/splits/strategies/，样例 = strategy.md 产物原样，INDEX.json 路由 + 按需读全文；run_strategy 自动草稿入 temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
 | P2 | API/类型/头文件映射 + 高风险映射运行时探针 + 导出 P4 依赖序（映射知识的存储形态随知识库设计一并定） | 设计定稿，待实现 |
 | P3 | crate 骨架 + **全量胶水 stub**（设备注册/栈接线/测试位——使"已迁移模块+胶水"从第一模块起即可依赖） | 设计定稿，待实现 |
 | P4 | 按模块 DAG 增量迁移；每模块 L0-L4 分层验收（判据机器复核，agent 打勾仅为申请）；平台缺口正式状态（决策队列→gaps→绕过入档）；有界修复环 | 设计定稿，待实现 |
@@ -100,6 +106,8 @@ agent 声明的剩余不确定项仅记为非阻塞备忘。
 - **判据双信号**：退出码 + 日志特征，缺一不可（管道吞退出码的教训已内置）
 - **agent 产物信任但验证**：一切 agent 输出（JSON/runner/检索）经机器校验
 - **幂等推进**：各步产物存在即跳过，失败可断点重跑
-- **人工介入三接口**（P0 现阶段）：T3 缺失问答（3 轮自动提取未果→
+- **人工介入接口**：T3 缺失问答（3 轮自动提取未果→
   human_questions.md→answers.md→R4）、runner.json 人工审核（reviewed=false→
-  入库）、`--category` 人工指定；后续阶段追加（MVP 决策 P1 末等）
+  入库）、`--category` 人工指定、样例草稿晋升审阅（P1 整体完成后开发者
+  据 reports/P1-knowledge.md 决定是否 `p1-promote` 沉淀）；后续阶段
+  追加（MVP 决策 P1 末等）

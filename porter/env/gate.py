@@ -43,7 +43,8 @@ def run_gate(ws: Path) -> bool:
         checks.append(("runner.json 存在", False, "缺失"))
 
     # 3. T3 三项显式结果（硬门禁）
-    dev_path = ws / "reports" / "T3_development.json"
+    p0 = ws / "P0"
+    dev_path = p0 / "reports" / "T3_development.json"
     if dev_path.exists():
         dev = json.loads(dev_path.read_text(encoding="utf-8"))
         items = {r["item"]: r for r in dev.get("results", [])}
@@ -55,7 +56,7 @@ def run_gate(ws: Path) -> bool:
                 checks.append((f"T3 {name} {'PASS' if r['ok'] else 'FAIL'}",
                                r["ok"], r["detail"]))
     else:
-        checks.append(("T3 探测执行", False, "T3_development.json 缺失"))
+        checks.append(("T3 探测执行", False, "P0/reports/T3_development.json 缺失"))
 
     passed = all(ok for _, ok, _ in checks)
 
@@ -65,9 +66,9 @@ def run_gate(ws: Path) -> bool:
              "| 检查项 | 结果 | 说明 |", "|---|---|---|"]
     for name, ok, detail in checks:
         lines.append(f"| {name} | {'✅' if ok else '❌'} | {detail} |")
-    (ws / "reports").mkdir(exist_ok=True)
-    (ws / "reports" / "p0_report.md").write_text(
+    (p0 / "reports").mkdir(parents=True, exist_ok=True)
+    (p0 / "reports" / "p0_report.md").write_text(
         "\n".join(lines), encoding="utf-8")
     print(f"[porter] T5: 门禁 {'通过' if passed else '未通过'}"
-          f"（详见 {ws/'reports'/'p0_report.md'}）")
+          f"（详见 {p0/'reports'/'p0_report.md'}）")
     return passed

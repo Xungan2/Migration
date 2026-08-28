@@ -65,9 +65,11 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
 
 
 def extract_json(out: str) -> dict | None:
-    """从 agent 输出中提取唯一的 ```json 代码块并解析。
+    """从 agent 输出中提取 moves JSON 并解析。
 
-    agent 约定只输出一个 JSON 块（SKILL 中强制）；失败返回 None。
+    优先取 ```json 代码块（SKILL 约定）；兜底容忍裸 JSON：以最后一个
+    "moves" 为锚点做配平括号搜索（opencode run 的输出混有工具转录，
+    不能全文贪婪匹配）。失败返回 None。
     """
     blocks = re.findall(r"```json\s*(.*?)```", out, re.DOTALL)
     if not blocks:
@@ -79,4 +81,28 @@ def extract_json(out: str) -> dict | None:
                 return obj
         except json.JSONDecodeError:
             continue
+    # 兜底：裸 JSON（无围栏）。从 "moves" 锚点向前找配平的 { ... }
+    anchor = out.rfind('"moves"')
+    while anchor >= 0:
+        start = out.rfind("{", 0, anchor)
+        while start >= 0:
+            depth = 0
+            end = -1
+            for k in range(start, len(out)):
+                if out[k] == "{":
+                    depth += 1
+                elif out[k] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        end = k
+                        break
+            if end > 0:
+                try:
+                    obj = json.loads(out[start:end + 1])
+                    if isinstance(obj, dict) and "moves" in obj:
+                        return obj
+                except json.JSONDecodeError:
+                    pass
+            start = out.rfind("{", 0, start)
+        anchor = out.rfind('"moves"', 0, anchor)
     return None

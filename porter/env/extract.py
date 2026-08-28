@@ -3,8 +3,8 @@
 流程（用户定稿）：
     R1 提取 → 探测 → R2 修正 → 探测 → R3 修正 → 探测
     全绿即成（missing 若非空 → 生成非阻塞确认问题，不暂停）
-    3 轮未成 → reports/human_questions.md（阻塞），exit 3
-    人填写 ws/answers.md 后重跑 → R4 答案整合 → 终测 → 成败定局
+    3 轮未成 → P0/reports/human_questions.md（阻塞），exit 3
+    人填写 answers.md 后重跑 → R4 答案整合 → 终测 → 成败定局
 
 探测为金标准：三项（build/boot/boot_with_device）双信号全 PASS 即通过。
 runner 最小契约校验失败视同该轮失败，缺陷作为反馈进下一轮。
@@ -99,6 +99,7 @@ def _prompt_answers(skill: str, rounds: list[dict], probes: list[list[dict]],
 # ---------- 人工问题生成 ----------
 
 def _write_questions(ws: Path, rounds: list[dict], probes: list[list[dict]]) -> None:
+    p0 = ws / "P0"
     last = rounds[-1]
     lines = ["# T3 人工介入问题（自动生成）", "",
              f"agent 已尝试 {len(rounds)} 轮自动提取/修正，以下问题仍无法解决。",
@@ -114,26 +115,27 @@ def _write_questions(ws: Path, rounds: list[dict], probes: list[list[dict]]) -> 
             n += 1
             lines += [f"## Q{n}（探测失败：{pr.get('item')}）",
                       f"- 详情：{pr.get('detail')}",
-                      "- 完整日志见 logs/ 下对应文件", ""]
-    (ws / "reports").mkdir(exist_ok=True)
-    (ws / "reports" / "human_questions.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"[porter] T3: 人工问题已生成 {ws/'reports'/'human_questions.md'}（{n} 问）")
+                      "- 完整日志见 P0/logs/ 下对应文件", ""]
+    (p0 / "reports").mkdir(parents=True, exist_ok=True)
+    (p0 / "reports" / "human_questions.md").write_text("\n".join(lines), encoding="utf-8")
+    print(f"[porter] T3: 人工问题已生成 {p0/'reports'/'human_questions.md'}（{n} 问）")
 
 
 # ---------- 探测（顺序依赖，全绿为过） ----------
 
 def _run_probes(ws: Path, target_os: Path, runner: dict,
                 categories: list[str], round_no: int) -> list[dict]:
-    (ws / "logs").mkdir(exist_ok=True)
-    results = [probe_mod.probe_build(ws, target_os, runner)]
+    p0 = ws / "P0"
+    (p0 / "logs").mkdir(parents=True, exist_ok=True)
+    results = [probe_mod.probe_build(p0, target_os, runner)]
     if results[-1]["ok"]:
-        results.append(probe_mod.probe_boot(ws, target_os, runner,
+        results.append(probe_mod.probe_boot(p0, target_os, runner,
                                             label="boot"))
         if results[-1]["ok"]:
             results.append(probe_mod.probe_boot_with_device(
-                ws, target_os, runner, categories, label="boot_with_device"))
-    (ws / "reports").mkdir(exist_ok=True)
-    (ws / "reports" / f"T3_probes_R{round_no}.json").write_text(
+                p0, target_os, runner, categories, label="boot_with_device"))
+    (p0 / "reports").mkdir(exist_ok=True)
+    (p0 / "reports" / f"T3_probes_R{round_no}.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     return results
 
@@ -143,6 +145,9 @@ def _run_probes(ws: Path, target_os: Path, runner: dict,
 def extract_env(ws: Path, target_os: Path, materials: list[Path],
                 categories: list[str]) -> int:
     """返回 0=成功（runner.json 已写）；3=需人工（问题已生成）；其他=失败。"""
+    p0 = ws / "P0"
+    (p0 / "logs").mkdir(parents=True, exist_ok=True)
+    (p0 / "reports").mkdir(exist_ok=True)
     runner_path = ws / "runner.json"
     if runner_path.exists():
         print(f"[porter] T3: 复用 {runner_path}")
@@ -156,8 +161,8 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     # ---- R4：answers 存在 → 答案整合 ----
     if answers_path.exists():
         for i in range(1, MAX_AUTO_ROUNDS + 1):
-            p_out = ws / "reports" / f"T3_R{i}.json"
-            p_pr = ws / "reports" / f"T3_probes_R{i}.json"
+            p_out = p0 / "reports" / f"T3_R{i}.json"
+            p_pr = p0 / "reports" / f"T3_probes_R{i}.json"
             if p_out.exists():
                 rounds_out.append(json.loads(p_out.read_text(encoding="utf-8")))
                 rounds_probes.append(json.loads(
@@ -165,7 +170,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
         rc, out = agent.run_agent(
             _prompt_answers(skill, rounds_out, rounds_probes,
                             answers_path.read_text(encoding="utf-8")),
-            workdir=ws, log_stem=str(ws / "logs" / "T3_R4"), timeout_sec=900)
+            workdir=p0, log_stem=str(p0 / "logs" / "T3_R4"), timeout_sec=900)
         parsed = agent.extract_json(out) if rc == 0 else None
         if not parsed or not parsed.get("runner"):
             print("[porter] T3: R4 输出无法解析——请检查 answers.md 后重跑")
@@ -178,7 +183,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
         if all(p["ok"] for p in probes):
             _finish(ws, parsed, probes)
             return 0
-        print(f"[porter] T3: R4 终测仍未全绿——见 reports/T3_probes_R4.json")
+        print(f"[porter] T3: R4 终测仍未全绿——见 P0/reports/T3_probes_R4.json")
         return 1
 
     # ---- R1..R3：自动循环 ----
@@ -189,8 +194,8 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             prompt = _prompt_fix(skill, round_no, rounds_out[-1],
                                 rounds_probes[-1], prev_defects)
         rc, out = agent.run_agent(
-            prompt, workdir=ws,
-            log_stem=str(ws / "logs" / f"T3_R{round_no}"), timeout_sec=900)
+            prompt, workdir=p0,
+            log_stem=str(p0 / "logs" / f"T3_R{round_no}"), timeout_sec=900)
         parsed = agent.extract_json(out) if rc == 0 else None
         if not parsed or not parsed.get("runner"):
             parsed = {"runner": {}, "missing": [{"field": "（输出无法解析）",
@@ -202,8 +207,8 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             continue
         prev_defects = validate_runner(parsed["runner"])
         rounds_out.append(parsed)
-        (ws / "reports").mkdir(exist_ok=True)
-        (ws / "reports" / f"T3_R{round_no}.json").write_text(
+        (p0 / "reports").mkdir(exist_ok=True)
+        (p0 / "reports" / f"T3_R{round_no}.json").write_text(
             json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if prev_defects:
@@ -227,12 +232,14 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
 
 
 def _finish(ws: Path, parsed: dict, probes: list[dict]) -> None:
+    p0 = ws / "P0"
     runner = parsed["runner"]
     runner.setdefault("meta", {"generated_by": "porter/P0-env-extract",
                                "reviewed": False})
     (ws / "runner.json").write_text(
         json.dumps(runner, ensure_ascii=False, indent=2), encoding="utf-8")
-    (ws / "reports" / "T3_development.json").write_text(
+    (p0 / "reports").mkdir(exist_ok=True)
+    (p0 / "reports" / "T3_development.json").write_text(
         json.dumps({"kind": "development", "results": probes,
                     "hard_gate_pass": True}, ensure_ascii=False, indent=2),
         encoding="utf-8")
@@ -240,9 +247,9 @@ def _finish(ws: Path, parsed: dict, probes: list[dict]) -> None:
     if parsed.get("missing"):
         # 探测金标准已过：剩余 missing 为非阻塞确认项
         print(f"[porter] T3: ⚠️ 通过，但 agent 声明 {len(parsed['missing'])} 项"
-              f"非阻塞不确定项（已记入 reports/human_questions.md 供有空确认）")
+              f"非阻塞不确定项（已记入 P0/reports/human_questions.md 供有空确认）")
         lines = ["# 非阻塞确认项（探测已全绿，仅备忘）", ""]
         for m in parsed["missing"]:
             lines.append(f"- {m.get('field')}: {m.get('why_hard')}")
-        (ws / "reports" / "human_questions.md").write_text(
+        (p0 / "reports" / "human_questions.md").write_text(
             "\n".join(lines), encoding="utf-8")

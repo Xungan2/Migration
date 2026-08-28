@@ -20,6 +20,7 @@ def identify_category(linux_driver: Path, workdir: Path,
     """返回类别识别结果 dict（categories/confidence/evidence/...）。
 
     override 非空时跳过 agent，直接采用人工指定。
+    workdir = output_dir（工作区根）；日志写入 P0/logs/。
     """
     if override:
         cats = [c.strip() for c in override.split(",") if c.strip()]
@@ -33,6 +34,8 @@ def identify_category(linux_driver: Path, workdir: Path,
         print(f"[porter] T2: 类别={cats}（人工指定，跳过 agent）")
         return result
 
+    p0 = workdir / "P0"
+    (p0 / "logs").mkdir(parents=True, exist_ok=True)
     skill = agent.load_skill("P0-category-identify")
     prompt = (
         f"{skill}\n\n---\n\n"
@@ -40,8 +43,8 @@ def identify_category(linux_driver: Path, workdir: Path,
         f"`{linux_driver.resolve()}`\n\n"
         f"请按 SKILL 检查并只输出一个 JSON 块。"
     )
-    rc, out = agent.run_agent(prompt, workdir=workdir,
-                              log_stem=str(workdir / "logs" / "T2_category"))
+    rc, out = agent.run_agent(prompt, workdir=p0,
+                              log_stem=str(p0 / "logs" / "T2_category"))
     parsed = agent.extract_json(out) if rc == 0 else None
 
     if parsed is None or not parsed.get("categories"):
@@ -49,10 +52,10 @@ def identify_category(linux_driver: Path, workdir: Path,
         if parsed is not None and parsed.get("confidence") == "none":
             raise SystemExit(
                 "[porter] T2: 未发现内核驱动注册特征——输入可能不是内核驱动，"
-                "请检查 --linux-driver 路径。证据见 logs/T2_category.log")
+                "请检查 --linux-driver 路径。证据见 P0/logs/T2_category.log")
         raise SystemExit(
             "[porter] T2: 类别识别失败（输出无法解析）。"
-            "请重跑，或用 --category 人工指定。日志: logs/T2_category.log")
+            "请重跑，或用 --category 人工指定。日志: P0/logs/T2_category.log")
 
     conf = parsed.get("confidence", "low")
     if conf == "low":

@@ -137,16 +137,18 @@ def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
 def probe_development(ws: Path, target_os: Path, runner: dict,
                       categories: list[str]) -> dict:
     """三项顺序执行（extract 循环外的兼容入口）。"""
-    results = [probe_build(ws, target_os, runner)]
+    p0 = ws / "P0"
+    (p0 / "logs").mkdir(parents=True, exist_ok=True)
+    (p0 / "reports").mkdir(exist_ok=True)
+    results = [probe_build(p0, target_os, runner)]
     if results[-1]["ok"]:
-        results.append(probe_boot(ws, target_os, runner))
+        results.append(probe_boot(p0, target_os, runner))
         if results[-1]["ok"]:
-            results.append(probe_boot_with_device(ws, target_os, runner,
+            results.append(probe_boot_with_device(p0, target_os, runner,
                                                   categories))
     report = {"kind": "development", "results": results,
               "hard_gate_pass": all(r["ok"] for r in results)}
-    (ws / "reports").mkdir(exist_ok=True)
-    (ws / "reports" / "T3_development.json").write_text(
+    (p0 / "reports" / "T3_development.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
         print(f"[porter] T3: {r['item']:<18} {'PASS' if r['ok'] else 'FAIL'}  {r['detail']}")
