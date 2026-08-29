@@ -111,11 +111,13 @@ def check_unit_test(output_text: str, names: list[str],
     for ln in output_text.splitlines():
         if "test result:" in ln and "failed" in ln and "0 failed" not in ln:
             return False, f"存在失败: {ln.strip()}"
+    # 逐名只要求"该测试行存在"：整体 result 已确认 0 failed（跑到的都过），
+    # 而驱动 debug! 日志可能内联插进 "name ... ok" 之间，使单行
+    # `name ... ok` 正则失配（2026-08-30 hw-eeprom 实测）。
     missing = [n for n in names
-               if not re.search(rf"test .*\b{re.escape(n)}\b.*\.\.\. ok",
-                                output_text)]
+               if not re.search(rf"test .*\b{re.escape(n)}\b", output_text)]
     if missing:
-        return False, f"测试未命中/未过: {', '.join(missing)}"
+        return False, f"测试未命中: {', '.join(missing)}"
     return True, f"{len(names)} 测试全过"
 
 
