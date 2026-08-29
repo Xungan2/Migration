@@ -14,19 +14,25 @@ driver_migration_tool/
 ├── porter/              # 编排器（Python 标准库，零第三方依赖）
 │   ├── main.py          #   总入口：python3 porter/main.py <phase> <args>
 │   ├── common/          #   跨阶段共用脚本（多阶段使用者进此）
-│   │   └── agent.py     #     opencode 非交互调用抽象（PORTER_MODEL 可配）
-│   └── env/             #   P0 专属：目标环境接入与验证
-│       ├── inputs.py    #     T1 输入解析（脚本）
-│       ├── category.py  #     T2 类别识别（agent）
-│       ├── extract.py  #     T3 环境信息提取（agent 多轮×探测交织×人工升级）
-│       ├── probe.py     #     T3 探测执行（build/boot/boot_with_device，双信号）
-│       └── gate.py      #     T5 门禁（脚本，机器可检）
+│   │   ├── agent.py     #     opencode 非交互调用抽象（PORTER_MODEL 可配；
+│   │   │                #       内置 32K 输出帽修复：注入
+│   │   │                #       OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX）
+│   │   └── symbol.py    #     C 源码符号静态扫描（P1 依赖图/P2a 使用面共用）
+│   ├── env/             #   P0 专属：目标环境接入与验证
+│   │   ├── inputs.py    #     T1 输入解析（脚本）
+│   │   ├── category.py  #     T2 类别识别（agent）
+│   │   ├── extract.py  #     T3 环境信息提取（agent 多轮×探测交织×人工升级）
+│   │   ├── probe.py     #     探测执行（build/boot/boot_with_device，双信号；
+│   │   │                #       P2+ 验收复用）
+│   │   └── gate.py      #     T5 门禁（脚本，机器可检）
+│   ├── divide/          #   P1 专属（拆分策略→模块划分→依赖解环）
+│   └── bootstrap/       #   P2 专属（引导映射编排 + 骨架生成器）
 ├── skills/              # SKILL：agent 行为指令（每轮注入，指令性、精瘦）
 ├── examples/            # 资料束样例（Asterinas；模拟开发者提供的自由资料）
 ├── knowledge/           # 知识库（已沉淀；条目化、人审入库）
 │   └── splits/          #   拆分域
 │       └── strategies/  #     策略样例（= strategy.md 产物原样；
-│                        #     INDEX.json 目录 + README 沉淀规范）
+│                        #       INDEX.json 目录 + README 沉淀规范）
 ├── temp/                # 未沉淀知识暂存区（run_strategy 自动写入样例草稿；
 │                        #   P1 后人工决定，p1-promote 晋升入 knowledge/）
 └── migrations/          # 迁移项目工作区（运行时生成）
@@ -40,10 +46,9 @@ driver_migration_tool/
 |---|---|---|
 | P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
 | P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 knowledge/splits/strategies/，样例 = strategy.md 产物原样，INDEX.json 路由 + 按需读全文；run_strategy 自动草稿入 temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
-| P2 | API/类型/头文件映射 + 高风险映射运行时探针 + 导出 P4 依赖序（映射知识的存储形态随知识库设计一并定） | 设计定稿，待实现 |
-| P3 | crate 骨架 + **全量胶水 stub**（设备注册/栈接线/测试位——使"已迁移模块+胶水"从第一模块起即可依赖） | 设计定稿，待实现 |
-| P4 | 按模块 DAG 增量迁移；每模块 L0-L4 分层验收（判据机器复核，agent 打勾仅为申请）；平台缺口正式状态（决策队列→gaps→绕过入档）；有界修复环 | 设计定稿，待实现 |
-| P5 | P5a 预实测（验证能力探测：替身载波建环境基线→真实驱动偏离归因）→ P5b 系统验收（按能力组织，含从 P4 流入的 deferred 判据清偿） | 设计定稿，待实现 |
+| P2 | **引导映射 + 全局骨架**【一次性】：2a 引导映射（生命周期主轴系统级设施全景：注册枚举/MMIO/DMA/中断/锁上下文/内存设施/子系统对接 7 域 + 换思路裁定 + 接线清单；agent 分批小调用，evidence 源码核实铁律机器化）→ 2b 全局骨架（目标 OS 专属模板：crate + 空 probe + 探针宿舍 + ktest 位 + 栈接线桩 + 全部接线点；零驱动功能）→ 验收（build/boot 双信号 + 组件日志特征） | ✅ 本仓 |
+| P3+P4 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面 → 查全局映射表只补缺 → 高风险项生成探针住骨架 → runner 双信号判定 → FAIL 有界改判）+ 判据草案 criteria.json；P4(M) 迁移（映射表数据注入、按文件/片段小调用）+ 分层验收 L0-L4（累积回归）+ gap 机制 + deferred 登记（消费者落地当轮清偿）。人工关口：连续直通，仅 gap/验收超界/deferred 无法清偿时 exit 3 介入 | 设计定稿，待实现 |
+| P5 | P5a 预实测（验证能力探测：替身载波建环境基线→真实驱动偏离归因）→ P5b 系统验收（按能力组织，含 deferred 判据清偿 + 循环残余） | 设计定稿，待实现 |
 | P6 | 终态报告（已迁/未迁/不适用完整度清单）+ 知识沉淀（形态随知识库设计定）+ 上游补丁提取（VCS baseline diff） | 设计定稿，待实现 |
 
 ## 核心设计决策（讨论定稿记录）
@@ -100,6 +105,31 @@ python3 porter/main.py p0 \
 agent 调用：T2 类别识别 1 次 + T3 提取/修正轮 1-3 次（+答案整合 1 次），
 其余全部脚本执行。探测为金标准：三项双信号全 PASS 即通过；探测全绿时
 agent 声明的剩余不确定项仅记为非阻塞备忘。
+
+# P2：引导映射 + 全局骨架（须先跑过 p0/p1）
+
+```bash
+# 全流程（2a 映射 → 2b 骨架 → build/boot+组件日志验收）
+python3 porter/main.py p2 --output-dir migrations/my-first-port \
+    [--device-ids 0x8086:0x100e]      # 缺省 QEMU 目标默认收敛
+
+# 分步（断点重入，幂等）
+python3 porter/main.py p2-map --output-dir migrations/my-first-port
+python3 porter/main.py p2-skeleton --output-dir migrations/my-first-port \
+    [--device-ids ...]
+
+# 产物（工作区 <ws>/P2/）：
+#   mapping.json        映射真值源（P2a 起，P3 增量累积；条目 9 字段+
+#                       domain，evidence 为目标树 file:line 机器校验）
+#   mapping.md          人读渲染（域分节四列表 + 换思路 + 接线清单）
+#   reports/spine_api.json     生命周期主轴外部 API 提取（域分组）
+#   reports/mapping_report.md  映射增量报告（人工审阅关口 = 末尾报告）
+#   reports/skeleton_manifest.json  骨架写入清单（目标树新建/接线点）
+#   reports/acceptance.json    验收结果（build/boot/日志特征）
+#   logs/               agent 与验收原始输出
+# 骨架实体文件生成在目标 OS 树（comps/<driver>/ + 接线点改动），
+# 验收 = P0 runner 双信号 + 骨架组件日志特征（manifest 内可查）。
+```
 
 ## 横切原则（实现与后续阶段必须遵守）
 

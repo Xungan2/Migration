@@ -20,6 +20,14 @@ DEFAULT_MODEL = "zhipu-ai/glm-5.2"
 TOOL_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILLS_DIR = TOOL_ROOT / "skills"
 
+# opencode 将每步 max_output_tokens 静默钳到 min(model.limit.output, 32000)
+# （anomalyco/opencode#29363）。推理模型的思考与输出共享该预算，大调用
+# 思考烧满 32K → reason:"length"、output:0 零产出（P1-divide R1/R2 实测）。
+# 逃生门 = OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX。glm-5.2 官方上限 128K
+# （=131072，docs.bigmodel.cn GLM-5.2 模型卡，与 models.dev 注册表一致；
+# context 1M 下无 overflow 压缩副作用）。
+OUTPUT_TOKEN_MAX_DEFAULT = "131072"
+
 
 def load_skill(name: str) -> str:
     """读取 skills/ 下的 SKILL 文件正文。"""
@@ -46,10 +54,13 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
     ]
     print(f"[porter] agent: {log_stem} (model={model})")
     t0 = time.time()
+    env = {**os.environ, "NO_COLOR": "1"}
+    env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
+                   OUTPUT_TOKEN_MAX_DEFAULT)
     try:
         proc = subprocess.run(
             args, cwd=str(workdir), capture_output=True, text=True,
-            timeout=timeout_sec, env={**os.environ, "NO_COLOR": "1"},
+            timeout=timeout_sec, env=env,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         rc = proc.returncode

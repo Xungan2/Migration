@@ -58,12 +58,13 @@ def _resolve_log(target_os: Path, bo: dict) -> tuple[Path | None, str]:
     return p, "file"
 
 
-def probe_build(ws: Path, target_os: Path, runner: dict) -> dict:
+def probe_build(ws: Path, target_os: Path, runner: dict,
+                label: str = "build") -> dict:
     b = runner["build"]
     rc, out = _run(b["cmd"], cwd=target_os,
                    env=_base_env(target_os, runner),
                    timeout_sec=int(b["timeout_full_sec"]),
-                   log_path=ws / "logs" / "T3_build.log")
+                   log_path=ws / "logs" / f"{label}.log")
     ok = rc == 0
     if ok and b.get("success_pattern"):
         ok = b["success_pattern"] in _strip_ansi(out)

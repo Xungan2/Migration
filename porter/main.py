@@ -35,8 +35,13 @@ answers.md 后重跑即进入 R4 答案整合轮。
     │   ├── strategy.md       拆分策略分析（P1S 产出）
     │   ├── logs/             P1 各步日志
     │   ├── reports/          P1 步骤结论（plan/环报告/知识报告）
-    │   └── modules/          物理切分模块（P1D 产出/P1R 重切）
-    └── ...（P2+ 未来）
+    │   ├── modules/          物理切分模块（P1D 产出/P1R 重切）
+    ├── P2/
+    │   ├── mapping.json      API 映射真值源（P2a 起，P3 增量累积）
+    │   ├── mapping.md        人读渲染（域分节表 + 换思路 + 接线清单）
+    │   ├── logs/             P2 agent/验收原始输出
+    │   └── reports/          spine_api / 映射报告 / 骨架清单 / 验收
+    └── ...（P3+ 垂直循环：P3/<模块>/、P4/<模块>/、deferred.json 等）
 
 各步幂等：产物存在即跳过。
 """
@@ -53,13 +58,14 @@ from pathlib import Path
 _TOOL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_TOOL_ROOT))
 
+from porter.bootstrap import run as p2        # noqa: E402
 from porter.divide import resolve as p1r     # noqa: E402
 from porter.divide import run as p1a        # noqa: E402
 from porter.divide import strategy as p1s    # noqa: E402
 from porter.env import category as t2      # noqa: E402
-from porter.env import extract as t3       # noqa: E402
-from porter.env import inputs as t1        # noqa: E402
-from porter.env import gate as t5          # noqa: E402
+from porter.env import extract as t3      # noqa: E402
+from porter.env import inputs as t1      # noqa: E402
+from porter.env import gate as t5         # noqa: E402
 
 
 def cmd_p0(args) -> int:
@@ -148,6 +154,57 @@ def cmd_p1_divide(args) -> int:
 def cmd_p1_promote(args) -> int:
     """样例草稿晋升（沉淀）：temp/splits/strategies → knowledge/...。"""
     return p1s.promote_sample(args.driver)
+
+
+def _p2_context(args):
+    """P2 公共上下文：工作区 + 驱动/目标树路径（缺则 None 元组）。"""
+    ws = Path(args.output_dir).resolve()
+    proj_path = ws / "project.json"
+    if not proj_path.exists():
+        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return ws, None, None
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    driver_root = Path(proj["linux_driver"])
+    target_os = Path(proj["target_os"])
+    if not driver_root.is_dir() or not target_os.is_dir():
+        print(f"[porter] 路径无效: {driver_root} / {target_os}")
+        return ws, None, None
+    return ws, driver_root, target_os
+
+
+def _parse_device_ids(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    ids = [s.strip() for s in raw.split(",") if s.strip()]
+    return ids or None
+
+
+def cmd_p2(args) -> int:
+    """P2 全流程：引导映射（2a）→ 全局骨架（2b）→ 验收（build/boot+日志）。"""
+    ws, driver_root, target_os = _p2_context(args)
+    if driver_root is None:
+        return 2
+    return p2.run_p2(ws, driver_root, target_os,
+                     device_ids=_parse_device_ids(args.device_ids))
+
+
+def cmd_p2_map(args) -> int:
+    """P2a 引导映射（agent 分批 + 机器校验；断点重入幂等）。"""
+    from porter.bootstrap import mapping as p2a
+    ws, driver_root, target_os = _p2_context(args)
+    if driver_root is None:
+        return 2
+    return p2a.run_map(ws, driver_root, target_os)
+
+
+def cmd_p2_skeleton(args) -> int:
+    """P2b 骨架生成（幂等；--device-ids 覆盖默认收敛）。"""
+    from porter.bootstrap import skeleton as p2b
+    ws, _driver_root, target_os = _p2_context(args)
+    if target_os is None:
+        return 2
+    return p2b.run_skeleton(ws, target_os,
+                            device_ids=_parse_device_ids(args.device_ids))
 
 
 def _parse_knowledge_table(rpt: Path) -> list[str]:
@@ -306,6 +363,25 @@ def main(argv=None) -> int:
     p1p = sub.add_parser("p1-promote", help="样例草稿晋升：temp → knowledge（沉淀，P1 完成后人工决定执行）")
     p1p.add_argument("--driver", required=True, help="要晋升的驱动名或条目文件名（同名多条目时须给条目文件名）")
     p1p.set_defaults(func=cmd_p1_promote)
+
+    def _add_device_ids(sp):
+        sp.add_argument("--device-ids", default=None, metavar="V:D[,V:D...]",
+                        help="PCI 设备 ID 收敛清单（如 0x8086:0x100e；"
+                             "缺省用 P1 策略默认 QEMU 目标）")
+
+    p2all = sub.add_parser("p2", help="P2 全流程：引导映射 → 全局骨架 → 验收")
+    p2all.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0/p1）")
+    _add_device_ids(p2all)
+    p2all.set_defaults(func=cmd_p2)
+
+    p2m = sub.add_parser("p2-map", help="P2a 引导映射（agent 分批小调用；断点重入幂等）")
+    p2m.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    p2m.set_defaults(func=cmd_p2_map)
+
+    p2s = sub.add_parser("p2-skeleton", help="P2b 全局骨架生成（幂等）")
+    p2s.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    _add_device_ids(p2s)
+    p2s.set_defaults(func=cmd_p2_skeleton)
 
     args = ap.parse_args(argv)
     return args.func(args)

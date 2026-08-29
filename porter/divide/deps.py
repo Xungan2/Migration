@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .symbol import scan_module_dir
+from ..common.symbol import scan_module_dir
 
 
 def compute_deps(ws: Path) -> dict:

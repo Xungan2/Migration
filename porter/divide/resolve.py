@@ -22,7 +22,7 @@ from pathlib import Path
 
 from ..common import agent
 from . import fragments as frag_mod
-from .symbol import scan_module_dir
+from ..common.symbol import scan_module_dir
 
 MAX_ROUNDS = 3
 

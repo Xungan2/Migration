@@ -16,6 +16,11 @@ v2.1（corner case 加固）：
   引用，并修复字符串内 `/*` 被当注释剥离的误伤
 - 函数指针变量声明 `int (*cb)(...)` 找回定义名（类型名不再误配函数名）
 
+v2.2（P2a 提取时发现）：
+- 匿名 typedef 枚举 `typedef enum { ... } name;` 的枚举值此前落入
+  "未识别块"进 refs（v2 的枚举修复只覆盖具名 `enum X {`）——现与
+  具名分支同语义入 defs；匿名 typedef struct/union 取尾名入 defs
+
 已知限制（真实驱动树未出现，暂不处理）：
 - `#if 0` 死代码仍会被扫描（无预处理器）
 - DEFINE_SPINLOCK/DECLARE_WORK 等宏的"定义语义"不识别（按引用处理）
@@ -284,6 +289,19 @@ def scan_file(path: Path) -> tuple[dict[str, int], set[str], set[str]]:
                 add_def(tag, i + 1)
                 is_enum = re.search(r"\benum\s+\w+", head_one) is not None
                 if is_enum:
+                    for s_ in _ids(block_text):
+                        add_def(s_, i + 1)
+                add_def(_block_tail_name(block_text), i + 1)
+                i = j2
+                continue
+            # 匿名 typedef 类型块（`typedef enum {` / `typedef struct {`）：
+            # 无标签，上面的 _TYPE_TAG 不命中。enum 值入 defs（与具名分支
+            # 同语义——否则枚举值泄漏进 refs 污染外部符号面）；
+            # struct/union 只取尾名（字段不产生任何集合条目）。
+            if head_one.startswith(("typedef",)) and "(" not in head_one \
+                    and re.match(r"typedef\s+(?:struct|union|enum)\s*\{?",
+                                 head_one):
+                if re.search(r"\benum\b", head_one):
                     for s_ in _ids(block_text):
                         add_def(s_, i + 1)
                 add_def(_block_tail_name(block_text), i + 1)
