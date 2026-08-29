@@ -172,6 +172,12 @@ def _p2_context(args):
     return ws, driver_root, target_os
 
 
+def cmd_p2_promote(args) -> int:
+    """P2 映射知识晋升：temp/maps → knowledge/maps（同名=版本更新替换）。"""
+    from porter.bootstrap import knowledge as kn
+    return kn.promote_map(args.driver, target=args.target)
+
+
 def _parse_device_ids(raw: str | None) -> list[str] | None:
     if not raw:
         return None
@@ -382,6 +388,11 @@ def main(argv=None) -> int:
     p2s.add_argument("--output-dir", required=True, help="迁移工作区根目录")
     _add_device_ids(p2s)
     p2s.set_defaults(func=cmd_p2_skeleton)
+
+    p2p = sub.add_parser("p2-promote", help="映射知识晋升：temp/maps → knowledge/maps（P2 末/循环中人工决定执行）")
+    p2p.add_argument("--driver", required=True, help="要晋升的驱动名")
+    p2p.add_argument("--target", default=None, help="目标 OS 名（同名歧义时必须指定）")
+    p2p.set_defaults(func=cmd_p2_promote)
 
     args = ap.parse_args(argv)
     return args.func(args)

@@ -275,6 +275,10 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     mapping = _load_mapping(p2)
     skill = agent.load_skill("P2-bootstrap-map")
     failed: list[str] = []
+    # 域归属权威映射（脚本事实）：条目 domain 一律以此覆盖，不信 agent 抄写
+    # （合并批的 agent 抄写会错标，2026-08-29 质检实证 152 例）
+    sym_dom = {s: d for d, v in spine["domains"].items()
+               for s in v["symbols"]}
 
     for domain, syms in _batches(spine):
         mods = (spine["domains"].get(domain, {})
@@ -297,6 +301,9 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
             if parsed and "entries" in parsed:
                 got, errs = _validate_entries(parsed["entries"], target_os,
                                               dom_key)
+                for e in got:       # 权威域覆盖（防合并批错标）
+                    if e["linux_api"] in sym_dom:
+                        e["domain"] = sym_dom[e["linux_api"]]
                 covered = {e["linux_api"] for e in got}
                 missing = [s for s in todo if s not in covered]
                 if got and not missing and not errs:
@@ -377,11 +384,19 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         f"- unresolved 符号（未映射，P3(M) 兜底）: "
         f"{spine['stats']['unresolved']} 个（见 spine_api.json）",
         "",
-        "人工关口（§10 定案 6）：审阅 `mapping.md`；若认为有沉淀价值，",
-        "循环结束后人工决定是否沉淀 knowledge/maps/ 域（本轮不中断）。",
+        "人工关口（§10 定案 6，增量沉淀）：审阅 `mapping.md`；有价值即",
+        f"可 `p2-promote --driver <名> --target <目标>` 晋升（P2 末为首个",
+        "沉淀点，此后每轮循环末可再次晋升；草稿已自动入 temp/maps/）。",
     ]
     (p2 / "reports" / "mapping_report.md").write_text(
         "\n".join(rpt) + "\n", encoding="utf-8")
     print(f"[porter] P2a: 映射完成——{len(ents)} 条 → mapping.json/md；"
           f"报告 → {p2 / 'reports' / 'mapping_report.md'}")
+
+    # 知识沉淀草稿（增量：P2 末首个点，此后每轮 P3(M) 末随 run_map 刷新）
+    try:
+        from . import knowledge as kn
+        kn.draft_knowledge(ws)
+    except Exception as e:      # 沉淀失败不影响映射主流程（仿 P1S 模式）
+        print(f"[porter] P2a: ⚠️ 知识草稿失败（不影响映射）：{e}")
     return 1 if failed else 0

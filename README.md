@@ -30,11 +30,15 @@ driver_migration_tool/
 ├── skills/              # SKILL：agent 行为指令（每轮注入，指令性、精瘦）
 ├── examples/            # 资料束样例（Asterinas；模拟开发者提供的自由资料）
 ├── knowledge/           # 知识库（已沉淀；条目化、人审入库）
-│   └── splits/          #   拆分域
-│       └── strategies/  #     策略样例（= strategy.md 产物原样；
-│                        #       INDEX.json 目录 + README 沉淀规范）
+│   ├── splits/          #   拆分域
+│   │   └── strategies/  #     策略样例（= strategy.md 产物原样；
+│   │                    #       INDEX.json 目录 + README 沉淀规范）
+│   └── maps/            #   API 映射域（P2 起；= mapping.md/json 产物原样，
+│                        #     <驱动>@<目标OS> 命名；同名晋升=版本更新替换，
+│                        #     活文档；消费铁律见其 README）
 ├── temp/                # 未沉淀知识暂存区（run_strategy 自动写入样例草稿；
-│                        #   P1 后人工决定，p1-promote 晋升入 knowledge/）
+│                        #   p2-map 自动写入/刷新映射草稿；
+│                        #   人工审后 p1-promote / p2-promote 晋升入 knowledge/）
 └── migrations/          # 迁移项目工作区（运行时生成）
 ```
 
@@ -129,6 +133,9 @@ python3 porter/main.py p2-skeleton --output-dir migrations/my-first-port \
 #   logs/               agent 与验收原始输出
 # 骨架实体文件生成在目标 OS 树（comps/<driver>/ + 接线点改动），
 # 验收 = P0 runner 双信号 + 骨架组件日志特征（manifest 内可查）。
+# 知识沉淀（增量）：p2-map 末自动草稿入 temp/maps/；P2 末（首个沉淀点）
+# 人工审阅 mapping.md 后晋升：
+#   python3 porter/main.py p2-promote --driver e1000 --target asterinas
 ```
 
 ## 横切原则（实现与后续阶段必须遵守）
