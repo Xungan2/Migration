@@ -1,1 +1,22 @@
-[]
+[
+  {
+    "entry_stem": "e1000@asterinas",
+    "hits": 0,
+    "entry_file": "e1000@asterinas.md",
+    "entry_json": "e1000@asterinas.json",
+    "driver_name": "e1000",
+    "target_os": "asterinas",
+    "target_os_commit": "36ae7fe1078842feb16c311fbbf22a527e9b0e28",
+    "category": [
+      "net"
+    ],
+    "counts": {
+      "direct": 54,
+      "adapt": 311,
+      "gap": 154,
+      "not-migrated": 150
+    },
+    "redesigns": 7,
+    "updated": "2026-08-30T02:34:11"
+  }
+]

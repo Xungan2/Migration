@@ -41,7 +41,17 @@ answers.md 后重跑即进入 R4 答案整合轮。
     │   ├── mapping.md        人读渲染（域分节表 + 换思路 + 接线清单）
     │   ├── logs/             P2 agent/验收原始输出
     │   └── reports/          spine_api / 映射报告 / 骨架清单 / 验收
-    └── ...（P3+ 垂直循环：P3/<模块>/、P4/<模块>/、deferred.json 等）
+    ├── P3/<M>/               垂直循环·分析（使用面/增量映射/gap 分类/
+    │   ├── reports/            判据草案/探针注册表/报告）
+    │   └── logs/
+    ├── P4/<M>/               垂直循环·生产（fill/迁移切片/验收报告）
+    │   ├── reports/
+    │   └── logs/
+    ├── loop_state.json       循环状态机（order + 每模块 phase/attempts）
+    ├── deferred.json         deferred 判据登记（消费者落地时清偿）
+    ├── platform_patches.json fill/register-fill 登记（P6 上游补丁素材）
+    ├── human_questions.md    exit 3 人工关口问题（answers.md 承接）
+    └── answers.md            人工答案（T3/loop 共用，被消费的节自动移除）
 
 各步幂等：产物存在即跳过。
 """
@@ -66,6 +76,7 @@ from porter.env import category as t2      # noqa: E402
 from porter.env import extract as t3      # noqa: E402
 from porter.env import inputs as t1      # noqa: E402
 from porter.env import gate as t5         # noqa: E402
+from porter.loop import run as loop_mod   # noqa: E402
 
 
 def cmd_p0(args) -> int:
@@ -176,6 +187,69 @@ def cmd_p2_promote(args) -> int:
     """P2 映射知识晋升：temp/maps → knowledge/maps（同名=版本更新替换）。"""
     from porter.bootstrap import knowledge as kn
     return kn.promote_map(args.driver, target=args.target)
+
+
+def _loop_module(args):
+    """p3/p4/loop 公共：工作区校验 + 可选 --module。"""
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return ws, False
+    return ws, True
+
+
+def cmd_p3(args) -> int:
+    """P3(M)：使用面提取 + 增量映射 + gap 处置分类 + 判据草案 + 探针。"""
+    from porter.loop import p3 as p3_mod
+    from porter.loop.state import LoopState
+    ws, ok = _loop_module(args)
+    if not ok:
+        return 2
+    st = LoopState(ws)
+    if not st.load_or_init():
+        return 2
+    module = args.module or st.pointer()
+    if module is None:
+        print("[porter] p3: 全部模块已完成")
+        return 0
+    print(f"[porter] p3: 目标模块 {module}"
+          + ("（--module 指定）" if args.module else "（断点指针）"))
+    rc = p3_mod.run_p3(ws, module, st.order)
+    if rc == 0 and st.phase_of(module) in (None, "pending"):
+        st.set_phase(module, "p3")     # 单跑 p3 记检查点；p4 由 loop/p4 推进
+    return rc
+
+
+def cmd_p4(args) -> int:
+    """P4(M)：fill 统一阶段 + 切片迁移 + L0-L4 验收 + deferred 登记/清偿。"""
+    from porter.loop import p4 as p4_mod
+    from porter.loop.state import LoopState
+    ws, ok = _loop_module(args)
+    if not ok:
+        return 2
+    st = LoopState(ws)
+    if not st.load_or_init():
+        return 2
+    module = args.module or st.pointer()
+    if module is None:
+        print("[porter] p4: 全部模块已完成")
+        return 0
+    if st.phase_of(module) == "pending":
+        print(f"[porter] p4: 模块 {module} 尚未跑 P3（先 p3 或用 loop）")
+        return 2
+    rc = p4_mod.run_p4(ws, module, st.order)
+    if rc == 0:
+        st.set_phase(module, "done")
+    return rc
+
+
+def cmd_loop(args) -> int:
+    """垂直循环：P3(M)→P4(M) ×N（拓扑序，断点重入，异常 exit 3）。"""
+    ws, ok = _loop_module(args)
+    if not ok:
+        return 2
+    return loop_mod.run_loop(ws, module=args.module,
+                             max_modules=args.max_modules)
 
 
 def _parse_device_ids(raw: str | None) -> list[str] | None:
@@ -393,6 +467,24 @@ def main(argv=None) -> int:
     p2p.add_argument("--driver", required=True, help="要晋升的驱动名")
     p2p.add_argument("--target", default=None, help="目标 OS 名（同名歧义时必须指定）")
     p2p.set_defaults(func=cmd_p2_promote)
+
+    def _add_loop_common(sp):
+        sp.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0/p1/p2）")
+        sp.add_argument("--module", default=None, help="目标模块名（缺省 = loop_state 断点指针）")
+
+    p3cmd = sub.add_parser("p3", help="P3(M)：使用面提取 + 增量映射 + gap 分类 + 判据草案 + 探针")
+    _add_loop_common(p3cmd)
+    p3cmd.set_defaults(func=cmd_p3)
+
+    p4cmd = sub.add_parser("p4", help="P4(M)：fill 统一 + 切片迁移 + L0-L4 验收 + deferred")
+    _add_loop_common(p4cmd)
+    p4cmd.set_defaults(func=cmd_p4)
+
+    loopcmd = sub.add_parser("loop", help="垂直循环：P3(M)→P4(M) ×N（拓扑序/断点重入/异常 exit 3）")
+    _add_loop_common(loopcmd)
+    loopcmd.add_argument("--max-modules", type=int, default=None,
+                         help="本次最多完成的模块数（首切片验证用）")
+    loopcmd.set_defaults(func=cmd_loop)
 
     args = ap.parse_args(argv)
     return args.func(args)

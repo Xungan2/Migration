@@ -16,11 +16,15 @@
 
 ## 提取目标
 
-三项可执行能力，每项都要经得起真实运行检验（脚本会真的执行你给的命令）：
+四项可执行能力，每项都要经得起真实运行检验（脚本会真的执行你给的命令）：
 
 1. **build**：在宿主机把目标 OS 完整构建出来的单条命令
 2. **boot**：非交互启动（自行退出）+ 日志落点 + 成败判定特征
 3. **inject_device**：让目标类别设备出现在模拟器中的注入方式
+4. **unit_test**：目标 OS 的内核态单元测试机制（机制中立——ktest/
+   KUnit 式/自研 harness/无机制都可能；命令、**最窄作用域**（如限定
+   单个 crate/测试名）、输出位置、成败判定样式）。若无机制，mechanism
+   填 "none"（消费方会把 L0 判据自动转 deferred，不是失败）
 
 ## 输出格式（必须，且只输出一个 JSON 块）
 
@@ -46,6 +50,14 @@
       "env": { "SOME_VAR": "... <DEVICE_ARGS> ..." },
       "cmd_suffix": null,
       "example_args": { "net": "..." }
+    },
+    "unit_test": {
+      "mechanism": "...",
+      "cmd": "...",
+      "timeout_sec": 1800,
+      "success_pattern": "test result: ok",
+      "fail_pattern": "test result: FAILED",
+      "scope_hint": "如何限定到单 crate/单测试（作用域越窄越快）"
     }
   },
   "missing": [
@@ -75,6 +87,12 @@
   （执行时被替换为实际设备参数）
 - `inject_device.example_args`：键为类别标签，值为该类别一个已知可工作的
   设备参数实例（至少覆盖目标类别）
+- `unit_test.mechanism`：机制短名（如 "cargo-osdk-test"）或 "none"
+- `unit_test.cmd`：跑一次测试的完整命令（含容器包裹，形态仿 build.cmd；
+  默认给**最窄可复用作用域**——如限定驱动 crate 的包级过滤）
+- `unit_test.success_pattern` / `fail_pattern`：结果输出的逐字特征子串
+  （在源码/文档中核实原文，不凭记忆）
+- `unit_test.scope_hint`：一句话说明如何进一步收窄（包/测试名）
 
 ## 字段规则
 

@@ -51,7 +51,7 @@ driver_migration_tool/
 | P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
 | P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 knowledge/splits/strategies/，样例 = strategy.md 产物原样，INDEX.json 路由 + 按需读全文；run_strategy 自动草稿入 temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
 | P2 | **引导映射 + 全局骨架**【一次性】：2a 引导映射（生命周期主轴系统级设施全景：注册枚举/MMIO/DMA/中断/锁上下文/内存设施/子系统对接 7 域 + 换思路裁定 + 接线清单；agent 分批小调用，evidence 源码核实铁律机器化）→ 2b 全局骨架（目标 OS 专属模板：crate + 空 probe + 探针宿舍 + ktest 位 + 栈接线桩 + 全部接线点；零驱动功能）→ 验收（build/boot 双信号 + 组件日志特征） | ✅ 本仓 |
-| P3+P4 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面 → 查全局映射表只补缺 → 高风险项生成探针住骨架 → runner 双信号判定 → FAIL 有界改判）+ 判据草案 criteria.json；P4(M) 迁移（映射表数据注入、按文件/片段小调用）+ 分层验收 L0-L4（累积回归）+ gap 机制 + deferred 登记（消费者落地当轮清偿）。人工关口：连续直通，仅 gap/验收超界/deferred 无法清偿时 exit 3 介入 | 设计定稿，待实现 |
+| P3+P4 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面四分类：跨模块/已映射/噪音/真缺失 → 只补缺，knowledge/maps 消费侧 INDEX 路由+域过滤注入"仅提示"）→ gap 处置分类（bypass/fill/register-fill/human 四策略）→ 判据草案 criteria.json（strategy §5 机器化，L0-L4）→ 高风险探针（≤5 条/批生成，住骨架，runner 双信号判定，FAIL 有界改判）；P4(M) fill 统一阶段（strategy=fill 的平台加法式补齐：新增 API 禁改默认 + 专属探针 + platform_patches.json 登记，失败回退 bypass）→ 迁移（文件×≤900 行切片，映射表作数据注入只翻译不研究）→ 分层验收 L0-L4（L0=runner unit_test 节机制中立、L3=qemu.log regex、累积回归）+ deferred 登记（消费者落地当轮清偿）。人工关口：连续直通，仅 gap human/验收超界/deferred 无法清偿时 exit 3 介入（answers.md 承接） | ✅ 本仓（e2e-test-retry hw-defs 首切片验证） |
 | P5 | P5a 预实测（验证能力探测：替身载波建环境基线→真实驱动偏离归因）→ P5b 系统验收（按能力组织，含 deferred 判据清偿 + 循环残余） | 设计定稿，待实现 |
 | P6 | 终态报告（已迁/未迁/不适用完整度清单）+ 知识沉淀（形态随知识库设计定）+ 上游补丁提取（VCS baseline diff） | 设计定稿，待实现 |
 
@@ -136,6 +136,37 @@ python3 porter/main.py p2-skeleton --output-dir migrations/my-first-port \
 # 知识沉淀（增量）：p2-map 末自动草稿入 temp/maps/；P2 末（首个沉淀点）
 # 人工审阅 mapping.md 后晋升：
 #   python3 porter/main.py p2-promote --driver e1000 --target asterinas
+# （此后每轮 P3(M) 末自动刷新草稿，可再次晋升——同名=版本更新替换）
+```
+
+# P3/P4：垂直循环（须先跑过 p2；断点重入幂等）
+
+```bash
+# 全自动循环（P3(M)→P4(M) ×N，拓扑序推进；--max-modules 做切片验证）
+python3 porter/main.py loop --output-dir migrations/my-first-port \
+    [--module hw-defs] [--max-modules 1]
+
+# 分步（单模块）
+python3 porter/main.py p3 --output-dir migrations/my-first-port [--module M]
+python3 porter/main.py p4 --output-dir migrations/my-first-port [--module M]
+
+# 产物（工作区级）：
+#   loop_state.json      循环状态机（order + 每模块 phase/attempts）
+#   deferred.json        deferred 判据登记（消费者落地当轮清偿，残余归 P5）
+#   platform_patches.json fill/register-fill 登记（P6 上游补丁素材）
+#   human_questions.md   exit 3 人工关口问题（answers.md 承接，被消费节自动移除）
+#   P3/<M>/reports/      surface.json（使用面四分类）/ gap_decisions.json
+#                        （处置分类）/ criteria.json（判据草案）/
+#                        probes.json（探针注册表）/ report.md
+#   P4/<M>/reports/      fill.json / migration.json（切片清单）/
+#                        acceptance.json（L0-L4 逐判据结果）/ report.md
+# 退出码：0 推进完成；1 失败；2 前置缺失；3 人工关口（gap human 队列 /
+#   模块验收 FAIL 超界（attempts≥3）/ deferred 无法清偿）——把答案写入
+#   ws/answers.md（`## <linux_api>` 或 `## retry <module>[-p3|-p4]`）重跑即续。
+# 验收分层：L1/L2=runner build/boot 双信号；L0=runner unit_test 节
+#   （机制中立：P0 skill 探明；存量工作区由 loop 首次自动补探回填，
+#   reviewed=false；无机制则 L0 判据自动转 deferred）；L3=qemu.log regex
+#   （本模块 + 已 done 模块累积回归）；e2e 归 P5。
 ```
 
 ## 横切原则（实现与后续阶段必须遵守）
