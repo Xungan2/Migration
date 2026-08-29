@@ -256,6 +256,24 @@ def _slices(files: list[Path], max_lines: int = MAX_LINES_PER_SLICE
     return out
 
 
+def _src_line_counts(crate: Path) -> dict[str, int]:
+    """crate src/ 各 .rs 行数快照（跨片内容守卫用）。"""
+    src = crate / "src"
+    if not src.is_dir():
+        return {}
+    return {p.name: sum(1 for _ in p.open(encoding="utf-8",
+                                          errors="replace"))
+            for p in sorted(src.glob("*.rs"))}
+
+
+def _shrunk_files(before: dict[str, int], after: dict[str, int],
+                  tolerance: int = 5) -> list[str]:
+    """既有文件行数显著缩水清单（P4-migrate 契约 = 只追加不动别片）。"""
+    return [f"{name} {before[name]}→{after.get(name, 0)}"
+            for name in before
+            if before[name] - after.get(name, 0) > tolerance]
+
+
 def _mapping_data_block(ws: Path, surface: dict, module: str) \
         -> tuple[str, str]:
     """该模块的映射数据渲染（P4 只翻译不研究：全部所需条目打包注入）。"""
@@ -301,6 +319,11 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                   if c["kind"] == "unit_test" and not c.get("deferred_by")]
     ut_block = "\n".join(
         f"- 测试函数名：{c['expr']}（判据 id {c['id']}）" for c in unit_tests)
+    l3_crits = [c for c in crit["criteria"]
+                if c["kind"] in ("log_pattern", "counter")
+                and not c.get("deferred_by")]
+    l3_block = "\n".join(
+        f"- [{c['id']}] 正则 `{c['expr']}`" for c in l3_crits)
     map_block, redesign_block = _mapping_data_block(ws, surface, module)
     mod_json = json.loads((mdir / "module.json").read_text(encoding="utf-8"))
     skill = agent.load_skill("P4-migrate")
@@ -311,12 +334,15 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
     done_keys = {(s["file"], s["start"], s["end"]) for s in mig["slices"]}
     failures: list[dict] = []
 
-    existing = sorted(p.name for p in (crate / "src").glob("*.rs")) \
-        if (crate / "src").exists() else []
     for f, start, end in slices:
         key = (f.name, start, end)
         if key in done_keys:
             continue
+        # 每片重算 existing 与行数快照（2026-08-30 事故：一次性快照误导
+        # moved_2 片以为 hw_defs.rs 不存在而"新建"覆盖前片 1472 行成果）
+        existing = sorted(p.name for p in (crate / "src").glob("*.rs")) \
+            if (crate / "src").exists() else []
+        before_lines = _src_line_counts(crate)
         print(f"[porter] P4: 迁移切片 {f.name}:{start}-{end} …")
         prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
                   f"- 驱动 crate：`{crate}`（src/ 现有 {existing}）\n"
@@ -329,7 +355,13 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                   f"\n## 换思路裁定（全局）\n{redesign_block or '无'}\n"
                   f"\n## 需落的单元测试（ktest，写进本模块代码）\n"
                   f"{ut_block or '本切片无需（判据属其他切片/无）'}\n"
-                  f"\n## 任务\n把本切片重写为安全 Rust 进驱动 crate"
+                  f"\n## L3 可观测判据（本模块验收将按正则查启动日志）\n"
+                  f"{l3_block or '无'}\n"
+                  + ("若上表非空：迁移须在组件/probe 初始化路径接线**对真实"
+                     "设备的调用**（QEMU 已挂本驱动设备），使启动日志出现"
+                     "满足正则的行；日志措辞自行设计但必须命中正则。\n"
+                     if l3_crits else "")
+                  + f"\n## 任务\n把本切片重写为安全 Rust 进驱动 crate"
                   f"（目标文件命名贴近模块职责，如 {module.replace('-', '_')}"
                   f".rs；首片建 mod 声明于 lib.rs，后续片只追加内容）。"
                   f"完成后输出紧凑 JSON 块。")
@@ -354,6 +386,17 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                                           label=f"P4_{module}_"
                                                 f"{f.name}_{start}")
                 if b["ok"]:
+                    shrunk = _shrunk_files(before_lines,
+                                           _src_line_counts(crate))
+                    if shrunk:
+                        print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                              f"覆盖了既有内容（{'; '.join(shrunk)}）——判 FAIL")
+                        err_info = ("\n\n---\n\n## 上一次的严重问题（本片 "
+                                    "重做）\n你覆盖/删除了既有文件内容："
+                                    f"{'; '.join(shrunk)}。契约是**只追加、"
+                                    "不动别片已写内容**。请把被删内容完整"
+                                    "恢复后重做本片（重新输出完整 JSON）。")
+                        continue
                     ok = True
                     break
                 log_path = ws / "P4" / "logs" / f"P4_{module}_{f.name}_" \

@@ -434,6 +434,48 @@ def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
 
 # ---------- 步骤 6：探针 ----------
 
+def _fix_probe_compile(ws: Path, target_os: Path, module: str, p3m: Path,
+                       reg: dict, driver: str, rnd: int) -> bool:
+    """探针 build FAIL 时带编译错误回炉（同迁移切片的反馈模式，≤2 次）。"""
+    log_path = ws / "P3" / "logs" / f"P3_{module}_probe_build_r{rnd}.log"
+    err_tail = ""
+    if log_path.exists():
+        err_tail = "\n".join(
+            ln for ln in log_path.read_text(encoding="utf-8",
+                                            errors="replace").splitlines()
+            if ln.startswith("error") or " --> " in ln)[:3000]
+    if not err_tail:
+        return False
+    skill = agent.load_skill("P3-probe")
+    active = [p for p in reg["probes"] if p.get("status") == "active"]
+    texts = "\n\n".join(f"### {p['name']}（claim={p['claim']}）\n```rust\n"
+                        f"{p['rust']}\n```" for p in active)
+    prompt = (f"{skill}\n\n---\n\n## 背景\n以下探针函数编译失败（目标树："
+              f"`{target_os}`，crate `{driver}`）。逐个修复（通常是 trait 未"
+              "导入/方法名笔误/所有权移动类小错），**保持 name 与 claim 不变、"
+              "只修正实现**。\n\n## 编译错误（节选）\n```\n"
+              f"{err_tail}\n```\n\n## 待修探针\n{texts}\n"
+              f"\n## 任务\n输出修正后的完整探针函数（紧凑 JSON 块，同生成"
+              "schema）。")
+    for attempt in range(1, 3):
+        _parsed, ok_items, errs = probe_lib.call_probe_gen(
+            prompt, target_os, p3m / "logs" / f"P3F_fix_r{rnd}_{attempt}")
+        if ok_items and not errs:
+            by_name = {p["name"]: p for p in ok_items}
+            n = 0
+            for p in reg["probes"]:
+                if p["name"] in by_name:
+                    p["rust"] = by_name[p["name"]]["rust"]
+                    n += 1
+            if n:
+                probe_lib.save_registry(p3m / "reports" / "probes.json", reg)
+                print(f"[porter] P3: 探针编译回炉修正 {n} 个——重建")
+                return True
+        prompt += ("\n\n---\n\n## 上一次输出的问题（重输出完整 JSON）\n"
+                   + "; ".join(errs[:8] or ["无 JSON 输出"]))
+    return False
+
+
 def _probe_boot_ok(ws: Path, target_os: Path, proj: dict,
                    label: str) -> tuple[bool, str]:
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
@@ -454,9 +496,9 @@ def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
     driver = Path(proj["linux_driver"]).name
     skill = agent.load_skill("P3-probe")
     reg = probe_lib.load_registry(reg_path)
-    known = {p["name"] for p in reg["probes"]}
-    todo = [e for e in risky if not any(p["claim"] == e["linux_api"]
-                                        for p in reg["probes"])]
+    claimed = ({p["claim"] for p in reg["probes"]} |
+               probe_lib.known_claims(ws, order, module))
+    todo = [e for e in risky if e["linux_api"] not in claimed]
     gen_failed = 0
     for bi in range(0, len(todo), probe_lib.GEN_BATCH):
         chunk = todo[bi:bi + probe_lib.GEN_BATCH]
@@ -506,7 +548,10 @@ def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
         b = probe_mod.probe_build(ws / "P3", target_os, runner,
                                   label=f"P3_{module}_probe_build_r{rnd}")
         if not b["ok"]:
-            print(f"[porter] P3: 探针 build FAIL（轮 {rnd}）")
+            print(f"[porter] P3: 探针 build FAIL（轮 {rnd}）——带错误回炉")
+            if rnd < probe_lib.MAX_ROUNDS and _fix_probe_compile(
+                    ws, target_os, module, p3m, reg, driver, rnd):
+                continue
             return 1
         ok, log = _probe_boot_ok(ws, target_os, proj,
                                  f"P3_{module}_probe_boot_r{rnd}")

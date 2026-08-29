@@ -126,8 +126,8 @@ def sync_probes_rs(target_os: Path, driver: str,
 
 
 def collect_sections(ws: Path, order: list[str],
-                     current_module: str, current_reg_path: Path,
-                     kind: str = "P3") -> list[tuple[str, list[dict]]]:
+                      current_module: str, current_reg_path: Path,
+                      kind: str = "P3") -> list[tuple[str, list[dict]]]:
     """聚合全部模块的探针节（已 done/进行中的 P3 节 + 当前调用方的节）。
 
     kind=P3：P3/<M>/reports/probes.json；kind=P4：fill_probes.json。
@@ -147,6 +147,22 @@ def collect_sections(ws: Path, order: list[str],
     if reg.get("probes"):
         sections.append((f"{kind}({current_module})", reg["probes"]))
     return sections
+
+
+def known_claims(ws: Path, order: list[str], skip_module: str) -> set[str]:
+    """其他模块探针注册表已覆盖（含 downgraded——其主张已降级 gap 不会再
+    进 risky）的 claim 集。跨模块去重用：同一主张不重复生成探针。"""
+    claims: set[str] = set()
+    for m in order:
+        if m == skip_module:
+            continue
+        for k in ("P3", "P4"):
+            p = ws / k / m / "reports" / (
+                "probes.json" if k == "P3" else "fill_probes.json")
+            for probe in load_registry(p).get("probes", []):
+                if probe.get("claim"):
+                    claims.add(probe["claim"])
+    return claims
 
 
 def judge(log_text: str, names: list[str]) -> dict[str, str]:
