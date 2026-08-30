@@ -240,7 +240,58 @@ def test_probes():
     ok("downgraded 剔除", "p_dead" not in text1)
     p2 = PB.sync_probes_rs(tmp, "drv", sections)
     ok("再生成确定性", p2.read_text(encoding="utf-8") == text1)
+    # P2 预生成注册表：known_claims / collect_sections / marker
+    ws = tmp / "ws"
+    (ws / "P2" / "reports").mkdir(parents=True)
+    (ws / "P3" / "modA" / "reports").mkdir(parents=True)
+    PB.save_registry(ws / "P2" / "reports" / "probes.json",
+                     {"probes": [{"name": "p_pre", "rust": "fn p_pre() {}",
+                                  "claim": "prefetch", "status": "active"}]})
+    PB.save_registry(ws / "P3" / "modA" / "reports" / "probes.json",
+                     {"probes": [{"name": "p_a", "rust": "fn p_a() {}",
+                                  "claim": "readl", "status": "active"}]})
+    claims = PB.known_claims(ws, ["modA"], "(pregen)")
+    ok("known_claims 含 P2 注册表", claims == {"readl"}, str(claims))
+    claims2 = PB.known_claims(ws, ["modA"], "modB")
+    ok("known_claims 跨表并集",
+       claims2 == {"readl", "prefetch"}, str(claims2))
+    sections = PB.collect_sections(ws, ["modA"], "modB",
+                                   ws / "P3" / "modB" / "reports" /
+                                   "probes.json", kind="P3")
+    ok("collect_sections 含 P2 节",
+       [m for m, _ in sections] == ["P2(pregen)", "P3(modA)"],
+       str([m for m, _ in sections]))
+    sections_self = PB.collect_sections(ws, ["modA"], "(pregen)",
+                                        ws / "P2" / "reports" / "probes.json",
+                                        kind="P2")
+    ok("预生成自身调用不重复 P2 节",
+       [m for m, _ in sections_self] == ["P3(modA)", "P2(pregen)"],
+       str([m for m, _ in sections_self]))
+    ok("marker_of 路径推断",
+       PB.marker_of(ws / "P2" / "reports" / "probes.json") == "P2(pregen)"
+       and PB.marker_of(ws / "P3" / "modA" / "reports" / "probes.json")
+       == "P3(modA)")
     shutil.rmtree(tmp)
+
+
+# ---------- E2. ut_verify 烟测 ----------
+
+def test_ut_verify():
+    print("E2. ut_verify")
+    from porter.loop import ut_verify as UV
+    ansi = "test result: \x1b[32mok\x1b[39m. 4 passed; 0 failed; 0 filtered\n"
+    ok("verify 命中（ANSI 剥离）",
+       UV.verify_output(ansi, "passed; 0 failed;")[0])
+    ok("verify 失败特征命中即拒",
+       not UV.verify_output(ansi + "\nfailures:\n", "passed; 0 failed;",
+                            "failures:")[0])
+    ok("verify ANSI 剥离后逐字可命中",
+       UV.verify_output(ansi, "test result: ok")[0])
+    ok("verify 缺成功特征",
+       not UV.verify_output("no tests here", "passed; 0 failed;")[0])
+    fb = UV.feedback_block("输出未见成功特征 'x'", "line1\nline2")
+    ok("反馈块含说明与尾部", "输出未见成功特征" in fb and "line2" in fb
+       and "```" in fb)
 
 
 # ---------- F. p4 机制 ----------
@@ -295,6 +346,7 @@ if __name__ == "__main__":
     test_criteria()
     test_surface()
     test_probes()
+    test_ut_verify()
     test_p4_mechanics()
     print(f"\n{'='*40}\n{'ALL PASS' if FAIL == 0 else 'FAILURES'}: "
           f"{PASS} ok, {FAIL} fail")

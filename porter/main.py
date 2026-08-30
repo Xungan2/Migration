@@ -287,6 +287,15 @@ def cmd_p2_skeleton(args) -> int:
                             device_ids=_parse_device_ids(args.device_ids))
 
 
+def cmd_p2_probes(args) -> int:
+    """P2c 探针预生成（幂等补跑；存量工作区前置化入口）。"""
+    from porter.bootstrap import pregen as p2c
+    ws, _driver_root, target_os = _p2_context(args)
+    if target_os is None:
+        return 2
+    return p2c.run_pregen(ws, target_os, max_batches=args.max_batches)
+
+
 def _parse_knowledge_table(rpt: Path) -> list[str]:
     """解析 P1-knowledge.md「本步样例草稿与价值判定」表格的数据行
     （跳过表头与 |---| 分隔行）。"""
@@ -462,6 +471,12 @@ def main(argv=None) -> int:
     p2s.add_argument("--output-dir", required=True, help="迁移工作区根目录")
     _add_device_ids(p2s)
     p2s.set_defaults(func=cmd_p2_skeleton)
+
+    p2pr = sub.add_parser("p2-probes", help="P2c 探针预生成（幂等补跑；风险主张前置验证，P3 探针步骤退化为补新）")
+    p2pr.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    p2pr.add_argument("--max-batches", type=int, default=None,
+                      help="本次最多生成批数（≤5 条/批；缺省全量）")
+    p2pr.set_defaults(func=cmd_p2_probes)
 
     p2p = sub.add_parser("p2-promote", help="映射知识晋升：temp/maps → knowledge/maps（P2 末/循环中人工决定执行）")
     p2p.add_argument("--driver", required=True, help="要晋升的驱动名")

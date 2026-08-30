@@ -37,18 +37,6 @@ from . import surface as surface_mod
 AGENT_TIMEOUT_SEC = 900
 
 
-def _boot_log_text(target_os: Path, runner: dict) -> str:
-    lf = (runner.get("boot") or {}).get("log_file")
-    if not lf:
-        return ""
-    p = Path(lf) if Path(lf).is_absolute() else target_os / lf
-    try:
-        return p.read_text(encoding="utf-8", errors="replace") if p.exists() \
-            else ""
-    except OSError:
-        return ""
-
-
 def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict] | None:
     proj_path = ws / "project.json"
     if not proj_path.exists():
@@ -432,227 +420,48 @@ def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
     return 0
 
 
-# ---------- 步骤 6：探针 ----------
-
-def _fix_probe_compile(ws: Path, target_os: Path, module: str, p3m: Path,
-                       reg: dict, driver: str, rnd: int) -> bool:
-    """探针 build FAIL 时带编译错误回炉（同迁移切片的反馈模式，≤2 次）。"""
-    log_path = ws / "P3" / "logs" / f"P3_{module}_probe_build_r{rnd}.log"
-    err_tail = ""
-    if log_path.exists():
-        err_tail = "\n".join(
-            ln for ln in log_path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines()
-            if ln.startswith("error") or " --> " in ln)[:3000]
-    if not err_tail:
-        return False
-    skill = agent.load_skill("P3-probe")
-    active = [p for p in reg["probes"] if p.get("status") == "active"]
-    texts = "\n\n".join(f"### {p['name']}（claim={p['claim']}）\n```rust\n"
-                        f"{p['rust']}\n```" for p in active)
-    prompt = (f"{skill}\n\n---\n\n## 背景\n以下探针函数编译失败（目标树："
-              f"`{target_os}`，crate `{driver}`）。逐个修复（通常是 trait 未"
-              "导入/方法名笔误/所有权移动类小错），**保持 name 与 claim 不变、"
-              "只修正实现**。\n\n## 编译错误（节选）\n```\n"
-              f"{err_tail}\n```\n\n## 待修探针\n{texts}\n"
-              f"\n## 任务\n输出修正后的完整探针函数（紧凑 JSON 块，同生成"
-              "schema）。")
-    for attempt in range(1, 3):
-        _parsed, ok_items, errs = probe_lib.call_probe_gen(
-            prompt, target_os, p3m / "logs" / f"P3F_fix_r{rnd}_{attempt}")
-        if ok_items and not errs:
-            by_name = {p["name"]: p for p in ok_items}
-            n = 0
-            for p in reg["probes"]:
-                if p["name"] in by_name:
-                    p["rust"] = by_name[p["name"]]["rust"]
-                    n += 1
-            if n:
-                probe_lib.save_registry(p3m / "reports" / "probes.json", reg)
-                print(f"[porter] P3: 探针编译回炉修正 {n} 个——重建")
-                return True
-        prompt += ("\n\n---\n\n## 上一次输出的问题（重输出完整 JSON）\n"
-                   + "; ".join(errs[:8] or ["无 JSON 输出"]))
-    return False
-
-
-def _probe_boot_ok(ws: Path, target_os: Path, proj: dict,
-                   label: str) -> tuple[bool, str]:
-    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-    r = probe_mod.probe_boot_with_device(ws / "P3", target_os, runner,
-                                         proj.get("category") or [],
-                                         label=label)
-    return bool(r.get("ok")), _boot_log_text(target_os, runner)
-
+# ---------- 步骤 6：探针（共享生命周期，见 probes.run_probe_lifecycle） ----------
 
 def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
                  p3m: Path, proj: dict, surface: dict,
                  order: list[str]) -> int:
+    """P3(M) 探针补新：只处理本模块面新增的风险主张（P2 预生成与其他
+    模块已探测的 claim 自动去重跳过——probes.known_claims）。"""
     reg_path = p3m / "reports" / "probes.json"
     risky = probe_lib.filter_risky(ws, surface)
-    if not risky and not probe_lib.load_registry(reg_path).get("probes"):
-        print(f"[porter] P3: {module} 无高风险条目——探针步骤跳过")
-        return 0
-    driver = Path(proj["linux_driver"]).name
-    skill = agent.load_skill("P3-probe")
-    reg = probe_lib.load_registry(reg_path)
-    claimed = ({p["claim"] for p in reg["probes"]} |
+    claimed = ({p["claim"] for p in probe_lib.load_registry(reg_path)
+                .get("probes", [])} |
                probe_lib.known_claims(ws, order, module))
     todo = [e for e in risky if e["linux_api"] not in claimed]
-    gen_failed = 0
-    for bi in range(0, len(todo), probe_lib.GEN_BATCH):
-        chunk = todo[bi:bi + probe_lib.GEN_BATCH]
-        lines = "\n".join(
-            f"- {e['linux_api']}（{e['verdict']}）→ {e['target'][:150]}；"
-            f"evidence={e['evidence'][:100]};notes={e['notes'][:100]}"
-            for e in chunk)
-        prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
-                  f"- 驱动 crate：`{target_os / 'kernel' / 'core' / 'comps' / driver}`"
-                  f"（骨架已有空 probe 注册仪式；探针函数将被 porter 追加进 "
-                  f"src/probes.rs 并在组件 init 时调用）\n"
-                  f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
-                  f"- 只验证映射主张本身，禁止实现驱动功能\n"
-                  f"\n## 待探针的映射条目（本批 {len(chunk)} 条）\n{lines}\n"
-                  f"\n## 任务\n逐条产出探针函数（紧凑 JSON 块）。")
-        got: list[dict] = []
-        feedback = ""
-        for attempt in range(1, 3):
-            parsed, ok_items, errs = probe_lib.call_probe_gen(
-                prompt + feedback, target_os, p3m / "logs" /
-                f"P3P_b{bi // probe_lib.GEN_BATCH}_R{attempt}")
-            if ok_items and not errs:
-                got = ok_items
-                break
-            feedback = ("\n\n---\n\n## 上一次输出的问题（修正后重输出完整 "
-                        "JSON）\n" + "; ".join(errs[:8] or ["无 JSON 输出"]))
-        if got:
-            reg["probes"].extend(got)
-            probe_lib.save_registry(reg_path, reg)
-        else:
-            gen_failed += len(chunk)
-            print(f"[porter] P3: 探针生成失败批（{len(chunk)} 条）——登记")
-    if gen_failed and not reg["probes"]:
-        print(f"[porter] P3: {module} 探针生成全败（{gen_failed} 条候选）"
-              "——exit 1（attempts 由 loop 判界）")
-        return 1
-    # 同步 probes.rs + 判定
-    for rnd in range(1, probe_lib.MAX_ROUNDS + 1):
-        sections = probe_lib.collect_sections(ws, order, module, reg_path,
-                                              kind="P3")
-        probe_lib.sync_probes_rs(target_os, driver, sections)
-        names = [p["name"] for p in reg["probes"]
-                 if p["status"] == "active"]
-        if not names:
-            break
-        runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-        b = probe_mod.probe_build(ws / "P3", target_os, runner,
-                                  label=f"P3_{module}_probe_build_r{rnd}")
-        if not b["ok"]:
-            print(f"[porter] P3: 探针 build FAIL（轮 {rnd}）——带错误回炉")
-            if rnd < probe_lib.MAX_ROUNDS and _fix_probe_compile(
-                    ws, target_os, module, p3m, reg, driver, rnd):
-                continue
-            return 1
-        ok, log = _probe_boot_ok(ws, target_os, proj,
-                                 f"P3_{module}_probe_boot_r{rnd}")
-        verdicts = probe_lib.judge(log, names)
-        bad = [n for n, v in verdicts.items() if v != "ok"]
-        if ok and not bad:
-            reg["history"] = reg.get("history", []) + [
-                {"round": rnd, "result": "all-pass"}]
-            probe_lib.save_registry(reg_path, reg)
-            print(f"[porter] P3: {module} 探针 {len(names)} 个全 PASS")
-            return 0
-        print(f"[porter] P3: 探针 FAIL/missing: {bad}（轮 {rnd}）——回映射"
-              "改判")
-        if rnd == probe_lib.MAX_ROUNDS:
-            break
-        # 带失败反馈回映射改判（只处理失败项）
-        rejudged = _rejudge_failed(ws, target_os, module, p3m, reg, bad)
-        if not rejudged:
-            break
-    # 有界改判后仍败：降级 gap + 走分类路径（重读映射——改判轮可能已更新）
-    mapping = _load_mapping(ws / "P2")
-    still_bad = [p for p in reg["probes"] if p["status"] == "active"]
-    downgraded = []
-    index = {e["linux_api"]: e for e in mapping["entries"]}
-    for p in still_bad:
-        e = index.get(p["claim"])
-        if e:
-            e["notes"] = (e["notes"].rstrip() +
-                          f"｜探针 FAIL 降级 gap(P3{module})").lstrip("｜")
-            e["verdict"] = "gap"
-            e["confidence"] = "low"
-            downgraded.append(p["claim"])
-        p["status"] = "downgraded"
-    if downgraded:
-        _save(mapping, ws / "P2")
-        probe_lib.save_registry(reg_path, reg)
-        sections = probe_lib.collect_sections(ws, order, module, reg_path,
-                                              kind="P3")
-        probe_lib.sync_probes_rs(target_os, driver, sections)
-        # 重新过一遍 gap 分类（只处理新降级项）
-        rc = _step_gap_decisions(ws, target_os, module, p3m,
+    if not todo and not probe_lib.load_registry(reg_path).get("probes"):
+        print(f"[porter] P3: {module} 无新增风险条目（预生成/他模块已覆盖）"
+              "——探针步骤跳过")
+        return 0
+
+    def _after_downgrade(ws_: Path, claims: list[str]) -> None:
+        """降级项重过 gap 分类（带本模块使用位置上下文）。"""
+        rc = _step_gap_decisions(ws_, target_os, module, p3m,
                                  _reload_surface(p3m))
         if rc != 0:
-            return rc
-    probe_lib.save_registry(reg_path, reg)
-    return 0
+            print(f"[porter] P3: {module} 降级项 gap 分类 rc={rc}（loop "
+                  "人工关口接管）")
+            _step_probes.last_rc = rc      # 冒泡给调用方（见 run_p3）
+
+    _step_probes.last_rc = 0
+    rc = probe_lib.run_probe_lifecycle(
+        ws, target_os, proj, order, reg_path,
+        label=f"P3_{module}", todo_entries=todo,
+        logs_dir=p3m / "logs", boot_ws=ws / "P3",
+        usage_locs=surface.get("usage_locations") or {},
+        after_downgrade=_after_downgrade)
+    if rc != 0:
+        return rc
+    return int(_step_probes.last_rc or 0)
 
 
 def _reload_surface(p3m: Path) -> dict:
     return json.loads((p3m / "reports" / "surface.json").read_text(
         encoding="utf-8"))
-
-
-def _rejudge_failed(ws: Path, target_os: Path, module: str, p3m: Path,
-                    reg: dict, bad_names: list[str]) -> bool:
-    """带 FAIL 反馈回映射改判：更新条目 + 重生成探针。成功返回 True。"""
-    mapping = _load_mapping(ws / "P2")
-    index = {e["linux_api"]: e for e in mapping["entries"]}
-    items = []
-    by_claim = {p["claim"]: p for p in reg["probes"]}
-    for n in bad_names:
-        p = next((x for x in reg["probes"] if x["name"] == n), None)
-        if p and p["claim"] in index:
-            items.append((p, index[p["claim"]]))
-    if not items:
-        return False
-    skill = agent.load_skill("P3-probe")
-    lines = "\n".join(
-        f"- {e['linux_api']}：当前裁定 {e['verdict']} → {e['target'][:150]}；"
-        f"探针观察到 FAIL" for _p, e in items)
-    prompt = (f"{skill}\n\n---\n\n## 背景\n以下映射主张的探针启动期实测 FAIL"
-              f"（目标树：`{target_os}`）。逐条改判：换备选 API / 修正用法 / "
-              f"降级 gap（target 写缺什么+绕过）。\n{lines}\n"
-              f"\n## 任务\n输出紧凑 JSON：{{\"entries\":[…同映射 schema…],"
-              f"\"probes\":[{{\"claim\",\"name\",\"rust\"}}]}}"
-              f"（仍可信的主张可原样重给探针）。")
-    rc, out = agent.run_agent(prompt, workdir=target_os,
-                              log_stem=str(p3m / "logs" / "P3J_rejudge"),
-                              timeout_sec=AGENT_TIMEOUT_SEC)
-    parsed = agent.extract_json(out) if rc == 0 else None
-    if not (parsed and isinstance(parsed.get("entries"), list)):
-        return False
-    n_fixed = 0
-    for e in parsed["entries"]:
-        old = index.get(e.get("linux_api"))
-        if not old:
-            continue
-        for k in ("verdict", "target", "evidence", "risk", "confidence"):
-            if e.get(k):
-                old[k] = e[k]
-        old["notes"] = (old["notes"].rstrip() +
-                        f"｜探针FAIL改判(P3{module})").lstrip("｜")
-        n_fixed += 1
-    _save(mapping, ws / "P2")
-    new_probes, _errs = probe_lib.validate_probes(parsed.get("probes") or [])
-    for np in new_probes:
-        for p in reg["probes"]:
-            if p["claim"] == np["claim"]:
-                p["rust"] = np["rust"]
-                p["status"] = "active"
-    return n_fixed > 0
 
 
 # ---------- 主入口 ----------

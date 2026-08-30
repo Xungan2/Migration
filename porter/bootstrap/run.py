@@ -36,6 +36,7 @@ def _acceptance(ws: Path, target_os: Path) -> bool:
 
     # 组件日志特征（boot 日志 = runner.boot.log_file，相对目标树根）
     patterns_hit = {}
+    probe_fails = 0
     if boot_ok:
         bo = runner["boot"]
         log_file = Path(bo["log_file"]) if bo.get("log_file") else None
@@ -54,11 +55,17 @@ def _acceptance(ws: Path, target_os: Path) -> bool:
             patterns_hit[pat] = n
             if n == 0:
                 boot_ok = False
+        # P2c 预生成探针：boot 日志不得出现任何 FAIL 行（有 active 探针时）
+        import re as _re
+        probe_fails = len(_re.findall(r"PROBE_\S+ FAIL", boot_log))
+        if probe_fails:
+            boot_ok = False
     report = {
         "phase": "P2",
         "time": datetime.now().isoformat(),
         "results": results,
         "skeleton_log_patterns": patterns_hit,
+        "probe_fail_lines": probe_fails,
         "pass": all(r["ok"] for r in results) and boot_ok,
     }
     (p2 / "reports" / "acceptance.json").write_text(
@@ -91,5 +98,15 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
     rc = skeleton.run_skeleton(ws, target_os, device_ids)
     if rc != 0:
         return rc
+
+    # 2c 探针预生成（贵且可复用的验证前置；失败不阻塞验收——缺口可
+    # p2-probes 幂等补跑）
+    from . import pregen
+    rc = pregen.run_pregen(ws, target_os)
+    if rc == 2:
+        return 2
+    if rc != 0:
+        print("[porter] P2: ⚠ 探针预生成存在失败（详见 "
+              "P2/reports/pregen_report.md）——可 p2-probes 断点补跑")
 
     return 0 if _acceptance(ws, target_os) else 1

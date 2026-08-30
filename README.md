@@ -48,9 +48,9 @@ driver_migration_tool/
 
 | 阶段 | 职责 | 状态 |
 |---|---|---|
-| P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
+| P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别 + unit_test 烟测（agent 探明单测机制须附 smoke_cmd 并实跑过；门禁真跑复核——机制主张"agent 说"变"机器验"）。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
 | P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 knowledge/splits/strategies/，样例 = strategy.md 产物原样，INDEX.json 路由 + 按需读全文；run_strategy 自动草稿入 temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
-| P2 | **引导映射 + 全局骨架**【一次性】：2a 引导映射（生命周期主轴系统级设施全景：注册枚举/MMIO/DMA/中断/锁上下文/内存设施/子系统对接 7 域 + 换思路裁定 + 接线清单；agent 分批小调用，evidence 源码核实铁律机器化）→ 2b 全局骨架（目标 OS 专属模板：crate + 空 probe + 探针宿舍 + ktest 位 + 栈接线桩 + 全部接线点；零驱动功能）→ 验收（build/boot 双信号 + 组件日志特征） | ✅ 本仓 |
+| P2 | **引导映射 + 全局骨架**【一次性】：2a 引导映射（生命周期主轴系统级设施全景：注册枚举/MMIO/DMA/中断/锁上下文/内存设施/子系统对接 7 域 + 换思路裁定 + 接线清单；agent 分批小调用，evidence 源码核实铁律机器化）→ 2b 全局骨架（目标 OS 专属模板：crate + 空 probe + 探针宿舍 + ktest 位 + 栈接线桩 + 全部接线点；零驱动功能）→ **2c 探针预生成**（全模块使用面并集 ∩ 高风险映射 − 已探 claim，≤5 条/批；贵且长寿命的验证前置到流程头部的稳定阶段，P3 探针步骤退化为补新；残余 FAIL 降级 gap 留消费者模块处置）→ 验收（build/boot 双信号 + 组件日志特征 + 无 PROBE FAIL 行） | ✅ 本仓 |
 | P3+P4 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面四分类：跨模块/已映射/噪音/真缺失 → 只补缺，knowledge/maps 消费侧 INDEX 路由+域过滤注入"仅提示"）→ gap 处置分类（bypass/fill/register-fill/human 四策略）→ 判据草案 criteria.json（strategy §5 机器化，L0-L4）→ 高风险探针（≤5 条/批生成，住骨架，runner 双信号判定，FAIL 有界改判）；P4(M) fill 统一阶段（strategy=fill 的平台加法式补齐：新增 API 禁改默认 + 专属探针 + platform_patches.json 登记，失败回退 bypass）→ 迁移（文件×≤900 行切片，映射表作数据注入只翻译不研究）→ 分层验收 L0-L4（L0=runner unit_test 节机制中立、L3=qemu.log regex、累积回归）+ deferred 登记（消费者落地当轮清偿）。人工关口：连续直通，仅 gap human/验收超界/deferred 无法清偿时 exit 3 介入（answers.md 承接） | ✅ 本仓（e2e-test-retry hw-defs 首切片验证） |
 | P5 | P5a 预实测（验证能力探测：替身载波建环境基线→真实驱动偏离归因）→ P5b 系统验收（按能力组织，含 deferred 判据清偿 + 循环残余） | 设计定稿，待实现 |
 | P6 | 终态报告（已迁/未迁/不适用完整度清单）+ 知识沉淀（形态随知识库设计定）+ 上游补丁提取（VCS baseline diff） | 设计定稿，待实现 |
@@ -122,6 +122,15 @@ python3 porter/main.py p2-map --output-dir migrations/my-first-port
 python3 porter/main.py p2-skeleton --output-dir migrations/my-first-port \
     [--device-ids ...]
 
+# 2c 探针预生成（存量工作区补跑入口；幂等：已探 claim 跨注册表去重，
+# 断点重跑只补缺口；--max-batches 可先试跑）
+python3 porter/main.py p2-probes --output-dir migrations/my-first-port \
+    [--max-batches 3]
+# 产物：P2/reports/probes.json（预生成注册表）+ pregen_report.md；
+# 探针住骨架 src/probes.rs（每次启动重跑=回归哨网）；P2/logs/ 留痕。
+# 残余 FAIL 降级 gap 后不做四策略处置——留给消费者模块的 P3(M)
+# 带使用位置上下文处理。
+
 # 产物（工作区 <ws>/P2/）：
 #   mapping.json        映射真值源（P2a 起，P3 增量累积；条目 9 字段+
 #                       domain，evidence 为目标树 file:line 机器校验）
@@ -164,8 +173,9 @@ python3 porter/main.py p4 --output-dir migrations/my-first-port [--module M]
 #   模块验收 FAIL 超界（attempts≥3）/ deferred 无法清偿）——把答案写入
 #   ws/answers.md（`## <linux_api>` 或 `## retry <module>[-p3|-p4]`）重跑即续。
 # 验收分层：L1/L2=runner build/boot 双信号；L0=runner unit_test 节
-#   （机制中立：P0 skill 探明；存量工作区由 loop 首次自动补探回填，
-#   reviewed=false；无机制则 L0 判据自动转 deferred）；L3=qemu.log regex
+#   （机制中立：P0 skill 探明且 smoke_cmd 实跑过；存量工作区由 loop 首次
+#   自动补探回填并真跑烟测复核（第二道），无机制则 L0 判据自动转
+#   deferred）；L3=qemu.log regex
 #   （本模块 + 已 done 模块累积回归）；e2e 归 P5。
 ```
 

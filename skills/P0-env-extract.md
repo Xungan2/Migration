@@ -24,7 +24,16 @@
 4. **unit_test**：目标 OS 的内核态单元测试机制（机制中立——ktest/
    KUnit 式/自研 harness/无机制都可能；命令、**最窄作用域**（如限定
    单个 crate/测试名）、输出位置、成败判定样式）。若无机制，mechanism
-   填 "none"（消费方会把 L0 判据自动转 deferred，不是失败）
+   填 "none"（消费方会把 L0 判据自动转 deferred，不是失败）。
+   **三条硬性要求**（2026-08-30 实测教训固化，违反即被烟测打回）：
+   - **cmd 必须把结果文本送达 stdout**（机制写文件就在命令尾部拼接
+     `cat <结果文件>`——runner 只捕获标准输出；输出落点须在测试
+     harness 源码里核实并给 file:line 证据，禁止凭印象断言）
+   - **成败特征避开 ANSI 包裹的 token**（控制字符会把 `ok` 包成
+     `\e[32mok\e[39m`；选无色区子串，如 `passed; 0 failed;`）
+   - **附 smoke_cmd 并实跑过**：在目标树里挑最小的已有单测 crate 用
+     构造的命令形态实际运行一次，观察到的结果行原文写进 notes——
+     P0 门禁会真跑 smoke_cmd 机器复核你的主张
 
 ## 输出格式（必须，且只输出一个 JSON 块）
 
@@ -57,7 +66,8 @@
       "timeout_sec": 1800,
       "success_pattern": "test result: ok",
       "fail_pattern": "test result: FAILED",
-      "scope_hint": "如何限定到单 crate/单测试（作用域越窄越快）"
+      "scope_hint": "如何限定到单 crate/单测试（作用域越窄越快）",
+      "smoke_cmd": "...（最小已有单测 crate 上实跑验证过的命令形态）"
     }
   },
   "missing": [
@@ -89,10 +99,13 @@
   设备参数实例（至少覆盖目标类别）
 - `unit_test.mechanism`：机制短名（如 "cargo-osdk-test"）或 "none"
 - `unit_test.cmd`：跑一次测试的完整命令（含容器包裹，形态仿 build.cmd；
-  默认给**最窄可复用作用域**——如限定驱动 crate 的包级过滤）
+  默认给**最窄可复用作用域**——如限定驱动 crate 的包级过滤；**结果文本
+  必须送达 stdout**——机制写文件就在尾部拼接读取）
 - `unit_test.success_pattern` / `fail_pattern`：结果输出的逐字特征子串
-  （在源码/文档中核实原文，不凭记忆）
+  （在源码/文档中核实原文，不凭记忆；避开被 ANSI 颜色码包裹的 token）
 - `unit_test.scope_hint`：一句话说明如何进一步收窄（包/测试名）
+- `unit_test.smoke_cmd`：在目标树最小已有单测 crate 上**实跑验证过**的
+  命令形态（P0 门禁真跑复核；缺省告警跳过但强烈建议提供）
 
 ## 字段规则
 

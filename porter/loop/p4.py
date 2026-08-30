@@ -31,6 +31,7 @@ from ..common import agent
 from ..env import probe as probe_mod
 from . import criteria as crit_mod
 from . import probes as probe_lib
+from . import ut_verify
 
 AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
@@ -56,12 +57,54 @@ def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
 
 # ---------- 步骤 0：unit_test 节回填 ----------
 
+def _smoke_verify_ut(ws: Path, target_os: Path, runner: dict,
+                     ut: dict, label: str) -> tuple[bool, str, str]:
+    """第二道烟测：真跑驱动级 cmd 并断言。返回 (ok, 说明, 观测输出)。"""
+    from ..env.probe import _base_env
+    if ut.get("mechanism") == "none" or not ut.get("cmd"):
+        return True, "mechanism=none 或无命令——跳过", ""
+    ok, detail, out = ut_verify.run_and_verify(
+        ut["cmd"], cwd=target_os, env=_base_env(target_os, runner),
+        timeout_sec=int(ut.get("timeout_sec", 1800)),
+        log_path=ws / "P4" / "logs" / f"{label}.log",
+        success_pattern=ut.get("success_pattern", "test result: ok"),
+        fail_pattern=ut.get("fail_pattern"))
+    return ok, detail, out
+
+
+def _save_runner_ut(ws: Path, runner: dict, ut: dict) -> None:
+    runner["unit_test"] = ut
+    (ws / "runner.json").write_text(json.dumps(runner, ensure_ascii=False,
+                                               indent=2), encoding="utf-8")
+
+
 def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
                       runner: dict) -> dict:
+    """unit_test 节获取 + 第二道烟测（真跑驱动级命令机器复核）。
+
+    - 已有且 verified=true：直接复用。
+    - 已有且未验证：真跑一次记 verified（幂等，一次性成本）。
+    - 缺失：agent 补探（产出后真跑烟测；失败带观测输出反馈重试 ≤2；
+      仍败标 verified=false + 醒目警告——不硬阻塞，验收/人工兜底）。
+    """
     ut = runner.get("unit_test")
     if ut:
+        if ut.get("verified") or ut.get("mechanism") == "none" \
+                or not ut.get("cmd"):
+            return ut
+        ok, detail, _out = _smoke_verify_ut(ws, target_os, runner, ut,
+                                            "unit_test_smoke_backfill")
+        ut["verified"] = ok
+        _save_runner_ut(ws, runner, ut)
+        if ok:
+            print("[porter] P4: unit_test 烟测 PASS（verified:true）")
+        else:
+            print(f"[porter] P4: ⚠ unit_test 烟测 FAIL：{detail}"
+                  "（verified:false；验收将按此判定，建议人工修 runner.json）")
         return ut
-    print("[porter] P4: runner.json 缺 unit_test 节——一次性补探回填")
+
+    print("[porter] P4: runner.json 缺 unit_test 节——一次性补探回填（含"
+          "第二道烟测）")
     skill = agent.load_skill("P0-unit-test-discover")
     driver = Path(proj["linux_driver"]).name
     prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
@@ -71,26 +114,42 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
               f"  {runner['build']['cmd']}\n"
               f"\n## 任务\n探明目标 OS 的内核态单元测试机制并输出紧凑 "
               f"JSON 块。")
-    rc, out = agent.run_agent(prompt, workdir=target_os,
-                              log_stem=str(ws / "P4" / "logs" /
-                                            "unit_test_discover_R1"),
-                              timeout_sec=900)
-    parsed = agent.extract_json(out) if rc == 0 else None
     ut = None
-    if parsed and "cmd" in parsed:
-        ut = {k: parsed[k] for k in ("mechanism", "cmd", "timeout_sec",
-                                     "success_pattern", "fail_pattern",
-                                     "scope_hint") if k in parsed}
+    for attempt in range(1, 4):
+        rc, out = agent.run_agent(prompt, workdir=target_os,
+                                  log_stem=str(ws / "P4" / "logs" /
+                                               f"unit_test_discover_R{attempt}"),
+                                  timeout_sec=900)
+        parsed = agent.extract_json(out) if rc == 0 else None
+        if parsed and "cmd" in parsed:
+            ut = {k: parsed[k] for k in ("mechanism", "cmd", "timeout_sec",
+                                         "success_pattern", "fail_pattern",
+                                         "scope_hint", "smoke_cmd")
+                  if k in parsed}
+            # 第二道烟测：真跑驱动级命令
+            ok, detail, observed = _smoke_verify_ut(
+                ws, target_os, runner, ut, f"unit_test_discover_smoke_R{attempt}")
+            ut["verified"] = ok
+            if ok:
+                break
+            print(f"[porter] P4: 烟测失败（第 {attempt} 次）：{detail}")
+            prompt = prompt + ut_verify.feedback_block(detail, observed)
+        else:
+            prompt = prompt + (
+                "\n\n---\n\n## 上一次输出的问题\n未见合法 JSON。只输出一个"
+                "紧凑 JSON 对象（一行）。")
     if not ut:
         ut = {"mechanism": "none",
-              "note": "补探失败——按无机制处理（L0 判据自动 deferred）"}
+              "note": "补探失败——按无机制处理（L0 判据自动 deferred）",
+              "verified": True}
     ut["reviewed"] = False
     ut["discovered_by"] = "porter/loop backfill"
-    runner["unit_test"] = ut
-    (ws / "runner.json").write_text(json.dumps(runner, ensure_ascii=False,
-                                               indent=2), encoding="utf-8")
+    _save_runner_ut(ws, runner, ut)
     print(f"[porter] P4: unit_test 节回填 mechanism={ut.get('mechanism')}"
-          "（reviewed:false）")
+          f" verified={ut.get('verified')}（reviewed:false）")
+    if not ut.get("verified"):
+        print("[porter] P4: ⚠ 烟测未过——命令/特征不可信，验收将按此判定，"
+              "建议人工核查 runner.json 的 unit_test 节")
     return ut
 
 

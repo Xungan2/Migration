@@ -34,6 +34,7 @@ def run_gate(ws: Path) -> bool:
 
     # 2. runner.json
     runner_path = ws / "runner.json"
+    runner = None
     if runner_path.exists():
         runner = json.loads(runner_path.read_text(encoding="utf-8"))
         defects = validate_runner(runner)
@@ -57,6 +58,29 @@ def run_gate(ws: Path) -> bool:
                                r["ok"], r["detail"]))
     else:
         checks.append(("T3 探测执行", False, "P0/reports/T3_development.json 缺失"))
+
+    # 4. unit_test 烟测（第一道，2026-08-30 双道烟测定案）：
+    #    真跑 smoke_cmd（agent 在目标树最小已有单测 crate 上验证过的形态）
+    #    断言特征命中。缺 smoke_cmd = 告警跳过（非门禁失败）——存量/异构
+    #    目标兼容；真跑失败 = 门禁失败（机制主张被证伪）。
+    ut = (runner or {}).get("unit_test") or {}
+    if not ut:
+        checks.append(("unit_test 烟测", True,
+                       "runner 无 unit_test 节（loop 补探回填时二道烟测兜底）"))
+    elif ut.get("mechanism") == "none":
+        checks.append(("unit_test 烟测", True,
+                       "mechanism=none（目标 OS 无内核单测机制，L0 将转 deferred）"))
+    elif not ut.get("smoke_cmd"):
+        checks.append(("unit_test 烟测", True,
+                       "⚠ 无 smoke_cmd——跳过（建议补：agent 探明时应在最小"
+                       "已有单测 crate 上实跑验证）"))
+    else:
+        from ..loop.ut_verify import smoke_unit_test_config
+        target_os = Path(proj["target_os"])
+        ok, detail = smoke_unit_test_config(ws, target_os, runner, ut,
+                                            label="P0_unit_test_smoke")
+        checks.append((f"unit_test 烟测 {'PASS' if ok else 'FAIL'}",
+                       ok, detail))
 
     passed = all(ok for _, ok, _ in checks)
 
