@@ -182,9 +182,11 @@ def collect_sections(ws: Path, order: list[str],
     return sections
 
 
-def known_claims(ws: Path, order: list[str], skip_module: str) -> set[str]:
+def known_claims(ws: Path, order: list[str],
+                 skip_module: str | None) -> set[str]:
     """已覆盖的 claim 集（含 downgraded——其主张已降级 gap 不会再进
-    risky）。跨注册表去重用：同一主张不重复生成探针。"""
+    risky）。跨注册表去重用：同一主张不重复生成探针。
+    skip_module=None 不跳过任何表（pregen 去重须含 P2 自身历史产出）。"""
     claims: set[str] = set()
     if skip_module != "(pregen)":
         for probe in load_registry(ws.joinpath(*P2_REGISTRY_REL)) \

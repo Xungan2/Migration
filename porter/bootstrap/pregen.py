@@ -60,7 +60,7 @@ def _targets(ws: Path, driver_root: Path, order: list[str],
                    if s in entries
                    and (entries[s].get("risk") in ("med", "high")
                         or entries[s].get("confidence") == "low"))
-    claimed = probe_lib.known_claims(ws, order, "(pregen)")
+    claimed = probe_lib.known_claims(ws, order, None)
     todo = [entries[s] for s in risky if s not in claimed]
     if max_batches is not None:
         todo = todo[:max_batches * probe_lib.GEN_BATCH]
@@ -97,7 +97,7 @@ def run_pregen(ws: Path, target_os: Path,
     except (RuntimeError, json.JSONDecodeError, OSError) as e:
         print(f"[porter] P2c: 目标计算失败——{e}")
         return 1
-    known = probe_lib.known_claims(ws, order, "(pregen)")
+    known = probe_lib.known_claims(ws, order, None)
     print(f"[porter] P2c: 预生成目标 {len(todo)} 条"
           f"（已探 {len(known)} 条去重后；"
           + (f"限 {max_batches} 批）" if max_batches else "全量）"))
