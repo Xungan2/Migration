@@ -256,23 +256,60 @@ def _boot_and_log(boot_ws: Path, target_os: Path, proj: dict,
     return bool(r.get("ok")), log
 
 
+def _probes_owning_lines(target_os: Path, driver: str,
+                         active: list[dict], lines: list[int]) -> set[str]:
+    """编译错误行号 → 出错探针名集（按 probes.rs 中 fn 定义区间归属；
+    agent 私加的 helper fn 归属其上方最近的注册探针）。"""
+    rs_path = target_os / "kernel" / "core" / "comps" / driver / "src" \
+        / "probes.rs"
+    if not rs_path.exists():
+        return set()
+    rs = rs_path.read_text(encoding="utf-8").splitlines()
+    starts: list[tuple[int, str]] = []
+    for i, ln in enumerate(rs, 1):
+        m = re.match(r"\s*(?:pub(?:\(crate\))?\s+)?fn "
+                     r"([a-z][a-z0-9_]*)\s*\(", ln)
+        if m and m.group(1) != "run_all":
+            starts.append((i, m.group(1)))
+    names = {p["name"] for p in active}
+    out: set[str] = set()
+    for el in lines:
+        for _s, n in reversed([t for t in starts if t[0] <= el]):
+            if n in names:
+                out.add(n)
+                break
+    return out
+
+
 def _fix_compile(boot_ws: Path, target_os: Path, label: str,
                  reg: dict, registry_path: Path, driver: str, rnd: int,
                  logs_dir: Path) -> bool:
-    """探针 build FAIL 时带编译错误回炉（≤2 次）。"""
+    """探针 build FAIL 时带编译错误回炉（≤2 次）。只回炉出错探针
+    （全量 prompt 会撞 execve ARG_MAX 上限——64 条存量实测崩过）。"""
     log_path = boot_ws / "logs" / f"{label}_probe_build_r{rnd}.log"
     err_tail = ""
+    err_lines: list[int] = []
     if log_path.exists():
-        err_tail = "\n".join(
-            ln for ln in log_path.read_text(encoding="utf-8",
-                                            errors="replace").splitlines()
-            if ln.startswith("error") or " --> " in ln)[:3000]
+        keep = []
+        for ln in log_path.read_text(encoding="utf-8",
+                                     errors="replace").splitlines():
+            if ln.startswith("error") or " --> " in ln:
+                keep.append(ln)
+                m = re.search(r"--> \S*probes\.rs:(\d+):\d+", ln)
+                if m:
+                    err_lines.append(int(m.group(1)))
+        err_tail = "\n".join(keep)[:3000]
     if not err_tail:
         return False
     skill = agent.load_skill("P3-probe")
     active = [p for p in reg["probes"] if p.get("status") == "active"]
+    bad_set = _probes_owning_lines(target_os, driver, active, err_lines)
+    if not bad_set:
+        print("[porter] 探针: 编译错误无法定位到探针——不回炉")
+        return False
     texts = "\n\n".join(f"### {p['name']}（claim={p['claim']}）\n```rust\n"
-                        f"{p['rust']}\n```" for p in active)
+                        f"{p['rust']}\n```"
+                        for p in active if p["name"] in bad_set)
     prompt = (f"{skill}\n\n---\n\n## 背景\n以下探针函数编译失败（目标树："
               f"`{target_os}`，crate `{driver}`）。逐个修复（通常是 trait 未"
               "导入/方法名笔误/所有权移动类小错），**保持 name 与 claim 不变、"

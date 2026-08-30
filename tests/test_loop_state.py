@@ -339,6 +339,25 @@ def test_probe_lifecycle():
     shutil.rmtree(tmp)
 
 
+# ---------- E4. 编译错误行号 → 出错探针定位 ----------
+
+def test_fix_targeting():
+    print("E4. 编译错误定位探针")
+    tmp = Path(tempfile.mkdtemp(prefix="porter_fix_t_"))
+    crate = tmp / "kernel/core/comps/drv/src"
+    crate.mkdir(parents=True)
+    (crate / "probes.rs").write_text(
+        "// header\nfn helper_a() { }\nfn p_one() { let _x = 1; }\n"
+        "fn p_two() { helper_a(); }\npub(crate) fn run_all() {\n"
+        "    p_one();\n    p_two();\n}\n", encoding="utf-8")
+    active = [{"name": "p_one"}, {"name": "p_two"}]
+    got = PB._probes_owning_lines(tmp, "drv", active, [3, 4, 8])
+    ok("行号归属正确", got == {"p_one", "p_two"}, str(got))
+    ok("路径缺失安全",
+       PB._probes_owning_lines(tmp / "nope", "drv", active, [3]) == set())
+    shutil.rmtree(tmp)
+
+
 # ---------- E2. ut_verify 烟测 ----------
 
 def test_ut_verify():
@@ -412,6 +431,7 @@ if __name__ == "__main__":
     test_surface()
     test_probes()
     test_probe_lifecycle()
+    test_fix_targeting()
     test_ut_verify()
     test_p4_mechanics()
     print(f"\n{'='*40}\n{'ALL PASS' if FAIL == 0 else 'FAILURES'}: "
