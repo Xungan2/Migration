@@ -274,6 +274,71 @@ def test_probes():
     shutil.rmtree(tmp)
 
 
+# ---------- E3. 探针生命周期：降级不株连 PASS ----------
+
+def test_probe_lifecycle():
+    print("E3. probes lifecycle 降级不株连")
+    tmp = Path(tempfile.mkdtemp(prefix="porter_life_t_"))
+    ws = tmp / "ws"
+    tgt = tmp / "asterinas"
+    boot_ws = ws / "P3" / "modA"
+    (boot_ws / "reports").mkdir(parents=True)
+    log = tmp / "boot.log"
+    log.write_text("PROBE_p_a PASS\nPROBE_p_b FAIL\n", encoding="utf-8")
+    runner = json.dumps({"boot": {"log_file": str(log)}})
+    (boot_ws.parent / "runner.json").write_text(runner, encoding="utf-8")
+    (ws / "runner.json").write_text(runner, encoding="utf-8")
+    entries = [
+        {"linux_api": "api_a", "kind": "function", "verdict": "direct",
+         "target": "T", "evidence": "a.rs:1", "notes": "", "risk": "med",
+         "confidence": "med", "domain": "x"},
+        {"linux_api": "api_b", "kind": "function", "verdict": "direct",
+         "target": "T", "evidence": "a.rs:2", "notes": "", "risk": "med",
+         "confidence": "med", "domain": "x"}]
+    mapping = {"entries": entries, "redesigns": [], "wiring": []}
+    (ws / "P2").mkdir()
+    (ws / "P2" / "mapping.json").write_text(json.dumps(mapping),
+                                            encoding="utf-8")
+    gen_json = ('```json\n{"probes": ['
+                '{"name": "p_a", "rust": "fn p_a() { }", "claim": "api_a"},'
+                '{"name": "p_b", "rust": "fn p_b() { }", "claim": "api_b"}'
+                ']}\n```')
+
+    def fake_run_agent(prompt, workdir, log_stem, timeout_sec=0):
+        if "待探针的映射条目" in prompt:
+            return 0, gen_json
+        return 0, "junk"    # 改判轮无可解析输出 → _rejudge_failed False
+
+    saved = (PB.agent.run_agent, PB.agent.load_skill,
+             PB.probe_mod.probe_build, PB.probe_mod.probe_boot_with_device)
+    PB.agent.run_agent = fake_run_agent
+    PB.agent.load_skill = lambda _n: ""
+    PB.probe_mod.probe_build = lambda *a, **k: {"ok": True}
+    PB.probe_mod.probe_boot_with_device = lambda *a, **k: {"ok": True}
+    try:
+        reg_path = boot_ws / "reports" / "probes.json"
+        rc = PB.run_probe_lifecycle(
+            ws, tgt, {"linux_driver": "/x/drv", "category": []},
+            ["modA"], reg_path, label="T", todo_entries=entries,
+            logs_dir=tmp / "logs", boot_ws=boot_ws)
+    finally:
+        (PB.agent.run_agent, PB.agent.load_skill, PB.probe_mod.probe_build,
+         PB.probe_mod.probe_boot_with_device) = saved
+    reg = PB.load_registry(reg_path)
+    st = {p["name"]: p["status"] for p in reg["probes"]}
+    ok("PASS 探针保留 active", st.get("p_a") == "active", str(st))
+    ok("仅 FAIL 探针降级", st.get("p_b") == "downgraded", str(st))
+    m2 = json.loads((ws / "P2" / "mapping.json").read_text(encoding="utf-8"))
+    v = {e["linux_api"]: e["verdict"] for e in m2["entries"]}
+    ok("PASS claim 不改判", v.get("api_a") == "direct", str(v))
+    ok("FAIL claim 降级 gap", v.get("api_b") == "gap", str(v))
+    rs = (tgt / "kernel" / "core" / "comps" / "drv" / "src" /
+          "probes.rs").read_text(encoding="utf-8")
+    ok("probes.rs 剔除降级项", "p_a();" in rs and "fn p_b" not in rs)
+    ok("生命周期 rc=0", rc == 0)
+    shutil.rmtree(tmp)
+
+
 # ---------- E2. ut_verify 烟测 ----------
 
 def test_ut_verify():
@@ -346,6 +411,7 @@ if __name__ == "__main__":
     test_criteria()
     test_surface()
     test_probes()
+    test_probe_lifecycle()
     test_ut_verify()
     test_p4_mechanics()
     print(f"\n{'='*40}\n{'ALL PASS' if FAIL == 0 else 'FAILURES'}: "

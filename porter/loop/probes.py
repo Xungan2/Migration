@@ -422,6 +422,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
         return 1
 
     # ---- 同步 + 判定（build 编译回炉 / boot 判定 / 改判有界循环）----
+    bad: list[str] = []   # 末轮判定 fail/missing 名单（降级只处理它们）
     for rnd in range(1, MAX_ROUNDS + 1):
         sections = collect_sections(ws, order, current_module,
                                     registry_path, kind=kind)
@@ -464,7 +465,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     index = {e["linux_api"]: e for e in mapping.get("entries", [])}
     downgraded: list[str] = []
     for p in reg["probes"]:
-        if p["status"] != "active":
+        if p["status"] != "active" or p["name"] not in bad:
             continue
         e = index.get(p["claim"])
         if e:
