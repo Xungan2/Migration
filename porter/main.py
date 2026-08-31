@@ -44,12 +44,15 @@ answers.md 后重跑即进入 R4 答案整合轮。
     ├── P3/<M>/               垂直循环·分析（使用面/增量映射/gap 分类/
     │   ├── reports/            判据草案/探针注册表/报告）
     │   └── logs/
-    ├── P4/<M>/               垂直循环·生产（fill/迁移切片/验收报告）
-    │   ├── reports/
+    ├── P4/<M>/               垂直循环·生产（fill/迁移切片/轮末快速冒烟）
+    │   ├── reports/            （fill.json / migration.json；旧编号期还
+    │   └── logs/                 有 acceptance.json——P5 只读兼容）
+    ├── P5/<M>/               垂直循环·模块级验收（L1/L2/L0/L3 + 累积回归
+    │   ├── reports/            + deferred；acceptance.json / report.md）
     │   └── logs/
     ├── loop_state.json       循环状态机（order + 每模块 phase/attempts）
     ├── deferred.json         deferred 判据登记（消费者落地时清偿）
-    ├── platform_patches.json fill/register-fill 登记（P6 上游补丁素材）
+    ├── platform_patches.json fill/register-fill 登记（P7 上游补丁素材）
     ├── human_questions.md    exit 3 人工关口问题（answers.md 承接）
     └── answers.md            人工答案（T3/loop 共用，被消费的节自动移除）
 
@@ -221,7 +224,7 @@ def cmd_p3(args) -> int:
 
 
 def cmd_p4(args) -> int:
-    """P4(M)：fill 统一阶段 + 切片迁移 + L0-L4 验收 + deferred 登记/清偿。"""
+    """P4(M)：fill 统一阶段 + 切片迁移 + 轮末快速冒烟（验收归 P5）。"""
     from porter.loop import p4 as p4_mod
     from porter.loop.state import LoopState
     ws, ok = _loop_module(args)
@@ -239,17 +242,112 @@ def cmd_p4(args) -> int:
         return 2
     rc = p4_mod.run_p4(ws, module, st.order)
     if rc == 0:
+        st.set_phase(module, "p5")   # 模块级验收归 P5(M)
+    return rc
+
+
+def cmd_p5(args) -> int:
+    """P5(M)：模块级验收（L1/L2/L0/L3 + 累积回归 + deferred 登记/清偿）。"""
+    from porter.loop import p5 as p5_mod
+    from porter.loop.state import LoopState
+    ws, ok = _loop_module(args)
+    if not ok:
+        return 2
+    st = LoopState(ws)
+    if not st.load_or_init():
+        return 2
+    module = args.module or st.pointer()
+    if module is None:
+        print("[porter] p5: 全部模块已完成")
+        return 0
+    phase = st.phase_of(module)
+    if phase in ("pending", "p3", "p4"):
+        print(f"[porter] p5: 模块 {module} 尚未跑 P4（先 p4 或用 loop）")
+        return 2
+    if phase == "done":
+        acc = p5_mod.acceptance_path(ws, module)
+        if acc.exists():
+            try:
+                if json.loads(acc.read_text(encoding="utf-8")).get("pass"):
+                    print(f"[porter] p5: {module} 验收已 PASS——复用 {acc}")
+                    return 0
+            except (OSError, json.JSONDecodeError):
+                pass
+        print(f"[porter] p5: {module} 已 done——按显式请求重跑模块级验收")
+    rc = p5_mod.run_p5(ws, module, st.order)
+    if rc == 0 and phase != "done":
         st.set_phase(module, "done")
     return rc
 
 
 def cmd_loop(args) -> int:
-    """垂直循环：P3(M)→P4(M) ×N（拓扑序，断点重入，异常 exit 3）。"""
+    """垂直循环：P3(M)→P4(M)→P5(M) ×N（拓扑序，断点重入，异常 exit 3）。"""
     ws, ok = _loop_module(args)
     if not ok:
         return 2
     return loop_mod.run_loop(ws, module=args.module,
                              max_modules=args.max_modules)
+
+
+def cmd_p6(args) -> int:
+    """P6 系统验收（聚合 / --finalize-l4 / --execute [--l4] / defects 账本）。"""
+    from porter.loop import p6 as p6_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+
+    # defects 账本子操作（P6-5 缺陷修复循环消费；与模式互斥）
+    if args.defect_add:
+        try:
+            e = p6_mod.add_defect(ws, args.defect_add, args.title or "",
+                                  args.evidence or "")
+            print(f"[porter] P6: 缺陷登记 {e['id']}（{e['title']}）")
+            return 0
+        except ValueError as ex:
+            print(f"[porter] P6: {ex}")
+            return 1
+    if args.defect_close:
+        try:
+            e = p6_mod.close_defect(ws, args.defect_close,
+                                    args.root_cause or "",
+                                    args.fix or "",
+                                    args.regression or "")
+            print(f"[porter] P6: 缺陷闭账 {e['id']}（根因/修复/回归证据"
+                  "四字段完整）")
+            return 0
+        except ValueError as ex:
+            print(f"[porter] P6: {ex}")
+            return 1
+    if args.defect_park:
+        try:
+            e = p6_mod.park_defect(ws, args.defect_park, args.reason or "")
+            print(f"[porter] P6: 缺陷泊车 {e['id']}")
+            return 0
+        except ValueError as ex:
+            print(f"[porter] P6: {ex}")
+            return 1
+    if args.defect_list:
+        for e in p6_mod.load_defects(ws)["defects"]:
+            print(f"[porter] P6: {e['status']:<10} {e['id']:<44} "
+                  f"{e['title']}")
+        return 0
+
+    return p6_mod.run_p6(ws, execute_flag=args.execute, l4=args.l4,
+                         finalize_flag=args.finalize_l4)
+
+
+def cmd_p7(args) -> int:
+    """P7 终态报告：聚合 + baseline diff + platform_patches 台账（提案定稿）。"""
+    from porter.loop import p7 as p7_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+    return p7_mod.run_p7_cli(
+        ws, patch_register=args.patch_register, title=args.title or "",
+        rationale=args.rationale or "", patch_status=args.patch_status,
+        status_to=args.to or "", doc=args.doc, note=args.note or "")
 
 
 def _parse_device_ids(raw: str | None) -> list[str] | None:
@@ -491,15 +589,57 @@ def main(argv=None) -> int:
     _add_loop_common(p3cmd)
     p3cmd.set_defaults(func=cmd_p3)
 
-    p4cmd = sub.add_parser("p4", help="P4(M)：fill 统一 + 切片迁移 + L0-L4 验收 + deferred")
+    p4cmd = sub.add_parser("p4", help="P4(M)：fill 统一 + 切片迁移 + 轮末快速冒烟")
     _add_loop_common(p4cmd)
     p4cmd.set_defaults(func=cmd_p4)
 
-    loopcmd = sub.add_parser("loop", help="垂直循环：P3(M)→P4(M) ×N（拓扑序/断点重入/异常 exit 3）")
+    p5cmd = sub.add_parser("p5", help="P5(M)：模块级验收 L1/L2/L0/L3 + 累积回归 + deferred")
+    _add_loop_common(p5cmd)
+    p5cmd.set_defaults(func=cmd_p5)
+
+    loopcmd = sub.add_parser("loop", help="垂直循环：P3(M)→P4(M)→P5(M) ×N（拓扑序/断点重入/泊车绕行/异常 exit 3）")
     _add_loop_common(loopcmd)
     loopcmd.add_argument("--max-modules", type=int, default=None,
                          help="本次最多完成的模块数（首切片验证用）")
     loopcmd.set_defaults(func=cmd_loop)
+
+    p6cmd = sub.add_parser("p6", help="P6 系统验收：聚合健康 / --finalize-l4 定稿门 / --execute [--l4] 执行重测 / defects 账本")
+    p6cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    p6cmd.add_argument("--execute", action="store_true",
+                       help="执行模式：一轮 build+SLIRP boot+ktest 判全部判据 + deferred 清偿")
+    p6cmd.add_argument("--l4", action="store_true",
+                       help="（随 --execute）按定稿后的 l4_criteria.json 判全部 L4 判据")
+    p6cmd.add_argument("--finalize-l4", action="store_true",
+                       help="L4 判据定稿门（按 porter/config.json 审核门停车或续跑）")
+    p6cmd.add_argument("--defect-add", default=None, metavar="ID",
+                       help="登记缺陷（需 --title / --evidence）")
+    p6cmd.add_argument("--title", default=None)
+    p6cmd.add_argument("--evidence", default=None)
+    p6cmd.add_argument("--defect-close", default=None, metavar="ID",
+                       help="闭账缺陷（需 --root-cause/--fix/--regression，四字段强制）")
+    p6cmd.add_argument("--root-cause", default=None)
+    p6cmd.add_argument("--fix", default=None)
+    p6cmd.add_argument("--regression", default=None)
+    p6cmd.add_argument("--defect-park", default=None, metavar="ID",
+                       help="泊车缺陷（需 --reason）")
+    p6cmd.add_argument("--reason", default=None)
+    p6cmd.add_argument("--defect-list", action="store_true",
+                       help="列出 defects.json 账本")
+    p6cmd.set_defaults(func=cmd_p6)
+
+    p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")
+    p7cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    p7cmd.add_argument("--patch-register", default=None, metavar="GAP",
+                       help="登记新补丁提案（status=proposed；需 --title；提案文档 P7/reports/patches/<GAP>.md 人工撰写）")
+    p7cmd.add_argument("--title", default=None)
+    p7cmd.add_argument("--rationale", default=None)
+    p7cmd.add_argument("--patch-status", default=None, metavar="GAP",
+                       help="补丁状态流转（配 --to planned|proposed|closed）")
+    p7cmd.add_argument("--to", default=None, metavar="STATUS")
+    p7cmd.add_argument("--doc", default=None)
+    p7cmd.add_argument("--note", default=None,
+                       help="（closed 时）处置理由入档")
+    p7cmd.set_defaults(func=cmd_p7)
 
     args = ap.parse_args(argv)
     return args.func(args)

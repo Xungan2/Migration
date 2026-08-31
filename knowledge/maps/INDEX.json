@@ -11,14 +11,14 @@
       "net"
     ],
     "counts": {
-      "direct": 54,
-      "adapt": 311,
-      "gap": 154,
-      "not-migrated": 140
+      "direct": 55,
+      "adapt": 315,
+      "gap": 161,
+      "not-migrated": 319
     },
     "redesigns": 7,
-    "updated": "2026-08-29T21:57:24",
-    "version": 1,
-    "promoted": "2026-08-29T21:57:24"
+    "updated": "2026-08-31T15:11:57",
+    "version": 2,
+    "promoted": "2026-09-01T00:44:23"
   }
 ]

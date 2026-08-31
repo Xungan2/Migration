@@ -1,7 +1,7 @@
 # API 映射（P2 引导 + P3 增量累积）
 
-> 真值源 `mapping.json`；本文件为渲染产物（2026-08-29 21:57）。
-> 共 659 条：direct 54 / adapt 311 / gap 154 / not-migrated 140
+> 真值源 `mapping.json`；本文件为渲染产物（2026-08-31 15:04）。
+> 共 850 条：direct 55 / adapt 315 / gap 161 / not-migrated 319
 
 ## acpi/acpi_drivers.h
 
@@ -129,7 +129,7 @@
 
 | Linux 用法 | 目标方案 | 已核实 | 备注 |
 |---|---|---|---|
-| `mutex_unlock`（adapt） | MutexGuard 离开作用域自动 drop 解锁（ostd::sync::Mutex::lock() 返回 guard），无显式 unlock | ostd/src/sync/mutex.rs:113;ostd/src/sync/mutex.rs:35 | ⚠risk:med 该 Mutex 基于等待队列会睡眠，禁止在中断上下文持有/加锁；中断路径改 SpinLock<BHDisabled> |
+| `mutex_unlock`（gap） | MutexGuard 离开作用域自动 drop 解锁（ostd::sync::Mutex::lock() 返回 guard），无显式 unlock | ostd/src/sync/mutex.rs:113;ostd/src/sync/mutex.rs:35 | conf:low ⚠risk:med 该 Mutex 基于等待队列会睡眠，禁止在中断上下文持有/加锁；中断路径改 SpinLock<BHDisabled>｜探针 FAIL 降级 gap(P3hw-eeprom) |
 
 ## keys/trusted_tpm.h
 
@@ -148,7 +148,7 @@
 
 | Linux 用法 | 目标方案 | 已核实 | 备注 |
 |---|---|---|---|
-| `eeprom_data`（adapt） | 驱动内 u16 局部值；NVM/EEPROM 读取自实现：经 IoMem 的 EER 寄存器 read_once 或 SPI 位流 shift_out 重写 | ostd/src/io/io_mem/mod.rs:285;ostd/src/io/io_mem/mod.rs:297 | ⚠risk:med 目标无统一 NVM/EEPROM 框架；e1000_eeprom_lock 并发保护需自建 SpinLock/Mutex |
+| `eeprom_data`（gap） | 驱动内 u16 局部值；NVM/EEPROM 读取自实现：经 IoMem 的 EER 寄存器 read_once 或 SPI 位流 shift_out 重写 | ostd/src/io/io_mem/mod.rs:285;ostd/src/io/io_mem/mod.rs:297 | conf:low ⚠risk:med 目标无统一 NVM/EEPROM 框架；e1000_eeprom_lock 并发保护需自建 SpinLock/Mutex｜探针 FAIL 降级 gap(P3hw-eeprom) |
 
 ## linux/atmdev.h
 
@@ -246,10 +246,10 @@
 |---|---|---|---|
 | `max`（direct） | `a.max(b)` 方法或 `core::cmp::max(a, b)`（Rust core 内建，目标树通用惯用法） | kernel/core/comps/time/src/clocksource.rs:14;kernel/core/comps/virtio/src/device/filesystem/device/virtio_ops.rs:62;kernel/libs/cpio-decoder/src/lib.rs:30 | Linux 宏要求两参数同类型；Rust 基于 `Ord` trait，整数/浮点不能混用 `cmp::max`（浮点用 `f64::max`）。单次求值语义一致 |
 | `min`（direct） | `a.min(b)` 方法或 `core::cmp::min(a, b)`（Rust core 内建） | kernel/core/comps/time/src/clocksource.rs:14;kernel/core/comps/virtio/src/device/filesystem/device/virtio_ops.rs:62;kernel/libs/cpio-decoder/src/lib.rs:30 | 与 max 对称；浮点需用 `f64::min`（NaN 语义不同）；迭代器上 `.min()/.max()` 返回 Option |
-| `msleep`（adapt） | 惯用法：`let q = WaitQueue::new(); q.wait_until_or_timeout(|| -> Option<()> { None }, &Duration::from_millis(ms));` 超时以 Err(ETIME) 返回即睡满时长 | kernel/core/src/time/wait.rs:21;kernel/core/src/device/misc/tdxguest.rs:275;kernel/core/src/thread/work_queue/worker_pool.rs:271 | ⚠risk:med 无现成 msleep 函数；`WaitTimeout` trait 为 aster-core 内 pub(crate)，comps 层驱动 crate 无法直接用，需经 aster-core 转发或在 ostd 层用 `Jiffies::elapsed()` 轮询（TIMER_FREQ=1000Hz→1ms 粒度，ostd/src/timer/mod.rs:25）；等待期间真正睡眠让出 CPU，须在可睡眠上下文调用（不可持自旋锁/关中断） |
+| `msleep`（gap） | 惯用法：`let q = WaitQueue::new(); q.wait_until_or_timeout(|| -> Option<()> { None }, &Duration::from_millis(ms));` 超时以 Err(ETIME) 返回即睡满时长 | kernel/core/src/time/wait.rs:21;kernel/core/src/device/misc/tdxguest.rs:275;kernel/core/src/thread/work_queue/worker_pool.rs:271 | conf:low ⚠risk:med 无现成 msleep 函数；`WaitTimeout` trait 为 aster-core 内 pub(crate)，comps 层驱动 crate 无法直接用，需经 aster-core 转发或在 ostd 层用 `Jiffies::elapsed()` 轮询（TIMER_FREQ=1000Hz→1ms 粒度，ostd/src/timer/mod.rs:25）；等待期间真正睡眠让出 CPU，须在可睡眠上下文调用（不可持自旋锁/关中断）｜探针 FAIL 降级 gap(P3hw-eeprom)｜定案(2026-08-30) 上下文规则：probe/Bootstrap 路径→TSC 忙等（仿 udelay 映射，read_tsc/tsc_freq）；运行期→真睡（WaitQueue 惯用法）。Linux probe 链睡眠点须忙等化：e1000_reset_hw msleep×4、e1000_init_hw msleep×2、e1000_phy_init_script msleep×4；运行期 down/close/reinit/change_mtu/shutdown 的 msleep 不受影响。双用函数 reset_hw 被 probe 与运行期 reset_task 共用——MVP bring-up 仅在 Bootstrap，os-link-mgmt 轮再评估 |
 | `msleep_interruptible`（adapt） | `Waiter::pause_until_or_timeout(cond, &duration)`：被 POSIX 信号打断返回 Err(EINTR)，超时返回 Err(ETIME)；剩余时间由调用方读时钟换算（参照 do_clock_nanosleep 的 EINTR 分支） | kernel/core/src/process/signal/pause.rs:79;kernel/core/src/syscall/nanosleep.rs:111;kernel/core/src/syscall/nanosleep.rs:118 | conf:medium ⚠risk:med 仅对有信号上下文的 POSIX 用户线程有意义；内核驱动任务无信号概念，EINTR 永不触发，退化为不可中断 msleep；返回 Result 而非剩余毫秒数，需自行计算；同样受 pub(crate) 可见性限制 |
-| `udelay`（adapt） | 无现成 udelay，仿 i8042 的 `spin_wait_until`：`ostd::arch::{read_tsc, tsc_freq}` 换算周期数 + `read_tsc().wrapping_sub(start) >= tsc_freq()/1_000_000*us` 循环 + `core::hint::spin_loop()` | kernel/core/comps/i8042/src/controller.rs:300;kernel/core/comps/i8042/src/controller.rs:314;ostd/src/arch/x86/mod.rs:136;ostd/src/arch/x86/mod.rs:129 | ⚠risk:med 三架构均有 read_tsc/tsc_freq（riscv: ostd/src/arch/riscv/mod.rs:99; loongarch: ostd/src/arch/loongarch/mod.rs:71）；忙等不睡眠，可在持锁/关中断下短时使用，但长延时须避免；TSC 频率已校准 |
-| `usleep_range`（adapt） | 可睡眠上下文：`wait_until_or_timeout(.., &Duration::from_micros(min_us))`；需微秒级精度或不可睡眠上下文：改用上述 TSC 忙等（udelay 方案） | kernel/core/src/time/wait.rs:21;ostd/src/timer/mod.rs:25;kernel/core/comps/i8042/src/controller.rs:296 | ⚠risk:med 目标定时器为 1000Hz jiffies，粒度仅 1ms，无法实现微秒级定时睡眠；[min,max] 区间语义退化为单点时长；Linux 靠 hrtimer 让调度器在区间内合并唤醒，目标无此机制；受 WaitTimeout 的 pub(crate) 可见性限制 |
+| `udelay`（gap） | 无现成 udelay，仿 i8042 的 `spin_wait_until`：`ostd::arch::{read_tsc, tsc_freq}` 换算周期数 + `read_tsc().wrapping_sub(start) >= tsc_freq()/1_000_000*us` 循环 + `core::hint::spin_loop()` | kernel/core/comps/i8042/src/controller.rs:300;kernel/core/comps/i8042/src/controller.rs:314;ostd/src/arch/x86/mod.rs:136;ostd/src/arch/x86/mod.rs:129 | conf:low ⚠risk:med 三架构均有 read_tsc/tsc_freq（riscv: ostd/src/arch/riscv/mod.rs:99; loongarch: ostd/src/arch/loongarch/mod.rs:71）；忙等不睡眠，可在持锁/关中断下短时使用，但长延时须避免；TSC 频率已校准｜探针 FAIL 降级 gap(P3hw-eeprom) |
+| `usleep_range`（adapt） | 可睡眠上下文：`wait_until_or_timeout(.., &Duration::from_micros(min_us))`；需微秒级精度或不可睡眠上下文：改用上述 TSC 忙等（udelay 方案） | kernel/core/src/time/wait.rs:21;ostd/src/timer/mod.rs:25;kernel/core/comps/i8042/src/controller.rs:296 | ⚠risk:med 目标定时器为 1000Hz jiffies，粒度仅 1ms，无法实现微秒级定时睡眠；[min,max] 区间语义退化为单点时长；Linux 靠 hrtimer 让调度器在区间内合并唤醒，目标无此机制；受 WaitTimeout 的 pub(crate) 可见性限制｜定案(2026-08-30) 上下文规则：probe/Bootstrap 路径→TSC 忙等（仿 udelay 映射）；运行期→真睡（WaitQueue 惯用法，同 msleep 条目） |
 
 ## linux/dm-kcopyd.h
 
@@ -361,11 +361,13 @@
 | `ETHTOOL_ID_INACTIVE`（not-migrated） |  | — | 同 ETHTOOL_ID_ACTIVE，LED 闪烁停止事件不迁 |
 | `ETHTOOL_ID_OFF`（not-migrated） |  | — | LED 强制灭控制不迁（诊断 face） |
 | `ETHTOOL_ID_ON`（not-migrated） |  | — | LED 强制亮控制不迁（诊断 face） |
+| `__ethtool_get_drvinfo`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-ethtool-basic 模块跳过不迁移。同上：无 ethtool 框架对接面（strategy M15 原文"依赖目标是否有 ethtool 面"）。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
 | `advertising`（not-migrated） |  | — | 链路模式通告位图 UAPI；目标树无 link-mode 面。e1000 PHY/光模块自协商由硬件自主完成，端口无需向栈通告；e1000_set_spd_dplx 强制速率路径一并裁剪 |
 | `autoneg`（not-migrated） |  | — | 自协商开关仅作为 ksettings UAPI 字段存在；硬件默认自协商，无需 OS 介入 |
 | `bus_info`（not-migrated） |  | — | drvinfo face 界外；如需 PCI 位置信息可经 PciDeviceLocation 获取（参考 kernel/core/comps/pci/src/device_info.rs:9 与 common_device.rs:32），但无上报通道 |
 | `cmd`（not-migrated） |  | — | 各 ethtool UAPI 结构的 u32 cmd 子命令号，纯 ioctl plumbing，无对应物也不需要 |
 | `driver`（not-migrated） |  | — | drvinfo.driver 名称上报不迁；目标树设备以注册名（如 eth0）标识，见 register_device 于 kernel/core/comps/network/src/lib.rs:70 |
+| `e1000_diag_test_count`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-ethtool-diag 模块跳过不迁移。Asterinas 无 ethtool 面：内核无 ethtool_ops 框架、syscall 无 SIOCETHTOOL（三处 grep 全空）。回环自测逻辑（自建 TX 环发自收）作为 P5/P6 候选登记。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
 | `eeprom`（not-migrated） |  | — | ethtool EEPROM 导出结构不迁；驱动自身读取 EEPROM（MAC/默认配置）属 hw-defs 内部逻辑，不经 ethtool 路径，仍需迁移对应 MMIO/读写代码 |
 | `ethtool_coalesce`（not-migrated） |  | — | 中断合并参数 UAPI 结构不迁；ITR 采用驱动内部固定值 |
 | `ethtool_convert_legacy_u32_to_link_mode`（not-migrated） |  | — | u32 与 link_mode 位图互转 helper，仅服务于 ksettings UAPI，一并裁剪 |
@@ -413,6 +415,7 @@
 | `remove`（gap） | PciDriver 仅有 probe 无 remove/shutdown;设备 probe 后常驻,清理逻辑只能放 Drop(框架无反注册/热插拔) | kernel/core/comps/pci/src/bus.rs:21;kernel/core/comps/pci/src/bus.rs:31 | register_driver 注册即对已枚举设备逐个 probe;无模块卸载模型,remove 语义(注销 netdev、释放 IRQ/DMA)整体缺失 |
 | `ring`（not-migrated） |  | — | ethtool_ringparam 字段,随 ethtool 面裁剪;环尺寸为驱动编译期常量,无运行时重建环框架｜分歧(P2a 批次间): gap:环参数(ethtool ringparam)查询/设置面整体缺失 |
 | `self_test`（not-migrated） |  | — | 诊断/回环测试界面外;必要内部自检(如 EEPROM 校验)可在驱动初始化时执行并 log |
+| `self_test.ethtool_ioctl`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-ethtool-diag 模块跳过不迁移。Asterinas 无 ethtool 面：内核无 ethtool_ops 框架、syscall 无 SIOCETHTOOL（三处 grep 全空）。回环自测逻辑（自建 TX 环发自收）作为 P5/P6 候选登记。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
 | `set_coalesce`（not-migrated） |  | — | 目标无中断 moderation API;若性能需要可在驱动内部用常量配置 ITR,不暴露 uapi |
 | `set_eeprom`（not-migrated） |  | — | EEPROM 写路径属诊断/配置界面外,不迁移;目标树主分支无任何 NIC EEPROM API |
 | `set_link_ksettings`（not-migrated） |  | kernel/core/comps/virtio/src/device/network/config.rs:74 | 强制速率/双工需 PHY 管理(缺失);只读链路状态可由驱动内部解码状态寄存器获得(参照 virtio speed/duplex 字段)｜分歧(P2a 批次间): gap:无 rtnl set-link 对应的链路 Ksettings 面 |
@@ -528,6 +531,8 @@
 | `arg`（adapt） | 模块参数选项联合（e1000_param.c opt->arg）改为内核 cmdline 参数：define_kv_param!/define_flag_param! 注册到静态存储（Atomic/Once） | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/comps/cmdline/src/lib.rs:181 | 无 insmod/模块加载，参数来自启动命令行且全局（非每设备）；range/list 校验需自行在 FromStr 或后检实现；last-wins 语义 |
 | `checksum`（adapt） | 普通驱动局部 u16 累加变量（EEPROM 求和等），诊断结果经 ostd 日志输出 | ostd/src/log/macros.rs:46 | 消费面（ethtool UAPI）在目标树不存在（无 SIOCETHTOOL/ethtool 代码）；仅可作驱动内部自检+日志 |
 | `dev_kfree_skb_any`（adapt） | 丢弃 TxBuffer（置 None 或离开作用域）即经 Drop 自动归还 DmaPool，硬中断/softirq/进程上下文皆安全 | kernel/core/comps/network/src/dma_pool.rs:251;kernel/core/comps/virtio/src/device/network/device.rs:334 | ⚠risk:med 必须先从硬件取回描述符（pop_used）再释放，否则设备仍 DMA 已回收内存；Drop 自动化易掩盖释放时序错误 |
+| `e1000_restore_vlan`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-vlan 模块跳过不迁移。Asterinas 无 VLAN 框架对接面：aster-bigtcp（smoltcp 栈）无 802.1Q 支持、netdev 无 vlan_features/回调注册面、virtio 仅有未协商的 feature 位（VIRTIO_NET_F_CTRL_VLAN）。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
+| `e1000_vlan_mode`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-vlan 模块跳过不迁移。Asterinas 无 VLAN 框架对接面：aster-bigtcp（smoltcp 栈）无 802.1Q 支持、netdev 无 vlan_features/回调注册面、virtio 仅有未协商的 feature 位（VIRTIO_NET_F_CTRL_VLAN）。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
 | `errors`（adapt） | 驱动局部计数器（PollStatistics 模式），错误经 NetError 返回值与 ostd 日志上报 | kernel/core/comps/virtio/src/device/network/device.rs:42 | 自检错误计数仅驱动内部可见；目标无 ethtool 自检 UAPI |
 | `likely`（gap） | 无分支预测提示宏；直接省略（由 LLVM 自行布局），树内未使用 core::intrinsics::likely | — | 全树 grep 无 likely!/unlikely! 使用 |
 | `netdev_features_t`（adapt） | smoltcp phy::DeviceCapabilities 结构体（aster_bigtcp::device 再导出）：checksum/max_transmission_unit/max_burst_size/medium 等字段 | kernel/libs/aster-bigtcp/src/device.rs:3;kernel/core/comps/virtio/src/device/network/device.rs:270 | 非 u64 位图，无特性组合协商（无 ethtool set-features 面） |
@@ -546,6 +551,8 @@
 | `vlan`（adapt） | 驱动私有字段（RX 描述符 vlan 字 / 管理固件 VLAN cookie），存于驱动结构体 | kernel/core/comps/virtio/src/device/network/device.rs:24 | 同 vid：无 OS 参与 |
 | `vlan_get_protocol`（gap） | 手工解析：读 ethertype，遇 0x8100/0x88a8 跳 4 字节后重读内层 ethertype | kernel/libs/aster-bigtcp/src/iface/phy/ether.rs:126;kernel/libs/aster-bigtcp/src/iface/phy/ether.rs:135 | EthernetRepr::parse 仅单层 ethertype，无 VLAN 透传 |
 | `vlan_id`（adapt） | 驱动私有 u16 字段（mng_vlan_id），与 active_vlans 位图同存于驱动结构体 | kernel/core/comps/virtio/src/device/network/device.rs:24 | 管理 VLAN 的添加/清除时机（e1000_mng_vlan 逻辑）完全驱动内实现 |
+| `vlan_rx_add_vid`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-vlan 模块跳过不迁移。Asterinas 无 VLAN 框架对接面：aster-bigtcp（smoltcp 栈）无 802.1Q 支持、netdev 无 vlan_features/回调注册面、virtio 仅有未协商的 feature 位（VIRTIO_NET_F_CTRL_VLAN）。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
+| `vlan_rx_kill_vid`（not-migrated） | —（模块整体跳过） | — | 定案(2026-08-31 过夜人工授权)：os-vlan 模块跳过不迁移。Asterinas 无 VLAN 框架对接面：aster-bigtcp（smoltcp 栈）无 802.1Q 支持、netdev 无 vlan_features/回调注册面、virtio 仅有未协商的 feature 位（VIRTIO_NET_F_CTRL_VLAN）。 基础收发路径不受影响；用户决策原文："如果asterinas不支持VLAN框架的话，可以跳过不迁移，但是要记录bypass的原因"（ethtool 两模块依同款先例）。跳过可逆：loop_state phase 改回 pending 即可重跑。 |
 | `work`（adapt） | 延迟任务：comps 层驱动可用 aster-softirq SoftIrqLine::enable/raise（软中断上下文）或专用 ostd Task（async）轮询 Jiffies 实现周期 watchdog；aster-core WorkQueue 为 pub(crate) 不可从 comps 访问 | kernel/core/comps/softirq/src/lib.rs:78;ostd/src/task/mod.rs:237;kernel/core/src/thread/work_queue/mod.rs:110 | conf:medium ⚠risk:med softirq 与 ostd timer 回调（ostd/src/timer/mod.rs:34）均为关中断上下文，禁止睡眠/阻塞；watchdog/reset_task 等需长延时者应放 ostd 任务 |
 
 ## linux/igmp.h
@@ -636,7 +643,7 @@
 | `buf`（not-migrated） |  | — | conf:medium 非独立 API：疑似符号抽取碎片，源于 kernel.h 中 snprintf/sprintf/hex_byte_pack(char *buf,...) 等的形参名（参考树 linux/include/linux/kernel.h:341,476）；对应缓冲区能力由具体函数条目（见 fmt/format）承担；Rust 侧用 [u8; N]/&mut [u8]/Vec<u8> 表达 |
 | `fmt`（adapt） | Rust 格式串 + 内核日志宏 ostd::info!/ostd::warn!（use ostd::info; 等经 #[macro_export] 导出） | ostd/src/log/macros.rs:62;kernel/core/comps/virtio/src/transport/pci/device.rs:285 | conf:medium 碎片符号（kernel.h 各 *printf 形参 fmt）；C printf 格式 %d/%s/%x 须改写为 Rust {}/{:?}/{:#x}，编译期检查参数与格式匹配，无运行时 vsprintf；日志级别映射 netdev_info→info!、netdev_warn→warn! |
 | `format`（adapt） | alloc::format!("...{}...", args) 返回 String（对应 kasprintf 类动态分配场景） | kernel/core/comps/nvme/src/device/block_device.rs:142;kernel/core/src/syscall/getcwd.rs:25 | conf:medium 碎片符号（kernel.h __trace_printk_check_format/kasprintf 语境）；格式编译期检查，返回堆分配 String 而非 char*；kernel 为 no_std+alloc，格式化能力经 alloc 提供，无 %n 等危险转换 |
-| `mutex_lock`（adapt） | ostd::sync::Mutex：let guard = m.lock(); 返回 MutexGuard，RAII 守卫 drop 时自动解锁（对应 mutex_unlock），try_lock() 对应 mutex_trylock | ostd/src/sync/mutex.rs:35;ostd/src/sync/mutex.rs:113;kernel/core/comps/pci/src/lib.rs:80 | ⚠risk:med 阻塞式睡眠锁（内部 WaitQueue.wait_until），与 Linux mutex 同为可睡眠锁：仅线程/进程上下文可持有，禁止在中断/原子上下文加锁，持锁区间不可调用可能睡眠的路径前需评估；无显式 unlock API，靠作用域结束释放；guard 非 Send，不可跨核传递 |
+| `mutex_lock`（gap） | ostd::sync::Mutex：let guard = m.lock(); 返回 MutexGuard，RAII 守卫 drop 时自动解锁（对应 mutex_unlock），try_lock() 对应 mutex_trylock | ostd/src/sync/mutex.rs:35;ostd/src/sync/mutex.rs:113;kernel/core/comps/pci/src/lib.rs:80 | conf:low ⚠risk:med 阻塞式睡眠锁（内部 WaitQueue.wait_until），与 Linux mutex 同为可睡眠锁：仅线程/进程上下文可持有，禁止在中断/原子上下文加锁，持锁区间不可调用可能睡眠的路径前需评估；无显式 unlock API，靠作用域结束释放；guard 非 Send，不可跨核传递｜探针 FAIL 降级 gap(P3hw-eeprom) |
 | `offsetof`（direct） | core::mem::offset_of!(Type, field) 返回 usize，可在 const 上下文使用 | kernel/libs/aster-util/src/safe_ptr.rs:457;kernel/core/comps/virtio/src/transport/mmio/device.rs:65 | 标准库宏，语义等价；支持嵌套字段路径 offset_of!(T, a.b)；Linux 侧 offsetof 实由 stddef.h 经 kernel.h 传递使用 |
 | `out`（not-migrated） |  | — | conf:medium 非 API：C 出参变量/标签命名碎片（kernel.h get_option(char **str,int *pint) 类出参语境）；Rust 迁移中出参一律改写为返回值 Result<T>/元组，无需映射 |
 | `regs`（adapt） | 设备寄存器=MMIO：PCI BAR 映射为 ostd::mm::IoMem，再经 SafePtr<T, IoMem> 类型化访问（.read_once()/.write_once()，cast::<u32>() 决定宽度，restrict::<ReadOp/WriteOp>() 决定方向） | ostd/src/io/io_mem/mod.rs:50;kernel/libs/aster-util/src/safe_ptr.rs:255;kernel/libs/aster-util/src/safe_ptr.rs:265;kernel/core/comps/virtio/src/transport/mmio/device.rs:62 | conf:medium ⚠risk:med 符号为 kernel.h:325 nmi_panic(struct pt_regs *regs) 形参碎片；驱动语境（e1000 hw regs、ethtool get_regs）指设备寄存器组：MMIO 读宽必须显式（u8/u16/u32），read_once/write_once 保证非撕裂单次访问；pt_regs（CPU 上下文寄存器）在内核态驱动迁移中通常不需要 |
@@ -1021,7 +1028,7 @@
 
 | Linux 用法 | 目标方案 | 已核实 | 备注 |
 |---|---|---|---|
-| `cond_resched`（adapt） | ostd::task::Task::yield_now() | ostd/src/task/mod.rs:96;kernel/core/src/thread/mod.rs:141 | ⚠risk:med 语义差异:cond_resched 仅 need_resched 时让出,yield_now 无条件重调度;仅任务上下文可用,中断/softirq 中禁止调用;长 EEPROM 自检循环中用它防止饿死 |
+| `cond_resched`（gap） | ostd::task::Task::yield_now() | ostd/src/task/mod.rs:96;kernel/core/src/thread/mod.rs:141 | conf:low ⚠risk:med 语义差异:cond_resched 仅 need_resched 时让出,yield_now 无条件重调度;仅任务上下文可用,中断/softirq 中禁止调用;长 EEPROM 自检循环中用它防止饿死｜探针 FAIL 降级 gap(P3hw-eeprom)｜教训(2026-08-30 实测)：yield_now 在 bootstrap 组件 init 期非法——ostd 惰性注入 scheduler 后与 sched_class::init 的常规注入冲突 panic（"a scheduler has already been initialized"）；组件期一律 no-op，运行期（open 等任务上下文、scheduler 就绪后）才可 yield｜定案(2026-08-30)：bring-up 全留 Bootstrap 组件期（跟随 asterinas 现存 nvme/virtio/i8042 惯例；栈消费窗口=net::init 的 new_e1000()，天然对齐；零平台改动）——组件期 no-op 为终态非权宜；运行期消费者落地时再评估条件 yield。Task::yield_now Bootstrap 组件期禁用（调度器依赖 API 一律不用） |
 
 ## linux/scc.h
 
@@ -1055,7 +1062,7 @@
 | `gso_segs`（not-migrated） | GSO/TSO 按策略裁剪不迁：目标栈不支持下大包 offload | kernel/core/comps/virtio/src/device/network/device.rs:285 | 参考驱动 virtio 断言 GUEST_TSO4/6/UFO 关闭；e1000 按 segs 计费 bytecount 的逻辑删除 |
 | `gso_size`（not-migrated） | GSO/TSO 裁剪不迁 | kernel/core/comps/virtio/src/device/network/device.rs:285;kernel/core/comps/virtio/src/device/network/header.rs:13 | 若未来启用可仿 VirtioNetHdr.gso_size 字段建驱动元数据头 |
 | `hdr_len`（not-migrated） | TSO ctx desc 的 hdr_len=transport_offset+tcp_hdrlen 随 TSO 裁剪；若需驱动私有头长度，RxBuffer::new(header_len) 提供等价 headroom | kernel/core/comps/network/src/buffer.rs:113;kernel/core/comps/virtio/src/device/network/device.rs:95 | RxBuffer.header_len 语义是驱动元数据头（如 VirtioNetHdr），非协议头长度 |
-| `napi_alloc_skb`（adapt） | RX: RxBuffer::new(size_of::<Hdr>(), RX_BUFFER_POOL.get().unwrap())，可在轮询/softirq 上下文调用 | kernel/core/comps/virtio/src/device/network/device.rs:174;kernel/core/comps/virtio/src/device/network/buffer.rs:12 | ⚠risk:med 从预建 DMA 池分配（SpinLock 保护，不睡眠）；定长 4096；无 page frags；sync_from_device 延迟到 payload() 时执行 |
+| `napi_alloc_skb`（gap） | RX: RxBuffer::new(size_of::<Hdr>(), RX_BUFFER_POOL.get().unwrap())，可在轮询/softirq 上下文调用 | kernel/core/comps/virtio/src/device/network/device.rs:174;kernel/core/comps/virtio/src/device/network/buffer.rs:12 | conf:low ⚠risk:med 从预建 DMA 池分配（SpinLock 保护，不睡眠）；定长 4096；无 page frags；sync_from_device 延迟到 payload() 时执行｜探针 FAIL 降级 gap(P2pregen) |
 | `netdev_alloc_frag`（adapt） | DmaPool::alloc_segment()：段由页内切分而来，drop 自动归还池（等价 page-frag 复用） | kernel/core/comps/network/src/dma_pool.rs:90;kernel/core/comps/network/src/dma_pool.rs:159;kernel/core/comps/network/src/dma_pool.rs:148 | ⚠risk:med 段定长 2^n（64..PAGE_SIZE）且设备地址对齐段大小；不支持变长/部分页使用；设备地址由 DmaStream::map 建立，描述符必须用 daddr() 而非物理地址 |
 | `no_fcs`（gap） | 无 skb->no_fcs 等价位；发包接口 send(&[u8]) 不携带元数据。绕过：删除 BYPASS FCS 分支，恒定附加 FCS | kernel/core/comps/network/src/lib.rs:55;kernel/core/comps/network/src/driver.rs:61 | 属调试/测试用能力，目标面不暴露 |
 | `nr_frags`（gap） | 恒为 0：无线性/分片二分；绕过：删除 frags 循环与按 nr_frags 的描述符计数 | kernel/core/comps/network/src/buffer.rs:17 | 与 frag/gso 一并裁剪 |
@@ -1369,6 +1376,195 @@
 | Linux 用法 | 目标方案 | 已核实 | 备注 |
 |---|---|---|---|
 | `min_frame_size`（adapt） | 驱动内常量（64）+ RX 长度校验/TX 短帧填充照搬；帧组解析走 aster-bigtcp 以太网路径 | kernel/libs/aster-bigtcp/src/iface/phy/ether.rs:11 | conf:medium 协议栈不强制最小帧长，短帧处理为驱动职责 |
+
+## unresolved
+
+| Linux 用法 | 目标方案 | 已核实 | 备注 |
+|---|---|---|---|
+| `AutoNeg`（adapt） | aster_cmdline::define_kv_param!("e1000.AutoNeg", AUTONEG_PARAM)（Once<u32> 存储），经驱动内部 list 校验后写入 hw.autoneg_advertised | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | Linux 侧为 E1000_PARAM 宏(module_param_array_named)生成的静态 int 数组，按 bd_number 每 NIC 取值；目标树为内建驱动，仅有内核 cmdline key=value 参数（define_kv_param! 单值 last-wins，Once 未初始化即 OPTION_UNSET 语义），无按 NIC 数组；值域 0x01-0x2F 位掩码，默认 0x2F(copper)/0x20(fiber)；既移植约定将模块参数折为构造配置（hw_defs.rs:2155 mapping:arg），默认值可硬编码 |
+| `CTRL_DUP`（not-migrated） |  | — | 驱动内部符号，非 OS API：设备寄存器偏移宏 E1000_CTRL_DUP(0x00004，控制寄存器影子/Shadow)，定义于驱动自带头文件 e1000_hw.h:780，仅在 e1000_reset_hw 中 82545/82546_rev_3 复位路径 ew32(CTRL_DUP, ctrl|E1000_CTRL_RST) 使用；迁移时随驱动寄存器映射一起携带，与目标 OS API 无关 |
+| `CTRL_EXT`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_hw.h:784 定义的 E1000_CTRL_EXT 寄存器偏移宏，经驱动自有 er32/ew32 宏访问（er32(CTRL_EXT)），属设备寄存器图，随驱动迁移 |
+| `FLOW_CONTROL_FULL`（direct） | FcType::Full（=3） | kernel/core/comps/e1000/src/hw_defs.rs:492 | 参考树中该宏仅出现于 e1000_param.c:98 #define FLOW_CONTROL_DEFAULT FLOW_CONTROL_FULL，本身已无定义（历史遗留别名）；语义=e1000_fc_full=3，目标树已按 E1000_FC_FULL 移植为 FcType::Full=3（hw_defs.rs:492-493） |
+| `FlowControl`（adapt） | aster_cmdline::define_kv_param!("e1000.FlowControl", FLOW_CONTROL_PARAM)，0-3 校验后写 hw.fc: FcType | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138;kernel/core/comps/e1000/src/hw_defs.rs:2062 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；值 0-3 对应 FcType，默认 E1000_FC_DEFAULT(0xFF, 读 EEPROM)；目标 Hw 已有 pub fc: FcType 字段承接 |
+| `InterruptThrottleRate`（adapt） | aster_cmdline::define_kv_param!("e1000.InterruptThrottleRate", ITR_PARAM)，特例 0/1/3/4 + 100-100000 范围校验后写驱动内部 itr/itr_setting | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；0=off/1=dynamic/3=dynamic-conservative/4=simplified 为驱动内部特例逻辑，直译保留；默认 3(dynamic) 对应 itr=20000 |
+| `PHY_IDLE_ERROR_COUNT_MASK`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_main.c:3596 内局部 #define（0x00FF），用于掩码 PHY_1000T_STATUS 空闲错误计数字段，迁移时在驱动内重新定义即可 |
+| `RxAbsIntDelay`（adapt） | aster_cmdline::define_kv_param!("e1000.RxAbsIntDelay", RX_ABS_INT_DELAY_PARAM)（Once<u16>），范围校验 0-65535 后写 adapter.rx_abs_int_delay | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；单位 1.024µs，默认 RADV=8 |
+| `RxDescriptors`（adapt） | aster_cmdline::define_kv_param!("e1000.RxDescriptors", RX_DESCRIPTORS_PARAM)（Once<u32>），范围 80-4096 校验并按 REQ_RX_DESCRIPTOR_MULTIPLE 对齐后写 rx_ring.count | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；上限随 mac_type(<e1000_82544 为 256)分支为驱动内部逻辑，默认 256 |
+| `RxIntDelay`（adapt） | aster_cmdline::define_kv_param!("e1000.RxIntDelay", RX_INT_DELAY_PARAM)（Once<u16>），范围校验 0-65535 后写 adapter.rx_int_delay | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；单位 1.024µs，默认 RDTR=0；C 注释警告非零值可能挂起硬件——范围校验必须保留 |
+| `SmartPowerDownEnable`（adapt） | aster_cmdline::define_kv_param!("e1000.SmartPowerDownEnable", SPD_PARAM)（0/1 使能项） | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；enable_option 0/1，默认 0(禁用) |
+| `TX_WAKE_THRESHOLD`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_main.c:3876 本地 #define TX_WAKE_THRESHOLD 32，TX 队列唤醒阈值 |
+| `TxAbsIntDelay`（adapt） | aster_cmdline::define_kv_param!("e1000.TxAbsIntDelay", TX_ABS_INT_DELAY_PARAM)（Once<u16>），范围校验 0-65535 后写 adapter.tx_abs_int_delay | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；单位 1.024µs，默认 TADV=32 |
+| `TxDescriptors`（adapt） | aster_cmdline::define_kv_param!("e1000.TxDescriptors", TX_DESCRIPTORS_PARAM)（Once<u32>），范围 80-4096 校验并按 REQ_TX_DESCRIPTOR_MULTIPLE 对齐后写 tx_ring.count | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；上限随 mac_type(<e1000_82544 为 256)分支为驱动内部逻辑，默认 256 |
+| `TxIntDelay`（adapt） | aster_cmdline::define_kv_param!("e1000.TxIntDelay", TX_INT_DELAY_PARAM)（Once<u16>），范围校验 0-65535 后写 adapter.tx_int_delay | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；单位 1.024µs，默认 TIDV=8 |
+| `XsumRX`（adapt） | aster_cmdline::define_kv_param!("e1000.XsumRX", XSUM_RX_PARAM)，0/1 校验后写 adapter.rx_csum | kernel/core/comps/cmdline/src/lib.rs:101;kernel/core/src/fs/rootfs.rs:138 | module_param_array_named 数组 vs 目标全局 cmdline 单值（差异同 AutoNeg）；enable_option 0/1，默认 1；目标解析走 FromStr，需自定义 0/1 整数解析而非 bool 的 true/false |
+| `agc_reg_array`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_get_cable_length 中的 static const u16 本地数组（Linux 树 e1000_hw.c:4924） |
+| `agc_value`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u16 累加变量（Linux 树 e1000_hw.c:4881） |
+| `an_list`（not-migrated） |  | — | 驱动内部符号，非 OS API——AutoNeg 选项的静态 const 值/描述表（e1000_param.c:594-626），直译为 Rust const 数组；与其交互的校验框架为驱动私有 |
+| `bufend`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_map frag 循环局部变量（对齐判断用），e1000_main.c:2900 |
+| `buffer_info`（not-migrated） |  | — | 驱动内部符号，非 OS API：struct e1000_tx_ring/e1000_rx_ring 字段（e1000.h:157,178）及局部变量名 |
+| `bytes_compl`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_clean_tx_irq 局部计数变量，e1000_main.c:3834 |
+| `cable_length`（not-migrated） |  | — | 驱动内部符号，非 OS API：struct e1000_phy_info 的字段 e1000_cable_length cable_length（Linux 树 e1000_hw.h:216），类型为驱动私有枚举 |
+| `cards_found`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 内 static int 计数器，用于 adapter->bd_number 编号（e1000_main.c:927,1019,1222）；Rust 侧可迁移为驱动模块内 AtomicU32 或省略 |
+| `ce4100_gbe_mdio_base_virt`（not-migrated） |  | — | 驱动内部 struct e1000_hw 字段（CE4100 专用 MMIO 基址），非 OS API |
+| `cleaned_count`（not-migrated） |  | — | 驱动内部符号（e1000_clean_rx_irq 局部计数变量/函数参数），非 OS API |
+| `cmd_length`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量，写入 context_desc->cmd_and_length，e1000_main.c:2700 |
+| `coll_dist`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_config_collision_dist 中的局部 u32 变量（Linux 树 e1000_hw.c:1879），装 E1000_COLLISION_DISTANCE* 宏值后移位进 TCTL.COLD，随函数体一并迁移 |
+| `context_desc`（not-migrated） |  | — | 驱动内部符号，非 OS API：指向 struct e1000_context_desc（e1000.h 定义的硬件描述符）的局部指针，e1000_main.c:2741 |
+| `ctrl_ext`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u32 变量，暂存 CTRL_EXT 寄存器读写值 |
+| `cur_agc_value`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u16 变量（Linux 树 e1000_hw.c:4922） |
+| `current_itr`（not-migrated） |  | — | 驱动内部符号（e1000_update_itr 局部变量），非 OS API |
+| `desc_needed`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_xmit_frame 局部变量，e1000_main.c:3253 |
+| `disable_dev`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe/remove 内局部 bool，控制是否调用 pci_disable_device（e1000_main.c:934,1239,1244）；随清理流程用 Result/Drop 语义自然表达 |
+| `dma_error`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_map 中 goto 错误处理标号，e1000_main.c:2951 |
+| `dplx_list`（not-migrated） |  | — | 驱动内部符号，非 OS API——Duplex 选项静态 const 值/描述表（e1000_param.c:567-570，HALF_DUPLEX=1/FULL_DUPLEX=2），直译为 const 数组 |
+| `e1000_eeprom_lock`（not-migrated） |  | — | 驱动内部符号，非 OS API：文件级 static DEFINE_MUTEX 锁变量（参考树 e1000_hw.c:84），串行化 EEPROM 读写的包装入口；迁移时以驱动侧锁自建，其底层 mutex_lock/mutex_unlock 原语属其他符号另行映射 |
+| `e1000_opt_list`（not-migrated） |  | — | 驱动内部符号，非 OS API——{int i; char *str} 描述对类型（e1000_param.c:178，struct e1000_option 的成员类型），直译为 (i32, &'static str) 或小结构体 |
+| `e1000_phy_lock`（not-migrated） |  | — | 驱动内部符号，非 OS API：static DEFINE_SPINLOCK(e1000_phy_lock)（Linux 树 e1000_hw.c:85）串行化 MDI 访问的自旋锁变量；其声明处用的 DEFINE_SPINLOCK 是 Linux 宏，迁移时以 Asterinas 等价锁原语替换，但本条目本身是内部变量名 |
+| `e1000_pm_ops`（not-migrated） |  | — | 驱动内部符号，非 OS API：SIMPLE_DEV_PM_OPS(e1000_pm_ops,...) 定义的驱动私有 pm_ops（e1000_main.c:178,186），挂接 pci_driver.pm；且 PM 属迁移策略界外能力，不迁 |
+| `e1000_read_reg_io`（not-migrated） |  | — | 驱动内部 PIO 寄存器访问 helper（本版本树仅有宏引用，无定义），非 OS API；如 P4 需要可用目标树 IoPort 自行实现 |
+| `eecd`（not-migrated） |  | — | 驱动内部符号，非 OS API：EEPROM 各函数（init_eeprom_params/acquire/shift_out/standby/write_microwire 等）的局部 u32 变量，缓存 er32(EECD) 寄存器当前值 |
+| `eeprom_apme_mask`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 内局部 u16，存 EEPROM WoL/APME 使能位掩码（e1000_main.c:932,1133,1148）；WoL 属界外能力，随 WoL 裁剪一并删除 |
+| `eeprom_size`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_init_eeprom_params 内局部 u16 变量，暂存 EEPROM_CFG 字并换算 word_size |
+| `enable_option`（not-migrated） |  | — | 驱动内部符号，非 OS API——struct e1000_option.type 的枚举常量之一（e1000_param.c:167），驱动私有选项校验框架，直译为 Rust enum 变体 |
+| `eop`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_clean_tx_irq 局部下标变量，e1000_main.c:3831 |
+| `eop_desc`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_clean_tx_irq 局部指针，指向 e1000.h 定义的数据 TX 描述符，e1000_main.c:3829 |
+| `err_alloc_etherdev`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签（e1000_main.c:1241-1242）；Rust 侧用 Result + ? 与 Drop 回收替代标签链 |
+| `err_dma`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签（e1000_main.c:1234）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_eeprom`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签，含 PHY 复位与 flash iounmap（e1000_main.c:1226-1230）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_inval`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_set_spd_dplx 内的 goto 错误处理标签（标签定义于 e1000_main.c:553），迁移时用 Rust 的提前返回/Result 错误路径替代 |
+| `err_ioremap`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签（e1000_main.c:1238-1245）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_mdio_ioremap`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签（e1000_main.c:1231-1233）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_pci_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理链末尾标签（e1000_main.c:1243-1246）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_register`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签，register_netdev 失败入口（e1000_main.c:1225,1203）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `err_req_irq`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 错误路径 goto 标签 |
+| `err_setup_rx`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 错误路径 goto 标签 |
+| `err_setup_tx`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 错误路径 goto 标签 |
+| `err_sw_init`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_probe 的 goto 错误清理标签（e1000_main.c:1235-1237）；Rust 侧用 Result + ? 与 Drop 替代 |
+| `fc_list`（not-migrated） |  | — | 驱动内部符号，非 OS API——FlowControl 选项静态 const 值/描述表（e1000_param.c:330-336，值为 E1000_FC_* 枚举），直译为 const 数组；值语义已由目标 FcType 枚举承接 |
+| `frag_len`（not-migrated） |  | — | 驱动内部符号（e1000_frag_len 驱动私有辅助函数，计算 RX buffer 分片长度），非 OS API |
+| `full_duplex_only`（not-migrated） |  | — | 驱动内部符号，非 OS API——goto 标签（e1000_param.c:713，SPEED_1000 各 case 的汇入点），Rust 中以 match 分支合并共享逻辑消除，非 OS API |
+| `global_quad_port_a`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 内 static int，四端口卡首个端口的全局指示（e1000_main.c:928,1169-1175）；如需保留可迁移为驱动内 AtomicBool/静态计数 |
+| `goc`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_watchdog 内局部 u32 变量（ITR 自适应中断限速的流量缩放中间值），迁移时为普通局部绑定 |
+| `hash_bit`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_set_rx_mode 中组播哈希位局部变量 |
+| `hash_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：组播哈希寄存器索引局部变量 |
+| `hwm`（not-migrated） |  | — | 驱动内部符号，非 OS API：流控高水位局部变量 |
+| `ipcse`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（IP 校验和结束偏移），e1000_main.c:2701 |
+| `ipcso`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（IP 校验和起始偏移），e1000_main.c:2702 |
+| `ipcss`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（IP 头起始偏移），e1000_main.c:2702 |
+| `ipgr1`（not-migrated） |  | — | 驱动内部符号，非 OS API：TIPG 包间隙1局部变量 |
+| `ipgr2`（not-migrated） |  | — | 驱动内部符号，非 OS API：TIPG 包间隙2局部变量 |
+| `itr_setting`（not-migrated） |  | — | 驱动内部符号（e1000_adapter 私有字段，中断节流模式配置），非 OS API |
+| `last_byte`（not-migrated） |  | — | 驱动内部宏 TBI_ACCEPT 的参数/局部名，非 OS API |
+| `led_ctrl`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u32 变量，暂存 LEDCTL 寄存器值 |
+| `led_mask`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_id_led_init 中的局部常量（u16 led_mask=0x0F，e1000_hw.c:4418），LED EEPROM 字段掩码 |
+| `ledctl`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_id_led_init/e1000_cleanup_led 中的局部 u32 变量，缓存 LEDCTL 寄存器值（e1000_hw.c:4413,4488） |
+| `ledctl_mask`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_id_led_init 中的局部常量 0x000000FF（e1000_hw.c:4414），LED 模式字段掩码 |
+| `ledctl_off`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部常量 = E1000_LEDCTL_MODE_LED_OFF（e1000_hw.c:4416），驱动自有宏 |
+| `ledctl_on`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部常量 = E1000_LEDCTL_MODE_LED_ON（e1000_hw.c:4415），驱动自有宏 |
+| `legacy_pba_adjust`（not-migrated） |  | — | 驱动内部符号，非 OS API：PBA 调整标志局部变量 |
+| `link_active`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_has_link 内局部 bool 变量，按 media_type 分支累积链路状态后返回 |
+| `list_option`（not-migrated） |  | — | 驱动内部符号，非 OS API——struct e1000_option.type 的枚举常量之一（e1000_param.c:167），驱动私有选项校验框架，直译为 Rust enum 变体 |
+| `mac_type`（not-migrated） |  | — | 驱动内部 e1000_mac_type 枚举及 struct e1000_hw 字段，非 OS API |
+| `manc`（not-migrated） |  | — | 驱动内部符号，非 OS API：多处函数内局部 u32 变量，暂存 MANC 寄存器值（e1000_hw.c:379,5509；e1000_main.c:334,348），随 ew32/er32 直接使用 |
+| `max_frame`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_change_mtu 内局部变量（new_mtu+ETH_HLEN+ETH_FCS_LEN），用于 jumbo 上限检查与 rx_buffer_len 选择 |
+| `max_per_txd`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_xmit_frame 局部变量（单描述符最大字节数），e1000_main.c:3102 |
+| `max_txd_pwr`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_xmit_frame 局部变量（2 的幂次），e1000_main.c:3103 |
+| `mcarray`（not-migrated） |  | — | 驱动内部符号，非 OS API：组播表数组局部指针（kcalloc） |
+| `mdic`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u32 变量，暂存 MDI Control 寄存器读写值（Linux 树 e1000_hw.c:2810 等） |
+| `mii_1000t_ctrl_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:1497），缓存 PHY_1000T_CTRL 寄存器值，经驱动内部 e1000_read/write_phy_reg 访问 |
+| `mii_autoneg_adv_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:1496），缓存 PHY_AUTONEG_ADV 寄存器值 |
+| `mii_ctrl_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:1645），缓存 PHY_CTRL（MII 控制寄存器）值 |
+| `mii_nway_adv_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:2050），缓存自协商广播寄存器值 |
+| `mii_nway_lp_ability_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:2051），缓存链路伙伴能力寄存器值 |
+| `mii_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：PHY 寄存器值局部变量 |
+| `mii_status_reg`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u16 变量（Linux 树 e1000_hw.c:1646），缓存 PHY 状态寄存器值 |
+| `min_agc_value`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u16 变量（Linux 树 e1000_hw.c:4923） |
+| `min_rx_space`（not-migrated） |  | — | 驱动内部符号，非 OS API：最小 RX 缓冲空间局部变量 |
+| `min_tx_space`（not-migrated） |  | — | 驱动内部符号，非 OS API：最小 TX 缓冲空间局部变量 |
+| `msglvl`（not-migrated） |  | — | 驱动内部日志包装宏的参数名，非 OS API；netif_* 日志 API 另行映射 |
+| `mta`（not-migrated） |  | — | 驱动内部符号，非 OS API：组播哈希位掩码局部变量 |
+| `mta_reg_count`（not-migrated） |  | — | 驱动内部符号，非 OS API：MTA 寄存器数量局部变量 |
+| `mta_size`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_init_hw() 内的函数局部变量 u32 mta_size（e1000_hw.c:529 声明，:573 赋值 E1000_MC_TBL_SIZE，:574 作清零 MTA 多播表的循环上界），无任何目标 OS 对应物需求 |
+| `my_u`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_dump 中函数内局部定义的 struct my_u（描述符按 2x64bit 打印用），e1000_main.c:3405 |
+| `need_ioport`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 局部变量并镜像为 adapter->need_ioport 字段（e1000_main.c:933,937; e1000.h:294），标记设备是否使用 BAR I/O 端口；保留为驱动内 bool 字段即可 |
+| `new_itr`（not-migrated） |  | — | 驱动内部符号（e1000_update_itr 局部变量），非 OS API |
+| `next_buffer`（not-migrated） |  | — | 驱动内部符号（e1000_clean_rx_irq 局部指针，指向下一 rx buffer_info），非 OS API |
+| `next_rxd`（not-migrated） |  | — | 驱动内部符号（e1000_clean_rx_irq 局部指针，指向下一 RX 描述符），非 OS API |
+| `next_to_clean`（not-migrated） |  | — | 驱动内部 e1000_tx_ring/e1000_rx_ring 环索引字段，非 OS API |
+| `next_to_use`（not-migrated） |  | — | 驱动内部 e1000_tx_ring/e1000_rx_ring 环索引字段，非 OS API |
+| `num_AutoNeg`（not-migrated） |  | — | 驱动内部符号，非 OS API——E1000_PARAM 宏生成的 static unsigned int num_##X，由 module_param_array 机制回填用户提供的元素个数；迁移后由参数存储存在性/出现次数替代或随默认值方案删除 |
+| `num_Duplex`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_FlowControl`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_InterruptThrottleRate`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_RxAbsIntDelay`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_RxDescriptors`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_RxIntDelay`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_SmartPowerDownEnable`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_Speed`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_TxAbsIntDelay`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_TxDescriptors`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_TxIntDelay`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `num_XsumRX`（not-migrated） |  | — | 驱动内部符号，非 OS API——同 num_AutoNeg，module_param_array 回填计数器 |
+| `olddata`（not-migrated） |  | — | 驱动内部符号（寄存器 dump 逻辑中的局部暂存变量），非 OS API |
+| `olddesc`（not-migrated） |  | — | 驱动内部符号，非 OS API：描述符重分配时保存旧地址的局部变量 |
+| `olddma`（not-migrated） |  | — | 驱动内部符号，非 OS API：描述符重分配时保存旧 DMA 地址的局部变量 |
+| `pci_using_dac`（not-migrated） |  | — | 驱动内部符号，非 OS API：probe 局部 int，标记 64-bit DMA（DAC）设置成功与否（e1000_main.c:929,1000-1003,1056）；Rust 侧以 bool 表达 |
+| `phy_ctrl`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_smartspeed 内局部 u16 变量，缓存 PHY_1000T_CTRL/PHY_CTRL 寄存器读写值；寄存器访问经驱动自有 e1000_read/write_phy_reg（hw 域） |
+| `phy_id_high`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u16 变量，暂存 PHY ID1 寄存器读值（Linux 树 e1000_hw.c:3135） |
+| `phy_id_low`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 u16 变量，暂存 PHY ID2 寄存器读值（Linux 树 e1000_hw.c:3135） |
+| `phy_info`（not-migrated） |  | — | 驱动内部 struct e1000_phy_info/adapter 字段名，非 OS API |
+| `phy_info_task`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_adapter 结构体的 delayed_work 字段，由 schedule_delayed_work 延迟 2*HZ 调度 e1000_update_phy_info_task；延迟工作队列 OS API 属其他域映射 |
+| `phy_init_status`（not-migrated） |  | — | 驱动内部符号，非 OS API：本地 s32 变量，暂存 e1000_set_phy_type 返回值（Linux 树 e1000_hw.c:3134、3189） |
+| `phy_status`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_smartspeed 内局部 u16 变量，缓存 PHY_1000T_STATUS 寄存器读值用于 MS_CONFIG_FAULT 检测 |
+| `phy_tmp`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_update_stats 内局部 u16 变量（e1000_main.c:3593），暂存 PHY 寄存器读取值，迁移时改为驱动内局部变量 |
+| `pkts_compl`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_clean_tx_irq 局部计数变量，e1000_main.c:3834 |
+| `process_skb`（not-migrated） |  | — | 驱动内部符号（e1000_clean_rx_irq 内的 goto 标签），非 OS API |
+| `pull_size`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_xmit_frame TSO 路径局部变量，e1000_main.c:3144 |
+| `range_option`（not-migrated） |  | — | 驱动内部符号，非 OS API——struct e1000_option.type 的枚举常量之一（e1000_param.c:167），驱动私有选项校验框架，直译为 Rust enum 变体 |
+| `rar_entries`（not-migrated） |  | — | 驱动内部符号，非 OS API：RAR 表项数局部变量 |
+| `rar_high`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_rar_set 中组装 RAR 高 32 位（含 E1000_RAH_AV 位）的局部变量（e1000_hw.c:4335-4371） |
+| `rar_index`（not-migrated） |  | — | 驱动内部函数 e1000_rar_set 的参数名，非 OS API |
+| `rar_low`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_rar_set 中组装 RAR 低 32 位 MAC 地址的局部变量（e1000_hw.c:4335-4369） |
+| `rar_num`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_init_rx_addrs 中的局部变量（= E1000_RAR_ENTRIES，e1000_hw.c:4267-4280），计数用 |
+| `rdba`（not-migrated） |  | — | 驱动内部符号，非 OS API：RX 描述符环基址局部变量 |
+| `rdlen`（not-migrated） |  | — | 驱动内部符号，非 OS API：RX 描述符环长度局部变量 |
+| `reg_name`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_dump 局部 static 寄存器名数组，e1000_main.c:3291 |
+| `regs_buff`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_get_regs/dump 局部指针，e1000_main.c:3288 |
+| `reset_task`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_adapter 结构体的 work_struct 字段，tx_timeout/watchdog 经 schedule_work 触发 e1000_reset_task 做进程上下文复位 |
+| `ret_val`（not-migrated） |  | — | 驱动内部符号，非 OS API：EEPROM 函数内局部 s32 错误码变量，Rust 迁移由 Result 表达 |
+| `rx_csum`（not-migrated） |  | — | 驱动内部符号，非 OS API——e1000_check_options 内局部变量（兼 adapter->rx_csum 字段），RX 校验和卸载开关，落驱动自身 adapter 配置结构；其参数来源 XsumRX 见对应条目 |
+| `rx_desc`（not-migrated） |  | — | 驱动内部符号，非 OS API：指向 e1000.h 定义的 struct e1000_rx_desc（硬件 RX 描述符）的局部指针，e1000_main.c:4149 |
+| `rx_ring_summary`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_dump 中 goto 标号，e1000_main.c:3400,3426 |
+| `rxdr`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_rx_ring* 函数参数/局部指针（驱动内部结构体） |
+| `set_itr_now`（not-migrated） |  | — | 驱动内部符号（e1000_update_itr 内的 goto 标签），非 OS API |
+| `setup_rx_desc_die`（not-migrated） |  | — | 驱动内部符号，非 OS API：RX 描述符分配失败 goto 标签 |
+| `setup_tx_desc_die`（not-migrated） |  | — | 驱动内部符号，非 OS API：TX 描述符分配失败 goto 标签 |
+| `speed_list`（not-migrated） |  | — | 驱动内部符号，非 OS API——Speed 选项静态 const 值/描述表（e1000_param.c:544-548，SPEED_10/100/1000 为 ethtool 数字常量 10/100/1000），直译为 const 数组，数值用字面量即可 |
+| `status_err`（not-migrated） |  | — | 驱动内部符号（RX 描述符 status/error 字段的局部变量与函数参数），非 OS API |
+| `tbi_compatibility_on`（not-migrated） |  | — | 驱动内部 struct e1000_hw 布尔字段，非 OS API |
+| `tctl`（not-migrated） |  | — | 驱动内部符号，非 OS API：局部 u32 变量（Linux 树 e1000_hw.c:1879，er32(TCTL) 读入）；寄存器偏移由驱动私有宏 E1000_TCTL(0x00400) 定义，MMIO 读写经驱动内部 ew32/er32，均随驱动整体迁移 |
+| `tdba`（not-migrated） |  | — | 驱动内部符号，非 OS API：TX 描述符环基址局部变量 |
+| `tdlen`（not-migrated） |  | — | 驱动内部符号，非 OS API：TX 描述符环长度局部变量 |
+| `tipg`（not-migrated） |  | — | 驱动内部符号，非 OS API：发送包间隙寄存器值局部变量 |
+| `total_rx_bytes`（not-migrated） |  | — | 驱动内部符号（e1000_adapter 私有统计字段，亦有同名局部变量），非 OS API |
+| `total_rx_packets`（not-migrated） |  | — | 驱动内部符号（e1000_adapter 私有统计字段，亦有同名局部变量），非 OS API |
+| `total_tx_bytes`（not-migrated） |  | — | 驱动内部符号，非 OS API：struct e1000_adapter 字段（e1000.h:215）及 e1000_clean_tx_irq 局部变量（e1000_main.c:3833） |
+| `total_tx_packets`（not-migrated） |  | — | 驱动内部符号，非 OS API：struct e1000_adapter 字段（e1000.h:216）及 e1000_clean_tx_irq 局部变量（e1000_main.c:3833） |
+| `tucse`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（TCP 校验和结束偏移），e1000_main.c:2701 |
+| `tucso`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（TCP 校验和起始偏移），e1000_main.c:2702 |
+| `tucss`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_tso 局部变量（TCP 头起始偏移），e1000_main.c:2702 |
+| `tx_clean_complete`（not-migrated） |  | — | 驱动内部符号（e1000_clean 局部标志变量），非 OS API |
+| `tx_desc`（not-migrated） |  | — | 驱动内部符号，非 OS API：指向 e1000.h 定义的 struct e1000_tx_desc（硬件 TX 描述符）的局部指针，e1000_main.c:3002 |
+| `tx_space`（not-migrated） |  | — | 驱动内部符号，非 OS API：PBA 中 TX 空间局部变量 |
+| `txd_lower`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_map/发送局部变量（描述符 lower dword 命令位），e1000_main.c:2972 |
+| `txd_upper`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_map/发送局部变量（描述符 upper dword 校验和选项），e1000_main.c:2972 |
+| `txdr`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_tx_ring* 函数参数/局部指针（驱动内部结构体） |
+| `update_itr_done`（not-migrated） |  | — | 驱动内部符号（e1000_update_itr 内的 goto 标签），非 OS API |
+| `use_uc`（not-migrated） |  | — | 驱动内部符号，非 OS API：单播溢出改用 RAR 标志局部变量 |
+| `watchdog_task`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_adapter 结构体的 delayed_work 字段，周期 2*HZ 重调度 e1000_watchdog 做链路监控/统计/ITR 调整 |
+| `word_in`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_do_read_eeprom SPI 路径局部 u16 变量，接收 shift_in_ee_bits 移入的字并字节交换 |
+| `words_written`（not-migrated） |  | — | 驱动内部符号，非 OS API：e1000_write_eeprom_microwire 局部 u16 循环计数变量 |
+| `work_to_do`（not-migrated） |  | — | 驱动内部符号（NAPI poll 相关函数的局部变量/参数，预算值来自 NAPI budget），非 OS API |
 
 ## video/maxinefb.h
 

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "qemu-e1000-no-rctl-lbm",
+    "title": "QEMU e1000 不实现 RCTL.LBM_MAC——MAC 回环判定机制性必败",
+    "scope": ["qemu", "e1000", "asterinas"],
+    "entry_file": "qemu-e1000-no-rctl-lbm.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry P6（defects.json RX-PATH）"
+  },
+  {
+    "id": "ostd-ioapic-level-gap",
+    "title": "OSTD IOAPIC 仅边沿/高有效——PCI INTx 永不送达（附 q35 GSI 公式）",
+    "scope": ["asterinas", "ostd", "pci-intx", "q35"],
+    "entry_file": "ostd-ioapic-level-gap.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry P6 + migration/e1000 DECISIONS #35"
+  },
+  {
+    "id": "asterinas-kthread-stage-selftest",
+    "title": "内核自测挂 kthread 组件阶段（Bootstrap 禁 spawn 的正解）",
+    "scope": ["asterinas", "component", "selftest"],
+    "entry_file": "asterinas-kthread-stage-selftest.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry P6 L4 执行形态"
+  },
+  {
+    "id": "qemu-autoneg-500ms-rx-window",
+    "title": "QEMU autoneg 500ms 虚拟定时器内 LU=0 弃一切入站帧",
+    "scope": ["qemu", "e1000", "rx"],
+    "entry_file": "qemu-autoneg-500ms-rx-window.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry P6（ARP 首应答竞态）"
+  },
+  {
+    "id": "killed-make-halfbuilt-iso",
+    "title": "杀 make run_kernel 留半成品——后续 boot 内核零输出",
+    "scope": ["asterinas", "osdk", "build"],
+    "entry_file": "killed-make-halfbuilt-iso.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry P6 运维判读"
+  },
+  {
+    "id": "ktest-console-args",
+    "title": "cargo osdk test 必须显式 --kcmd-args console=ttyS0 earlycon",
+    "scope": ["asterinas", "osdk", "ktest"],
+    "entry_file": "ktest-console-args.md",
+    "added": "2026-09-01",
+    "origin": "e2e-test-retry §14（~3h 破案）"
+  }
+]
