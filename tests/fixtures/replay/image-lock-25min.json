@@ -1,0 +1,18 @@
+{
+  "case": "image-lock-25min",
+  "degraded": "原始镜像锁日志已被覆盖（早期案例先于本体系）——以特征文本回放（来源：§15.0 案例 1 / 六案例清单）",
+  "source_material": "计划文档 §15.0；知识层 SIG-01",
+  "runner": {"build": {"cmd": "docker run … make kernel", "success_pattern": ""}},
+  "events": [
+    {"kind": "cmd_end", "mount": "p6", "subject": "P6.build",
+     "cmd": "docker run --rm asterinas/dev make kernel", "rc": 1,
+     "summary": "1800s log=P6_exec_build.log",
+     "extra_out_tail": "docker: resource temporarily unavailable"}
+  ],
+  "evidence": {"source": "p6", "subject": "P6.build", "kind": "compile",
+               "detail": "rc=1 pattern=MISS",
+               "build_out": "docker: resource temporarily unavailable"},
+  "apply": false,
+  "expect": {"circuit": "infra", "rule_id": "SIG-01"},
+  "report_assert": ["resource temporarily unavailable"]
+}

@@ -13,6 +13,7 @@ L. 执行模式：SLIRP boot / 全判据重判 / deferred 哨兵清偿 +
 运行：python3 tests/test_p6.py 或 unittest discover
 """
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -20,6 +21,16 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+
+def setUpModule():
+    # 挂载②红项分诊会走 agent 兜底——本模块单测禁真调（§15 实施纪律）
+    os.environ.setdefault("PORTER_NO_AGENT", "1")
+
+
+def tearDownModule():
+    os.environ.pop("PORTER_NO_AGENT", None)
+
 
 from porter.loop import p6 as P6
 

@@ -27,6 +27,11 @@ def _base_env(target_os: Path, runner: dict, extra: dict | None = None) -> dict:
 def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
          log_path: Path) -> tuple[int, str]:
     print(f"[porter] probe: {cmd[:110]}{'…' if len(cmd) > 110 else ''}")
+    try:                                    # 观测埋桩（§15 B）：绑定才写
+        from ..loop import events as _ev
+        _ev.note_cmd_start(cmd, log_path)
+    except Exception:
+        pass
     t0 = time.time()
     try:
         proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), env=env,
@@ -39,6 +44,11 @@ def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
         rc = -1
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(out, encoding="utf-8", errors="replace")
+    try:
+        from ..loop import events as _ev
+        _ev.note_cmd_end(cmd, rc, out, time.time() - t0, log_path)
+    except Exception:
+        pass
     print(f"[porter] probe: rc={rc} {time.time()-t0:.0f}s log={log_path.name}")
     return rc, out
 

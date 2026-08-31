@@ -38,6 +38,7 @@ from pathlib import Path
 
 from ..env import probe as probe_mod
 from . import criteria as crit_mod
+from . import events
 from . import p5 as p5_mod
 
 # 归全局系统验收哨兵（与 p5.py 语义一致；P6 是 owner，可清偿）
@@ -518,6 +519,7 @@ def _clear_deferred_p6(ws: Path, log: str, ut_out: str, l4_map: dict | None,
 
 def execute(ws: Path, l4: bool = False) -> int:
     """执行模式：一轮 build + SLIRP boot + ktest → 判全部判据 + 清偿。"""
+    events.bind(ws, "p6")       # 观测地基（§15 挂载②）
     proj_path = ws / "project.json"
     runner_path = ws / "runner.json"
     if not proj_path.exists() or not runner_path.exists():
@@ -617,6 +619,12 @@ def execute(ws: Path, l4: bool = False) -> int:
     hard_fail = [r["id"] for r in results if r["ok"] is False]
     all_parked = set(parked_def)
     uncleared_real = [i for i in uncleared if i not in all_parked]
+
+    # ---- 红项分诊（§15 挂载②）：失败即快照 → 逐红项 triage（不重跑，
+    #      重跑 = 再次执行 p6 --execute 本身）----
+    triage_section = _triage_red_items(ws, target_os, runner, results,
+                                       uncleared_real, log, ut_out, mods,
+                                       cfg=None)
     verdict = {"all_green_except_parked":
                bool(b["ok"]) and not hard_fail and not uncleared_real,
                "failing": hard_fail,
@@ -627,6 +635,7 @@ def execute(ws: Path, l4: bool = False) -> int:
     report = {"time": datetime.now().isoformat(), "mode": "execute",
               "device_args": _slirp_args(runner), "l4_enabled": l4,
               "modules": mods, "results": results, "verdict": verdict,
+              "triage": triage_section,
               "deferred": _deferred_facts(ws), "defects": _defects_facts(ws),
               "l4": _l4_facts(ws)}
     _write_health(ws, report)
@@ -640,6 +649,115 @@ def execute(ws: Path, l4: bool = False) -> int:
           f"待 L4 {len(pending_def)}）")
     print(f"[porter] P6: 判定 {'ALL GREEN（泊车除外）' if verdict['all_green_except_parked'] else 'FAIL'}")
     return 0 if verdict["all_green_except_parked"] else 1
+
+
+# ---------- 红项分诊（§15 挂载②）+ 缺陷诊断入口（挂载③） ----------
+
+def _criterion_by_id(ws: Path, mods: list[dict], cid: str) -> dict | None:
+    for m in mods:
+        p = ws / "P3" / m["module"] / "reports" / "criteria.json"
+        c = _load_json(p)
+        for x in (c or {}).get("criteria") or []:
+            if x["id"] == cid:
+                return x
+    return None
+
+
+def _triage_red_items(ws: Path, target_os: Path, runner: dict,
+                      results: list[dict], uncleared: list[str],
+                      log: str, ut_out: str, mods: list[dict],
+                      cfg: dict | None) -> list[dict]:
+    """红项（FAIL 判据 + 未清偿 deferred）分诊：先快照再逐项 triage。"""
+    red = [r["id"] for r in results if r["ok"] is False] + list(uncleared)
+    if not red:
+        return []
+    from . import diagnose, triage as triage_mod
+    snap = events.take_failure_snapshot(
+        ws, "p6", "P6-red",
+        f"{len(red)} 红项：{', '.join(red)[:200]}",
+        runner=runner, target_os=target_os,
+        extra_files=[(ws / "P6" / "reports" / "l4_criteria.json",
+                      "l4_criteria.json")]
+        if (ws / "P6" / "reports" / "l4_criteria.json").exists() else None)
+    gate_ok = diagnose.gate_mode("b_class_autofix", cfg) == "agent"
+    verdicts = []
+    for cid in red:
+        c = _criterion_by_id(ws, mods, cid) or {}
+        evidence = {"source": "p6", "subject": cid,
+                    "module": cid.split(".")[0] if "." in cid else None,
+                    "kind": c.get("kind"), "layer": c.get("layer"),
+                    "expr": c.get("expr"),
+                    "detail": next((r["detail"] for r in results
+                                    if r["id"] == cid),
+                                   "deferred 未清偿"),
+                    "boot_log": probe_mod._strip_ansi(log)[-4000:],
+                    "boot_log_raw": log[-4000:], "ut_out": ut_out[-4000:],
+                    "events_tail": events.read_events(ws)[-60:],
+                    "criterion": c, "runner": runner,
+                    "snapshot": snap.name if snap else None,
+                    "_workdir": target_os}
+        if cid in uncleared:
+            evidence["deferred_uncleared"] = [cid]
+        v = triage_mod.run_triage(ws, evidence)
+        app = triage_mod.apply_verdict(ws, evidence, v, gate_ok=gate_ok)
+        v["applied"] = app["applied"]
+        verdicts.append(v)
+        print(f"[porter] P6: 分诊 {cid} → {v['circuit']}/{v['action']}")
+    return verdicts
+
+
+def diagnose_defect(ws: Path, did: str, cfg: dict | None = None) -> int:
+    """挂载③（§15）：defects 账本驱动的诊断定位（D1 步）。
+
+    defect → 证据包 → triage（规则+agent）→ 按回路处置 →
+    unknown/migration → 有界诊断（2 轮×≤10 调用）→ 升级报告 →
+    全程 defects history 落账。
+    """
+    events.bind(ws, "d1")
+    d = load_defects(ws)
+    e = _find_defect(d, did)
+    if not e:
+        print(f"[porter] P6: 缺陷不存在: {did}（先 --defect-add）")
+        return 2
+    proj = _load_json(ws / "project.json") or {}
+    target_os = Path(proj.get("target_os") or ws)
+    from . import diagnose, triage as triage_mod
+
+    evidence = {"source": "d1", "subject": did,
+                "module": None, "detail": e.get("discovered", {})
+                .get("evidence", ""),
+                "events_tail": events.read_events(ws)[-60:],
+                "defect": e, "_workdir": target_os}
+    v = triage_mod.run_triage(ws, evidence)
+    bump_defect(ws, did, "triaged",
+                f"{v['circuit']}/{v['action']} rule={v.get('rule_id')} "
+                f"{(v.get('notes') or '')[:160]}")
+    print(f"[porter] P6: D1 分诊 {did} → {v['circuit']}/{v['action']}")
+
+    gate_ok = diagnose.gate_mode("b_class_autofix", cfg) == "agent"
+    app = triage_mod.apply_verdict(ws, evidence, v, gate_ok=gate_ok)
+    human_stop = app.get("human_stop", False)
+
+    escalation_path = None
+    if v["circuit"] in ("unknown", "migration") or v.get("action") == \
+            "escalate":
+        _merged, rep = diagnose.run_diagnosis(
+            ws, {**evidence, "_triage_verdicts": [v]}, cfg=cfg)
+        escalation_path = rep.get("evidence_files") is not None
+        bump_defect(ws, did, "escalated",
+                    f"升级报告已生成（escalations/，excluded="
+                    f"{len(rep['excluded'])} remaining="
+                    f"{len(rep['remaining'])}）")
+        human_stop = human_stop or rep.get("human_stop", False)
+
+    if v["circuit"] in ("infra",):
+        print("[porter] P6: infra 判定——幂等重跑对应相位（p5/p6 "
+              "--execute）即验")
+    pack = diagnose.build_context_pack(ws, "d1", did)
+    applied_s = "; ".join(app["applied"]) or "无状态变更"
+    print(f"[porter] P6: D1 完成 {did}（处置：{applied_s}；"
+          f"考古包：{pack}）")
+    return 3 if human_stop else 0
 
 
 # ---------- health 报告 ----------
@@ -692,6 +810,15 @@ def _write_health(ws: Path, report: dict) -> None:
                                            else "FAIL")
             lines.append(f"| {r['id']} | {r['layer']} | {mark} "
                          f"| {r['detail']} |")
+    tri = report.get("triage") or []
+    if tri:
+        lines += ["", "## 红项分诊（§15 挂载②）", "",
+                  "| 红项 | 回路 | 动作 | 规则 | 处置 |",
+                  "|---|---|---|---|---|"]
+        for v in tri:
+            lines.append(f"| {v.get('subject')} | {v.get('circuit')} "
+                         f"| {v.get('action')} | {v.get('rule_id')} "
+                         f"| {'; '.join(v.get('applied') or [])[:160]} |")
     dt = report.get("defects") or {}
     if dt.get("total"):
         lines += ["", "## defects", "",

@@ -1,5 +1,7 @@
 {
   "review_gates": {
-    "l4_criteria_finalization": "human"
+    "l4_criteria_finalization": "human",
+    "diagnosis_escalation": "agent",
+    "b_class_autofix": "agent"
   }
 }

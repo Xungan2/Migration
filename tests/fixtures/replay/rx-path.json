@@ -1,0 +1,25 @@
+{
+  "case": "rx-path",
+  "degraded": null,
+  "source_material": "defects.json RX-PATH 完整 history（复合型迁移 bug 已修，最佳案例库）",
+  "runner": {"boot": {"cmd": "make run_kernel", "log_file": "qemu.log"},
+             "unit_test": {"mechanism": "cargo-osdk-test", "cmd": "cargo osdk test",
+                            "success_pattern": "passed; 0 failed;"}},
+  "events": [
+    {"kind": "cmd_end", "mount": "p6", "subject": null,
+     "cmd": "p6 --execute --l4（SLIRP boot）", "rc": 0,
+     "summary": "60s log=T3_P6_exec_boot.log",
+     "extra_out_tail": "L4 os-rx-irq.arp-recv-e2e FAIL rx_packets=0"}
+  ],
+  "evidence": {"source": "d1", "subject": "RX-PATH",
+               "detail": "os_rx_irq.rs probe_receive/probe_stats 双 LBM 探测失败（rx_bytes=0）而 TX 探测成功（tx_bytes=64）；P6 首跑 arp-recv FAIL rx_packets=0",
+               "defect": {"id": "RX-PATH", "title": "RX 真实数据通路未通（4 笔计数 deferred + arp-recv）",
+                          "status": "open",
+                          "discovered": {"time": "2026-08-31T23:45:51",
+                                         "evidence": "双 LBM 探测失败（rx_bytes=0）而 TX 探测成功（tx_bytes=64）；P6 首跑 arp-recv FAIL rx_packets=0"},
+                          "root_cause": "", "fix": "", "regression_evidence": "",
+                          "attempts": 0, "history": []}},
+  "apply": false,
+  "expect": {"circuit": "migration", "rule_id": "SIG-05"},
+  "report_assert": ["LBM"]
+}

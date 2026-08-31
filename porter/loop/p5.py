@@ -30,6 +30,7 @@ from pathlib import Path
 from ..common import agent
 from ..env import probe as probe_mod
 from . import criteria as crit_mod
+from . import events
 from . import ut_verify
 
 # "归全局系统验收"哨兵：新写 __P6__（旧编号期的 P5/__P5__ 兼容读取，
@@ -293,34 +294,41 @@ def _write_deferred_questions(ws: Path, module: str, uncleared: list[str]):
 
 # ---------- 步骤 1-5：验收编排 ----------
 
-def run_p5(ws: Path, module: str, order: list[str]) -> int:
-    ctx = _ctx(ws, module)
-    if ctx is None:
-        return 2
-    target_os, p5m, p3_reports, proj, runner = ctx
+_P5_RERUN_MAX = 2        # infra/判据修正后的有界重跑（§15 挂载①，内部消化）
+
+
+def _criterion_map(ws: Path, module: str, order: list[str]) -> dict:
+    """判据 id → 条目（本模块 + 已 done 模块——累积回归判据也可查）。"""
+    out: dict[str, dict] = {}
+    done = _done_set(ws)
+    for m in [module, *(x for x in order if x in done)]:
+        p = ws / "P3" / m / "reports" / "criteria.json"
+        try:
+            for c in json.loads(p.read_text(encoding="utf-8"))["criteria"]:
+                out[c["id"]] = c
+        except (OSError, json.JSONDecodeError, KeyError):
+            continue
+    return out
+
+
+def _judge_core(ws: Path, module: str, order: list[str], target_os: Path,
+                proj: dict, runner: dict, crit: dict
+                ) -> tuple[list[dict], str, str]:
+    """L1/L2/L0/L3 判定核心（无 deferred 副作用——可安全重跑）。"""
     from . import probes as probe_lib     # 延迟导入避免环
-
-    _ensure_unit_test(ws, target_os, proj, runner)
-    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-
-    crit = json.loads((p3_reports / "criteria.json").read_text(
-        encoding="utf-8"))
     results: list[dict] = []
 
     def rec(cid, layer, ok, detail):
         results.append({"id": cid, "layer": layer, "ok": ok,
                         "detail": detail})
 
-    # L1 build 双信号
     b = probe_mod.probe_build(ws / "P5", target_os, runner,
                               label=f"P5_{module}_acc_build")
     rec(f"{module}.compile", "L1", b["ok"], b["detail"])
-    # L2 boot 双信号 + 收集日志
     boot_ok, log = probe_lib.boot_and_log(ws, "P5", target_os, proj,
                                           f"P5_{module}_acc_boot")
     rec(f"{module}.boot", "L2", boot_ok, "boot 双信号" +
         ("PASS" if boot_ok else "FAIL"))
-    # L0 unit_test：ktest 同场跑一次，本模块 + 累积回归共用输出
     ut_out = ""
     ut_mech_none = (runner.get("unit_test") or {}).get("mechanism") == "none"
     if not ut_mech_none and (runner.get("unit_test") or {}).get("cmd"):
@@ -341,14 +349,15 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
         names = [x.strip() for x in c["expr"].split(",") if x.strip()]
         ok, detail = crit_mod.check_unit_test(ut_out, names, success_pattern)
         rec(c["id"], "L0", ok, detail)
-    # L3 本模块 + 累积回归（此前全部已 done 模块的 L0+L3 判据重跑；
-    # 未 done 模块的判据不查——它们尚无对应代码）
     done_state = _done_set(ws)
     for m in [module, *(m for m in order if m in done_state)]:
         cpath = ws / "P3" / m / "reports" / "criteria.json"
         if not cpath.exists():
             continue
-        cs = json.loads(cpath.read_text(encoding="utf-8"))["criteria"]
+        try:
+            cs = json.loads(cpath.read_text(encoding="utf-8"))["criteria"]
+        except (json.JSONDecodeError, KeyError):
+            continue
         for c in cs:
             if any(r["id"] == c["id"] for r in results):
                 continue
@@ -367,13 +376,96 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
                                                       success_pattern)
                 rec(c["id"], "L0", ok, ("" if m == module else
                                         f"（累积回归 {m}）") + detail)
-    # L4 e2e / deferred 登记
+    return results, log, ut_out
+
+
+def _triage_failures(ws: Path, module: str, target_os: Path, proj: dict,
+                     runner: dict, results: list[dict], log: str,
+                     ut_out: str, snapshot: Path | None, crit_map: dict,
+                     cfg: dict | None) -> list[dict]:
+    """逐失败判据分诊 + 处置执行（§15 挂载①）。返回 verdict 列表。"""
+    from . import diagnose, triage as triage_mod
+    from ..env.probe import _strip_ansi
+    gate_ok = diagnose.gate_mode("b_class_autofix", cfg) == "agent"
+    verdicts = []
+    for r in [x for x in results if x["ok"] is False]:
+        c = crit_map.get(r["id"]) or {}
+        kind = c.get("kind")
+        if not kind:      # 基线判据（<M>.compile/.boot）不在 criteria.json
+            kind = "compile" if r["id"].endswith(".compile") else (
+                "boot" if r["id"].endswith(".boot") else None)
+        evidence = {
+            "source": "p5", "subject": r["id"], "module": c.get("module",
+                                                                 module),
+            "kind": kind, "layer": r["layer"],
+            "expr": c.get("expr"), "detail": r["detail"],
+            "boot_log": _strip_ansi(log)[-4000:],
+            "boot_log_raw": log[-4000:], "ut_out": ut_out[-4000:],
+            "events_tail": events.read_events(ws)[-60:],
+            "criterion": c, "runner": runner,
+            "snapshot": snapshot.name if snapshot else None,
+            "_workdir": target_os}
+        v = triage_mod.run_triage(ws, evidence)
+        app = triage_mod.apply_verdict(ws, evidence, v, gate_ok=gate_ok)
+        v["applied"] = app["applied"]
+        verdicts.append(v)
+        print(f"[porter] P5: 分诊 {r['id']} → {v['circuit']}/"
+              f"{v['action']}" + (f"（{'; '.join(app['applied'])[:120]}）"
+                                  if app["applied"] else ""))
+    return verdicts
+
+
+def run_p5(ws: Path, module: str, order: list[str]) -> int:
+    events.bind(ws, "p5")       # 观测地基（§15 挂载①）
+    ctx = _ctx(ws, module)
+    if ctx is None:
+        return 2
+    target_os, p5m, p3_reports, proj, runner = ctx
+
+    _ensure_unit_test(ws, target_os, proj, runner)
+    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
+    from . import p6 as p6_mod          # 配置读取（延迟导入避免环）
+    cfg = p6_mod.load_config()
+
+    crit = json.loads((p3_reports / "criteria.json").read_text(
+        encoding="utf-8"))
+    crit_map = _criterion_map(ws, module, order)
+
+    triage_section: list[dict] = []
+    for attempt in range(_P5_RERUN_MAX + 1):
+        results, log, ut_out = _judge_core(ws, module, order, target_os,
+                                           proj, runner, crit)
+        hard_fail = [r for r in results if r["ok"] is False]
+        if not hard_fail or attempt >= _P5_RERUN_MAX:
+            break
+        # ---- 失败即快照（任何重跑之前）+ 分诊（§15 挂载①）----
+        snap = events.take_failure_snapshot(
+            ws, "p5", module,
+            f"{len(hard_fail)} 判据 FAIL："
+            f"{', '.join(r['id'] for r in hard_fail)[:200]}",
+            runner=runner, target_os=target_os,
+            extra_files=[(p3_reports / "criteria.json",
+                          "criteria.json")])
+        triage_section = _triage_failures(ws, module, target_os, proj,
+                                          runner, results, log, ut_out,
+                                          snap, crit_map, cfg)
+        circuits = {v["circuit"] for v in triage_section}
+        fixed = any(v.get("applied") for v in triage_section)
+        rerun_worthy = (circuits <= {"infra", "unknown"}) or fixed
+        if not rerun_worthy:
+            break
+        print(f"[porter] P5: infra/修正后重跑 {attempt + 1}/"
+              f"{_P5_RERUN_MAX}（不计 attempts）")
+
+    # L4 e2e / deferred 登记（一次性，重跑圈外）
     _register_deferred(ws, module, crit)
     for c in crit["criteria"]:
         if c["kind"] == "e2e" and not c.get("deferred_by"):
-            rec(c["id"], "L4", None, f"deferred（e2e 归 P6 系统验收）")
-    # deferred 清偿（done 集 = 状态机已 done ∪ 本模块即将 done）
-    done = done_state | {module}
+            results.append({"id": c["id"], "layer": "L4", "ok": None,
+                            "detail": "deferred（e2e 归 P6 系统验收）"})
+    success_pattern = (runner.get("unit_test") or {}).get(
+        "success_pattern", "test result: ok")
+    done = _done_set(ws) | {module}
     rc_def, uncleared = _try_clear_deferred(ws, done, log, ut_out,
                                             success_pattern)
 
@@ -382,7 +474,8 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
               "time": datetime.now().isoformat(),
               "results": results,
               "pass": not hard_fail,
-              "deferred_uncleared": uncleared}
+              "deferred_uncleared": uncleared,
+              "triage": triage_section}
     acceptance_path(ws, module).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
@@ -415,6 +508,14 @@ def _write_report(ws: Path, module: str, p5m: Path, report: dict) -> None:
                                        else "FAIL")
         lines.append(f"| {r['id']} | {r['layer']} | {mark} "
                      f"| {r['detail']} |")
+    tri = report.get("triage") or []
+    if tri:
+        lines += ["", "## 分诊（§15 挂载①）", "",
+                  "| 判据 | 回路 | 动作 | 规则 | 处置 |", "|---|---|---|---|---|"]
+        for v in tri:
+            lines.append(f"| {v.get('subject')} | {v.get('circuit')} "
+                         f"| {v.get('action')} | {v.get('rule_id')} "
+                         f"| {'; '.join(v.get('applied') or [])[:160]} |")
     (p5m / "reports" / "report.md").write_text(
         "\n".join(ln for ln in lines if ln is not None) + "\n",
         encoding="utf-8")

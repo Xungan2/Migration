@@ -1,0 +1,28 @@
+{
+  "case": "update-itr",
+  "degraded": "原始 ktest 失败输出未存档（§14 其他沉淀仅文本记述）——canned agent verdict 回放；证据以 linux 树函数级回放（e1000_main.c e1000_update_itr），行号不具名",
+  "source_material": "§14 其他沉淀（update_itr 测试期望两处错——函数与 C 一致，测试作者只推了一层分支）",
+  "runner": {"unit_test": {"mechanism": "cargo-osdk-test", "cmd": "cargo osdk test",
+                            "success_pattern": "passed; 0 failed;"}},
+  "events": [
+    {"kind": "cmd_end", "mount": "p5", "subject": null,
+     "cmd": "cargo osdk test", "rc": 1,
+     "summary": "600s log=P5_os-tx_acc_ut.log",
+     "extra_out_tail": "test update_itr_exits_20mb ... FAILED"}
+  ],
+  "evidence": {"source": "p5", "subject": "os-tx.update-itr-ut",
+               "kind": "unit_test", "module": "os-tx",
+               "detail": "存在失败: test result: FAILED. 1 passed; 1 failed",
+               "ut_out": "test update_itr_exits_20mb ... FAILED\ntest result: FAILED. 1 passed; 1 failed;"},
+  "agent_verdict": {"circuit": "criteria", "confidence": 0.85,
+                    "evidence": [{"file": "drivers/net/ethernet/intel/e1000/e1000_main.c",
+                                  "line": 0,
+                                  "quote": "e1000_update_itr：逐分支对照 C 源码推演，函数与 C 一致——测试作者只推了一层分支"}],
+                    "action": "autofix", "fix_target": "needs-target-tree",
+                    "notes": "测试期望错（update_itr 模式）：修正需改目标树测试代码——超出边界，升级人工",
+                    "signature_candidates": ["SIG-03-test-expectation"]},
+  "apply": true,
+  "apply_assert": ["超出边界"],
+  "expect": {"circuit": "criteria"},
+  "report_assert": ["update_itr", "SIG-03-test-expectation"]
+}

@@ -1,0 +1,28 @@
+{
+  "case": "ktest-silent-3h",
+  "degraded": null,
+  "source_material": "runner.json unit_test notes（根因定谳全文）+ §14；P6_exec_ut.log 形态",
+  "runner": {
+    "build": {"cmd": "make kernel", "success_pattern": ""},
+    "unit_test": {"mechanism": "cargo-osdk-test",
+                  "cmd": "docker run --rm asterinas/dev bash -c 'cd /root/asterinas && cargo osdk test; rc=$?; cat qemu-serial.log; exit rc'",
+                  "success_pattern": "passed; 0 failed;",
+                  "fail_pattern": "failures:"}
+  },
+  "events": [
+    {"kind": "cmd_end", "mount": "p5", "subject": null,
+     "cmd": "docker run --rm asterinas/dev bash -c 'cargo osdk test; rc=$?; cat qemu-serial.log; exit rc'",
+     "rc": 0, "summary": "420s log=P5_hw-defs_acc_ut.log",
+     "extra_out_tail": "[2J[01;01HBdsDxe: loading Boot0002"}
+  ],
+  "evidence": {"source": "p5", "subject": "hw-defs.update-itr-ut",
+               "kind": "unit_test", "module": "hw-defs",
+               "detail": "输出无 'passed; 0 failed;'",
+               "ut_out": ""},
+  "apply": true,
+  "apply_assert": ["--kcmd-args"],
+  "expect": {"circuit": "infra", "rule_id": "SIG-02",
+             "suggested_fix": "ut-console-args"},
+  "report_assert": ["passed; 0 failed;"],
+  "ktest_silent_extras": true
+}

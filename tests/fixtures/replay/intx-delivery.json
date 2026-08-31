@@ -1,0 +1,30 @@
+{
+  "case": "intx-delivery",
+  "degraded": null,
+  "source_material": "defects.json INTX-DELIVERY 完整 history（实证链范本：设备侧已证 vs 中断侧恒零）+ §16",
+  "runner": {"boot": {"cmd": "make run_kernel", "log_file": "qemu.log"},
+             "unit_test": {"mechanism": "cargo-osdk-test", "cmd": "cargo osdk test",
+                            "success_pattern": "passed; 0 failed;"}},
+  "events": [
+    {"kind": "cmd_end", "mount": "p6", "subject": null,
+     "cmd": "p6 --execute --l4", "rc": 0,
+     "summary": "60s log=T3_P6_exec_boot.log",
+     "extra_out_tail": "L4 os-rx-irq.ics-selftrigger FAIL irq_count=0"}
+  ],
+  "evidence": {"source": "d1", "subject": "INTX-DELIVERY",
+               "detail": "L4 ics kick evidence: icr=0x14（设备侧 ICS→ICR 通路正常）但 irq_count=0（top half 从未执行）；GSI=17 路由正确（q35 正式 slot5/INTA）",
+               "defect": {"id": "INTX-DELIVERY",
+                          "title": "INTx 中断 CPU 交付不可达（ics-selftrigger FAIL）",
+                          "status": "open",
+                          "discovered": {"time": "2026-08-31T23:46:01",
+                                         "evidence": "icr=0x14 但 irq_count=0；GSI=17 路由正确"},
+                          "root_cause": "", "fix": "", "regression_evidence": "",
+                          "attempts": 0,
+                          "history": [{"time": "2026-08-31T23:46:01",
+                                       "event": "discovered",
+                                       "detail": "设备侧 ICS→ICR 通路正常但 irq_count=0"}]}},
+  "apply": true,
+  "apply_assert": ["INTX-DELIVERY"],
+  "expect": {"circuit": "platform", "rule_id": "SIG-06"},
+  "report_assert": ["irq_count"]
+}

@@ -332,6 +332,8 @@ def cmd_p6(args) -> int:
             print(f"[porter] P6: {e['status']:<10} {e['id']:<44} "
                   f"{e['title']}")
         return 0
+    if args.defect_diagnose:
+        return p6_mod.diagnose_defect(ws, args.defect_diagnose)
 
     return p6_mod.run_p6(ws, execute_flag=args.execute, l4=args.l4,
                          finalize_flag=args.finalize_l4)
@@ -625,6 +627,9 @@ def main(argv=None) -> int:
     p6cmd.add_argument("--reason", default=None)
     p6cmd.add_argument("--defect-list", action="store_true",
                        help="列出 defects.json 账本")
+    p6cmd.add_argument("--defect-diagnose", default=None, metavar="ID",
+                       help="缺陷诊断（§15 挂载③/D1 步）：triage→处置→"
+                            "有界诊断→升级报告，全程 defects history 落账")
     p6cmd.set_defaults(func=cmd_p6)
 
     p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")

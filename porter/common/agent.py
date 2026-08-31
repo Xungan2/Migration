@@ -42,10 +42,16 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
     """调用 opencode 非交互模式执行一次 agent 任务。
 
     返回 (exit_code, stdout_text)。完整输出同时落盘 <log_stem>.log。
+    观测埋桩（§15 子系统 B）：events 绑定在场时前后写意图/结果事件。
     """
     model = model or os.environ.get("PORTER_MODEL", DEFAULT_MODEL)
     log_path = Path(f"{log_stem}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    try:                                    # 观测面永不打断主流程
+        from ..loop import events as _ev
+        _ev.note_agent_start(log_stem, prompt)
+    except Exception:
+        pass
     args = [
         "opencode", "run", "--auto",
         "--model", model,
@@ -71,6 +77,11 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         out = "opencode executable not found in PATH"
         rc = 127
     log_path.write_text(out, encoding="utf-8")
+    try:
+        from ..loop import events as _ev
+        _ev.note_agent_end(log_stem, rc, out)
+    except Exception:
+        pass
     print(f"[porter] agent: {log_stem} rc={rc} {time.time()-t0:.0f}s log={log_path}")
     return rc, out
 
