@@ -13,13 +13,13 @@ expr 语义：
     counter      同 log_pattern（正则自带数值断言，如 rx=[1-9]）
     compile/boot/e2e  未用（空串）
 
-复核执行器（P4(M) 消费）：
+复核执行器（P5(M) 消费）：
     compile     → runner build 双信号
     boot        → runner boot 双信号（含无 panic）
     unit_test   → runner unit_test 节（通用机制节；mechanism=none → 自动
                   转 deferred，非硬失败）
     log_pattern/counter → qemu.log 正则
-    e2e         → 循环内不机器复核，登记 deferred 归 P5
+    e2e         → 循环内不机器复核，登记 deferred 归 P6 系统验收
 """
 
 from __future__ import annotations

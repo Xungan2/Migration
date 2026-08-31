@@ -57,7 +57,7 @@ def validate(linux_driver: Path, target_os: Path,
 def target_os_baseline(target_os: Path) -> dict:
     """记录目标树 VCS 基线（不改动用户仓库，只记录）。
 
-    P6 用 git diff <baseline_commit> 提取本次迁移的全部改动。
+    P7 用 git diff <baseline_commit> 提取本次迁移的全部改动。
     工作区不干净时如实记录，不阻塞（迁移本身也会让树变脏）。
     """
     info = {"is_git": False}

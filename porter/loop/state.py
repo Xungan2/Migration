@@ -3,16 +3,19 @@
 schema：
     {
       "order":   ["hw-defs", ...],            # P1 deps.json 拓扑序（真值源）
-      "modules": {"hw-defs": {"phase": "pending|p3|p4|done",
-                              "attempts": {"p3": 0, "p4": 0}}, ...},
+      "modules": {"hw-defs": {"phase": "pending|p3|p4|p5|done",
+                              "attempts": {"p3": 0, "p4": 0, "p5": 0}}, ...},
       "updated": "<iso8601>"
     }
 
-phase 语义：
+phase 语义（方案 A 重构，2026-08-31）：
     pending  未开始
     p3       P3(M) 进行中/已留检查点（产物幂等续跑）
-    p4       P3(M) 完成，P4(M) 待做/进行中
-    done     P4(M) 验收 PASS（含 L0-L4 判据与累积回归）
+    p4       P3(M) 完成，P4(M)（fill + 切片迁移 + 轮末快速冒烟）待做/进行中
+    p5       P4(M) 完成，P5(M) 模块级验收待做/进行中
+    done     P5(M) 验收 PASS（L1/L2/L0/L3 判据 + 累积回归 + deferred 清偿）
+
+存量兼容：读入时 attempts 缺 p5 键自动补 0（仅内存归一，合法 state 不回写）。
 
 断点指针 = order 中首个 phase != done 的模块。写入原子（tmp + rename）。
 """
@@ -24,8 +27,13 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-PHASES = ("pending", "p3", "p4", "done")
+PHASES = ("pending", "p3", "p4", "p5", "done")
+ATTEMPT_STEPS = ("p3", "p4", "p5")
 MAX_ATTEMPTS = 3        # 每模块每阶段的人工升级界（§10.5 "FAIL 超界"）
+
+
+def _zero_attempts() -> dict[str, int]:
+    return {step: 0 for step in ATTEMPT_STEPS}
 
 
 class LoopState:
@@ -44,6 +52,12 @@ class LoopState:
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.order = data.get("order") or []
             self.modules = data.get("modules") or {}
+            # 存量兼容：旧状态机 attempts 无 p5 桶——读入时补零
+            for mod in self.modules.values():
+                att = mod.get("attempts")
+                if isinstance(att, dict):
+                    for step in ATTEMPT_STEPS:
+                        att.setdefault(step, 0)
             if self.order and set(self.order) == set(self.modules):
                 return True
             print("[porter] loop: loop_state.json 结构异常——尝试自 deps.json 重建")
@@ -52,7 +66,7 @@ class LoopState:
             return False
         deps = json.loads(deps_path.read_text(encoding="utf-8"))
         self.order = list(deps.get("order") or [])
-        self.modules = {m: {"phase": "pending", "attempts": {"p3": 0, "p4": 0}}
+        self.modules = {m: {"phase": "pending", "attempts": _zero_attempts()}
                         for m in self.order}
         self.save()
         print(f"[porter] loop: 初始化 loop_state（{len(self.order)} 模块，"
@@ -94,15 +108,15 @@ class LoopState:
         if phase not in PHASES:
             raise ValueError(f"非法 phase: {phase}")
         self.modules.setdefault(module, {"phase": "pending",
-                                         "attempts": {"p3": 0, "p4": 0}})
+                                         "attempts": _zero_attempts()})
         self.modules[module]["phase"] = phase
         self.save()
 
     def bump(self, module: str, step: str) -> int:
         """attempts+1 并返回新值。超界由调用方判（exit 3）。"""
         mod = self.modules.setdefault(module, {"phase": "pending",
-                                               "attempts": {"p3": 0, "p4": 0}})
-        mod.setdefault("attempts", {"p3": 0, "p4": 0})
+                                               "attempts": _zero_attempts()})
+        mod.setdefault("attempts", _zero_attempts())
         mod["attempts"][step] = mod["attempts"].get(step, 0) + 1
         self.save()
         return mod["attempts"][step]

@@ -5,7 +5,7 @@
 被 ANSI 颜色码包裹不可逐字匹配。因此：
   第一道（P0 门禁，env/gate.py）：真跑 agent 提供的 smoke_cmd（目标树里
     最小的已有单测 crate）验证机制与输出获取；
-  第二道（loop 补探回填，loop/p4.py）：真跑驱动级 cmd 复核。
+  第二道（loop 补探回填，loop/p5.py）：真跑驱动级 cmd 复核。
 
 断言规则：命令退出码 0 + success_pattern 出现在去 ANSI 后的输出 +
 fail_pattern（若有）不出现。

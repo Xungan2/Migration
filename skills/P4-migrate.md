@@ -23,6 +23,20 @@
 6. 裁剪服从映射表 `not-migrated` 与裁剪说明——对应分支不迁（注释标记
    `// not-migrated: <原因>` 即可，不写死代码）。
 7. C 习语转换遵守换思路裁定节（NAPI→softirq、sk_buff→全拷贝等）。
+8. L3 接线在 probe 回调（Bootstrap 组件期）进行；该上下文禁止
+   yield/真睡眠等一切调度器依赖 API（含 `Task::yield_now`、
+   `WaitQueue` 睡眠），延时一律 TSC 忙等（`read_tsc`/`tsc_freq`，
+   仿 udelay 映射——见映射表 `msleep`/`usleep_range`/`cond_resched`
+   条目的定案上下文规则）。
+9. 寄存器访问一律经 **trait 抽象**：定义寄存器后端 trait（读/写
+   u32 视图），真后端包 `IoMem` MMIO、假后端为 in-memory 数组
+   （范本 = crate 既有 `hw_eeprom::EepromIo`）。生产路径与测试路径
+   调用同一 trait 方法，禁止业务逻辑直接摸 MMIO。
+10. 寄存器仪式类切片（复位序列/初始化握手/位翻转等待等**写序列
+    密集**的逻辑）必须附**组件级测试**：假后端按协议回应（寄存器
+    值随写序列演化，如写复位位后 self-clear、状态位延时就绪），
+    断言操作序列（读-改-写顺序、位约定、轮询出口）。以 ktest 落地，
+    测名与判据 expr 逐字一致。
 
 ## 单元测试（判据要求时）
 

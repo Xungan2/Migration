@@ -47,7 +47,7 @@ low）、`domain`（任务数据给出的域键，原样照抄）。
   instruction = 补齐点描述；evidence = 树内落点 file:line（必填）。
   执行由 P4 开场统一做（你只做设计，不写代码）。
 - `register-fill`：语义必需但补齐大/险/依赖架构决策——本轮 bypass 保
-  进度，instruction = 临时绕过方案；平台补齐登记为 P6 上游补丁候选。
+  进度，instruction = 临时绕过方案；平台补齐登记为 P7 上游补丁候选。
 - `human`：bypass 与 fill 都不可行（如缺口本质是平台级架构缺失，修它
   需要出驱动边界的决策）。instruction = 给人工的问题说明。
 

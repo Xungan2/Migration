@@ -1,8 +1,9 @@
-"""p4.py — P4(M) 迁移 + 分层验收（plan §3.3）。
+"""p4.py — P4(M) 迁移（fill 统一 + 切片迁移 + 轮末快速冒烟）（plan §3.3）。
+
+方案 A 相位重构（2026-08-31）：验收段（原步骤 3/4）整体剥离到 p5.py
+（P5(M) 模块级验收）；P4 专注生产，只留防毒化闸门。
 
 步骤：
-  0. unit_test 节回填   runner.json 缺通用 `unit_test` 节时做一次性
-                        agent 补探（P0-unit-test-discover；reviewed:false）
   1. fill 统一阶段      按 P3 gap_decisions 中 strategy=fill 的条目批量
                         平台补齐（P4-gap-fill skill：加法式扩展铁律）→
                         build+boot+专属探针三重验证 → 失败回退 bypass →
@@ -11,27 +12,23 @@
                         映射作数据注入，只翻译不研究）→ 每片后 build
                         （FAIL 带编译错误反馈重试 ≤3）→ 中途新撞 gap
                         现场分类（bypass/及时 fill/皆败 attempts++）
-  3. 分层验收           L1 build / L2 boot / L0 unit_test / L3 log_pattern
-                        （qemu.log regex）+ 累积回归（已 done 模块全部
-                        log_pattern 判据重查；unit_test 全 crate 覆盖）
-  4. deferred 登记/清偿 deferred_by ⊆ done 的当场清偿；无法清偿 exit 3
+  3. 轮末快速冒烟       compile+boot 双信号（~10s 启动闸门）——保证每轮
+                        结束留下可启动树，防半成品毒化后续模块
 
-产物：P4/<M>/reports/{fill.json, migration.json, acceptance.json, report.md}
-返回：0 成功 / 1 失败 / 2 前置缺失 / 3 需人工。
+产物：P4/<M>/reports/{fill.json, migration.json, report.md}
+返回：0 成功 / 1 失败 / 2 前置缺失。
+（模块级验收 → P5(M)；相位推进 p4→p5 由调用方负责。）
 """
 
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 from pathlib import Path
 
 from ..common import agent
 from ..env import probe as probe_mod
-from . import criteria as crit_mod
 from . import probes as probe_lib
-from . import ut_verify
 
 AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
@@ -53,122 +50,6 @@ def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
     (p4m / "logs").mkdir(parents=True, exist_ok=True)
     (p4m / "reports").mkdir(parents=True, exist_ok=True)
     return Path(proj["linux_driver"]), target_os, p4m, proj, runner
-
-
-# ---------- 步骤 0：unit_test 节回填 ----------
-
-def _smoke_verify_ut(ws: Path, target_os: Path, runner: dict,
-                     ut: dict, label: str) -> tuple[bool, str, str]:
-    """第二道烟测：真跑驱动级 cmd 并断言。返回 (ok, 说明, 观测输出)。"""
-    from ..env.probe import _base_env
-    if ut.get("mechanism") == "none" or not ut.get("cmd"):
-        return True, "mechanism=none 或无命令——跳过", ""
-    ok, detail, out = ut_verify.run_and_verify(
-        ut["cmd"], cwd=target_os, env=_base_env(target_os, runner),
-        timeout_sec=int(ut.get("timeout_sec", 1800)),
-        log_path=ws / "P4" / "logs" / f"{label}.log",
-        success_pattern=ut.get("success_pattern", "test result: ok"),
-        fail_pattern=ut.get("fail_pattern"))
-    return ok, detail, out
-
-
-def _save_runner_ut(ws: Path, runner: dict, ut: dict) -> None:
-    runner["unit_test"] = ut
-    (ws / "runner.json").write_text(json.dumps(runner, ensure_ascii=False,
-                                               indent=2), encoding="utf-8")
-
-
-def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
-                      runner: dict) -> dict:
-    """unit_test 节获取 + 第二道烟测（真跑驱动级命令机器复核）。
-
-    - 已有且 verified=true：直接复用。
-    - 已有且未验证：真跑一次记 verified（幂等，一次性成本）。
-    - 缺失：agent 补探（产出后真跑烟测；失败带观测输出反馈重试 ≤2；
-      仍败标 verified=false + 醒目警告——不硬阻塞，验收/人工兜底）。
-    """
-    ut = runner.get("unit_test")
-    if ut:
-        if ut.get("verified") or ut.get("mechanism") == "none" \
-                or not ut.get("cmd"):
-            return ut
-        ok, detail, _out = _smoke_verify_ut(ws, target_os, runner, ut,
-                                            "unit_test_smoke_backfill")
-        ut["verified"] = ok
-        _save_runner_ut(ws, runner, ut)
-        if ok:
-            print("[porter] P4: unit_test 烟测 PASS（verified:true）")
-        else:
-            print(f"[porter] P4: ⚠ unit_test 烟测 FAIL：{detail}"
-                  "（verified:false；验收将按此判定，建议人工修 runner.json）")
-        return ut
-
-    print("[porter] P4: runner.json 缺 unit_test 节——一次性补探回填（含"
-          "第二道烟测）")
-    skill = agent.load_skill("P0-unit-test-discover")
-    driver = Path(proj["linux_driver"]).name
-    prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
-              f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
-              f"- 驱动 crate：aster-{driver}（kernel/core/comps/{driver}）\n"
-              f"- 既有 build 命令形态（容器包裹）参考：\n"
-              f"  {runner['build']['cmd']}\n"
-              f"\n## 任务\n探明目标 OS 的内核态单元测试机制并输出紧凑 "
-              f"JSON 块。")
-    ut = None
-    for attempt in range(1, 4):
-        rc, out = agent.run_agent(prompt, workdir=target_os,
-                                  log_stem=str(ws / "P4" / "logs" /
-                                               f"unit_test_discover_R{attempt}"),
-                                  timeout_sec=900)
-        parsed = agent.extract_json(out) if rc == 0 else None
-        if parsed and "cmd" in parsed:
-            ut = {k: parsed[k] for k in ("mechanism", "cmd", "timeout_sec",
-                                         "success_pattern", "fail_pattern",
-                                         "scope_hint", "smoke_cmd")
-                  if k in parsed}
-            # 第二道烟测：真跑驱动级命令
-            ok, detail, observed = _smoke_verify_ut(
-                ws, target_os, runner, ut, f"unit_test_discover_smoke_R{attempt}")
-            ut["verified"] = ok
-            if ok:
-                break
-            print(f"[porter] P4: 烟测失败（第 {attempt} 次）：{detail}")
-            prompt = prompt + ut_verify.feedback_block(detail, observed)
-        else:
-            prompt = prompt + (
-                "\n\n---\n\n## 上一次输出的问题\n未见合法 JSON。只输出一个"
-                "紧凑 JSON 对象（一行）。")
-    if not ut:
-        ut = {"mechanism": "none",
-              "note": "补探失败——按无机制处理（L0 判据自动 deferred）",
-              "verified": True}
-    ut["reviewed"] = False
-    ut["discovered_by"] = "porter/loop backfill"
-    _save_runner_ut(ws, runner, ut)
-    print(f"[porter] P4: unit_test 节回填 mechanism={ut.get('mechanism')}"
-          f" verified={ut.get('verified')}（reviewed:false）")
-    if not ut.get("verified"):
-        print("[porter] P4: ⚠ 烟测未过——命令/特征不可信，验收将按此判定，"
-              "建议人工核查 runner.json 的 unit_test 节")
-    return ut
-
-
-def _run_unit_test(ws: Path, target_os: Path, runner: dict, proj: dict,
-                   label: str) -> tuple[bool, str]:
-    ut = runner.get("unit_test") or {}
-    if ut.get("mechanism") == "none" or not ut.get("cmd"):
-        return False, "mechanism=none"
-    from ..env.probe import _base_env, _run, _strip_ansi
-    rc, out = _run(ut["cmd"], cwd=target_os,
-                   env=_base_env(target_os, runner),
-                   timeout_sec=int(ut.get("timeout_sec", 1800)),
-                   log_path=ws / "P4" / "logs" / f"{label}.log")
-    out = _strip_ansi(out)
-    ok = rc == 0 and ut.get("success_pattern", "test result: ok") in out
-    fp = ut.get("fail_pattern")
-    if ok and fp and fp in out:
-        ok = False
-    return ok, out
 
 
 # ---------- 步骤 1：fill 统一阶段 ----------
@@ -243,8 +124,9 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
             boot_ok = False
             log = ""
             if b["ok"]:
-                boot_ok, log = _boot_ok(ws, target_os, proj,
-                                        f"P4_{module}_fill_boot_{api}")
+                boot_ok, log = probe_lib.boot_and_log(
+                    ws, "P4", target_os, proj,
+                    f"P4_{module}_fill_boot_{api}")
             names = [p["name"] for p in probe_lib.load_registry(reg_path)
                      .get("probes", []) if p["status"] == "active"]
             verdicts = probe_lib.judge(log, [n for n in names]) if log else {}
@@ -285,21 +167,6 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                              encoding="utf-8")
     _save(mapping, ws / "P2")
     return 0
-
-
-def _boot_ok(ws: Path, target_os: Path, proj: dict,
-             label: str) -> tuple[bool, str]:
-    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-    r = probe_mod.probe_boot_with_device(ws / "P4", target_os, runner,
-                                         proj.get("category") or [],
-                                         label=label)
-    lf = (runner.get("boot") or {}).get("log_file")
-    log = ""
-    if lf:
-        p = Path(lf) if Path(lf).is_absolute() else target_os / lf
-        if p.exists():
-            log = p.read_text(encoding="utf-8", errors="replace")
-    return bool(r.get("ok")), log
 
 
 # ---------- 步骤 2：迁移 ----------
@@ -487,195 +354,26 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
     return (0 if not failures else 1), mig["slices"]
 
 
-# ---------- 步骤 3/4：验收 + deferred ----------
+# ---------- 步骤 3：轮末快速冒烟（防毒化闸门） ----------
 
-def _load_deferred(ws: Path) -> dict:
-    p = ws / "deferred.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() \
-        else {"entries": []}
+def _quick_smoke(ws: Path, target_os: Path, module: str, proj: dict,
+                 runner: dict) -> bool:
+    """compile + boot 双信号快速冒烟：保证每轮结束留下可启动树。
 
-
-def _save_deferred(ws: Path, d: dict) -> None:
-    (ws / "deferred.json").write_text(json.dumps(d, ensure_ascii=False,
-                                                 indent=2),
-                                      encoding="utf-8")
-
-
-def _register_deferred(ws: Path, module: str, crit: dict) -> None:
-    d = _load_deferred(ws)
-    known = {e["id"] for e in d["entries"]}
-    for c in crit["criteria"]:
-        db = c.get("deferred_by")
-        if not db:
-            continue
-        if c["id"] in known:
-            continue
-        d["entries"].append({"id": c["id"], "module": module,
-                             "criterion": c, "deferred_by": db,
-                             "status": "open",
-                             "registered": datetime.now().isoformat(
-                                 timespec="seconds"), "history": []})
-    _save_deferred(ws, d)
-
-
-def _try_clear_deferred(ws: Path, done: set[str], boot_log: str,
-                        unit_out: str,
-                        success_pattern: str = "test result: ok"
-                        ) -> tuple[int, list[str]]:
-    """清偿尝试：deferred_by ⊆ done 的 open 条目当场复核。返回 (rc, 未清偿)。"""
-    d = _load_deferred(ws)
-    uncleared: list[str] = []
-    changed = False
-    for e in d["entries"]:
-        if e["status"] != "open":
-            continue
-        deps = set(e.get("deferred_by") or [])
-        if not deps or not deps <= done:
-            continue
-        c = e["criterion"]
-        ok, detail = False, ""
-        if c["kind"] in ("log_pattern", "counter"):
-            ok, n = crit_mod.check_log_pattern(boot_log, c["expr"])
-            detail = f"hits={n}"
-        elif c["kind"] == "unit_test":
-            names = [x.strip() for x in c["expr"].split(",") if x.strip()]
-            ok, detail = crit_mod.check_unit_test(unit_out, names,
-                                                  success_pattern)
-        else:
-            ok, detail = False, f"kind {c['kind']} 无机器复核路径"
-        e["history"].append({"time": datetime.now().isoformat(
-            timespec="seconds"), "ok": ok, "detail": detail})
-        if ok:
-            e["status"] = "cleared"
-        else:
-            uncleared.append(e["id"])
-        changed = True
-    if changed:
-        _save_deferred(ws, d)
-    return (0 if not uncleared else 3), uncleared
-
-
-def _acceptance(ws: Path, target_os: Path, module: str, p4m: Path,
-                proj: dict, runner: dict, surface: dict,
-                order: list[str]) -> tuple[int, dict]:
-    crit = json.loads((ws / "P3" / module / "reports" / "criteria.json")
-                      .read_text(encoding="utf-8"))
-    results: list[dict] = []
-
-    def rec(cid, layer, ok, detail):
-        results.append({"id": cid, "layer": layer, "ok": ok,
-                        "detail": detail})
-
-    # L1 build
+    仅判 build/boot 可用性（~10s 启动闸门）；判据级验收归 P5(M)。
+    """
     b = probe_mod.probe_build(ws / "P4", target_os, runner,
-                              label=f"P4_{module}_acc_build")
-    rec(f"{module}.compile", "L1", b["ok"], b["detail"])
-    # L2 boot + 收集日志
-    boot_ok, log = _boot_ok(ws, target_os, proj, f"P4_{module}_acc_boot")
-    rec(f"{module}.boot", "L2", boot_ok, "boot 双信号" +
-        ("PASS" if boot_ok else "FAIL"))
-    # L0 unit_test（机制为 none → 判据转 deferred）
-    ut_out = ""
-    for c in crit["criteria"]:
-        if c["kind"] != "unit_test":
-            continue
-        if c.get("deferred_by"):
-            rec(c["id"], "L0", None, "deferred（消费者依赖）")
-            continue
-        if (runner.get("unit_test") or {}).get("mechanism") == "none":
-            _register_mech_none(ws, module, c)
-            rec(c["id"], "L0", None, "deferred（目标 OS 无单测机制）")
-            continue
-        if not ut_out:
-            _ok, ut_out = _run_unit_test(ws, target_os, runner, proj,
-                                         f"P4_{module}_acc_ut")
-        names = [x.strip() for x in c["expr"].split(",") if x.strip()]
-        ok, detail = crit_mod.check_unit_test(
-            ut_out, names,
-            (runner.get("unit_test") or {}).get("success_pattern",
-                                                "test result: ok"))
-        rec(c["id"], "L0", ok, detail)
-    # L3 本模块 + 累积回归（**已 done** 模块的 log_pattern 全查；未 done
-    # 模块的判据不查——它们尚无对应代码）
-    done_state = set()
-    try:
-        st = json.loads((ws / "loop_state.json").read_text(encoding="utf-8"))
-        done_state = {m for m, v in (st.get("modules") or {}).items()
-                      if v.get("phase") == "done"}
-    except (OSError, json.JSONDecodeError):
-        pass
-    for m in [module, *(m for m in order if m in done_state)]:
-        cpath = ws / "P3" / m / "reports" / "criteria.json"
-        if not cpath.exists():
-            continue
-        cs = json.loads(cpath.read_text(encoding="utf-8"))["criteria"]
-        for c in cs:
-            if c["kind"] not in ("log_pattern", "counter"):
-                continue
-            if c.get("deferred_by"):
-                continue
-            if any(r["id"] == c["id"] for r in results):
-                continue
-            ok, n = crit_mod.check_log_pattern(log, c["expr"])
-            rec(c["id"], "L3", ok, f"hits={n}" +
-                ("" if m == module else f"（累积回归 {m}）"))
-    # e2e / deferred 登记
-    _register_deferred(ws, module, crit)
-    for c in crit["criteria"]:
-        if c["kind"] == "e2e" and not c.get("deferred_by"):
-            rec(c["id"], "L4", None, "deferred（e2e 归 P5）")
-    # deferred 清偿（done 集 = 状态机已 done ∪ 本模块即将 done）
-    done = done_state | {module}
-    rc_def, uncleared = _try_clear_deferred(
-        ws, done, log, ut_out,
-        (runner.get("unit_test") or {}).get("success_pattern",
-                                            "test result: ok"))
-
-    hard_fail = [r for r in results if r["ok"] is False]
-    report = {"module": module,
-              "time": datetime.now().isoformat(),
-              "results": results,
-              "pass": not hard_fail,
-              "deferred_uncleared": uncleared}
-    (p4m / "reports" / "acceptance.json").write_text(
-        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    for r in results:
-        mark = "PASS" if r["ok"] else ("DEFER" if r["ok"] is None else "FAIL")
-        print(f"[porter] P4: {r['id']:<40} {mark}  {r['detail']}")
-    print(f"[porter] P4: {module} 验收 {'PASS' if report['pass'] else 'FAIL'}")
-    if not report["pass"]:
-        return 1, report
-    if rc_def == 3:
-        _write_deferred_questions(ws, module, uncleared)
-        return 3, report
-    return 0, report
-
-
-def _register_mech_none(ws: Path, module: str, c: dict) -> None:
-    d = _load_deferred(ws)
-    if any(e["id"] == c["id"] for e in d["entries"]):
-        return
-    d["entries"].append({"id": c["id"], "module": module, "criterion": c,
-                         "deferred_by": ["P5"],
-                         "status": "open",
-                         "registered": datetime.now().isoformat(
-                             timespec="seconds"),
-                         "history": [{"time": datetime.now().isoformat(
-                             timespec="seconds"), "ok": False,
-                             "detail": "目标 OS 无内核单测机制"}]})
-    _save_deferred(ws, d)
-
-
-def _write_deferred_questions(ws: Path, module: str, uncleared: list[str]):
-    path = ws / "human_questions.md"
-    lines = ["# loop 人工关口（exit 3）", "",
-             f"- 模块：{module}；时间："
-             f"{datetime.now():%Y-%m-%d %H:%M}",
-             f"- deferred 无法清偿（消费者均已 done 仍 FAIL）："
-             f"{', '.join(uncleared)}", "",
-             "处理：核查 deferred.json 中对应条目 history，修正判据或"
-             "代码后在 answers.md 写 `## retry {module}` 重跑。", ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                              label=f"P4_{module}_smoke_build")
+    if not b["ok"]:
+        print(f"[porter] P4: 轮末快速冒烟 FAIL（build）：{b['detail']}")
+        return False
+    boot_ok, _log = probe_lib.boot_and_log(ws, "P4", target_os, proj,
+                                           f"P4_{module}_smoke_boot")
+    if not boot_ok:
+        print("[porter] P4: 轮末快速冒烟 FAIL（boot 双信号）")
+        return False
+    print("[porter] P4: 轮末快速冒烟 PASS（build+boot）——留下可启动树")
+    return True
 
 
 # ---------- 主入口 ----------
@@ -688,9 +386,6 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
     surface = json.loads((ws / "P3" / module / "reports" / "surface.json")
                          .read_text(encoding="utf-8"))
 
-    _ensure_unit_test(ws, target_os, proj, runner)
-    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-
     rc = _step_fill(ws, driver_root, target_os, module, p4m, proj, runner,
                     order)
     if rc != 0:
@@ -702,6 +397,6 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
         return rc        # 切片失败已在 migration.json 留痕；attempts 由
         # run.py 统一 bump 并判界
 
-    rc, _report = _acceptance(ws, target_os, module, p4m, proj, runner,
-                              surface, order)
-    return rc
+    if not _quick_smoke(ws, target_os, module, proj, runner):
+        return 1        # 冒烟失败：attempts 由 run.py 统一 bump 并判界
+    return 0

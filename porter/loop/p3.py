@@ -312,7 +312,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
         {"module": module, "generated": datetime.now().isoformat(
             timespec="seconds"), "decisions": decisions},
         ensure_ascii=False, indent=2), encoding="utf-8")
-    # register-fill 登记平台补丁候选（planned，P6 决策）
+    # register-fill 登记平台补丁候选（planned，P7 决策）
     rf = [d for d in decisions if d["strategy"] == "register-fill"]
     if rf:
         pp_path = ws / "platform_patches.json"

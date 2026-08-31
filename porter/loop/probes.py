@@ -526,3 +526,25 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
             after_downgrade(ws, downgraded)
     save_registry(registry_path, reg)
     return 0
+
+
+# ---------- 共享 boot 助手（P4 fill 冒烟 / P5 L2 验收共用） ----------
+
+def boot_and_log(ws: Path, phase_dir: str, target_os: Path, proj: dict,
+                 label: str) -> tuple[bool, str]:
+    """boot 双信号判定 + 取回启动日志全文。
+
+    phase_dir ∈ {"P3","P4","P5"}：探测日志/落盘的相位子目录。
+    返回 (ok, log_text)。
+    """
+    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
+    r = probe_mod.probe_boot_with_device(ws / phase_dir, target_os, runner,
+                                         proj.get("category") or [],
+                                         label=label)
+    lf = (runner.get("boot") or {}).get("log_file")
+    log = ""
+    if lf:
+        p = Path(lf) if Path(lf).is_absolute() else target_os / lf
+        if p.exists():
+            log = p.read_text(encoding="utf-8", errors="replace")
+    return bool(r.get("ok")), log
