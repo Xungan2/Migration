@@ -275,9 +275,11 @@ CP5 检查点（p7 末，memo 非阻塞）生成**知识备审材料**
 |---|---|---|
 | 条目 hits | 各域已审分区 INDEX 行 | KB 健康报告（策展依据） |
 | kb_consulted | agent 输出 JSON 字段 | record_consulted → hits |
-| kb-candidate 事件 | events.jsonl | 观测层 |
+| kb-candidate 事件 | events.jsonl（log 子系统） | 观测层 |
 | policy_hits.json | 路由 rules 层命中计数 | KB 健康报告 |
 | veto 聚类 | gates 账本 vetoed 条目 | KB 健康报告 |
+
+（规范见 docs/log.md；事件流经 porter/log 写入，域账本保持域所有。）
 
 ### 3.10 与 gates 子系统的关系
 

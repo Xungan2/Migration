@@ -12,12 +12,22 @@
 把 `_cp_config`、`debt_limit`、`policy_path` 等读取方全部收编。后续其他
 功能（预计）也有工作区级覆写需求——做成通用机制而非逐功能补。
 
-## 2. 工具 log 子系统重建（用户规划）
+## 2. 工具 log 子系统重建（用户规划）——核心已完成
 
-events.jsonl（结构化流水账）+ 失败快照是现有观测层。用户计划后续重建
-工具的 log 子系统整体设计——届时 events.py 是重做对象，新框架的调用点
-（panic 快照 / veto / 聚类 / 路由遥测）依赖其接口，重建时保持兼容或
-一并迁移。
+本轮已落地：`porter/log/` 统一框架（record 双 sink：console+events.jsonl；
+v1.1 附加字段 phase/module/step/attempt/level/run_id/ref；run 登记 +
+prompt 归档 + context_block 上下文接续 API；`porter log` CLI；
+快照单文件 >5MB 裁剪钳制；loop/events.py 转 re-export 门面零破坏）。
+规范 = `docs/log.md`（目录框架/五类格式/kind 注册表/命名/体积纪律）。
+试点 print 收编：loop/run.py + env/probe.py（byte 兼容）。
+
+**残余项（后续轮）**：
+- print 全量收编：剩余 ~270 处（main.py 62 / p6.py 36 / p3.py 19 /
+  strategy.py 18 / …），按文件分批，规范见 docs/log.md §8；
+- P4 重试的 err_info / ut_verify.feedback_block 改走
+  log.query.context_block（行为等价迁移）；
+- 域事件族补 phase/module 戳（routing/gates/candidates 的
+  append_event 调用点逐步加参）。
 
 ## 3. §15 失败自诊重设计
 

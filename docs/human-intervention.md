@@ -302,7 +302,8 @@ human 且非全自动点），不阻塞（回落内置默认）。
 
 ### 3.9 观测协议
 
-**events.jsonl + 快照**（events.py，§15 bypass 不受控、保留）。
+**events.jsonl + 快照**（log 子系统 `porter/log/`，经 `loop/events.py`
+兼容门面；§15 bypass 不受控、保留；规范见 docs/log.md）。
 子系统写入的事件类型：`gate-auto-answered`（路由自动应答）、
 `policy-hit`（规则命中 + 遥测 policy_hits.json）、`gate-veto`、
 `gate-cluster`（聚类）、`boot-log-missing` / `boot-log-empty`

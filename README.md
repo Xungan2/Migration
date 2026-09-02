@@ -360,6 +360,10 @@ python3 porter/main.py p1-promote --output-dir <ws> --driver e1000
 
 ## 横切原则（实现与后续阶段必须遵守）
 
+- **log 子系统**：统一观测框架（`porter/log/`，纯静态零 agent）——
+  一次调用双 sink（console 人读 + events.jsonl 机读）、schema 只增
+  不改、agent 输入/输出成对归档、`porter log tail/runs/show/timeline`
+  查询。规范见 docs/log.md（目录框架/五类格式/kind 注册表/体积纪律）。
 - **判据双信号**：退出码 + 日志特征，缺一不可（管道吞退出码的教训已内置）
 - **agent 产物信任但验证**：一切 agent 输出（JSON/runner/检索）经机器校验
 - **幂等推进**：各步产物存在即跳过，失败可断点重跑
