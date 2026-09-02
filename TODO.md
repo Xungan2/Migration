@@ -12,22 +12,19 @@
 把 `_cp_config`、`debt_limit`、`policy_path` 等读取方全部收编。后续其他
 功能（预计）也有工作区级覆写需求——做成通用机制而非逐功能补。
 
-## 2. 工具 log 子系统重建（用户规划）——核心已完成
+## 2. 工具 log 子系统重建（用户规划）——已完成
 
-本轮已落地：`porter/log/` 统一框架（record 双 sink：console+events.jsonl；
-v1.1 附加字段 phase/module/step/attempt/level/run_id/ref；run 登记 +
-prompt 归档 + context_block 上下文接续 API；`porter log` CLI；
-快照单文件 >5MB 裁剪钳制；loop/events.py 转 re-export 门面零破坏）。
-规范 = `docs/log.md`（目录框架/五类格式/kind 注册表/命名/体积纪律）。
-试点 print 收编：loop/run.py + env/probe.py（byte 兼容）。
+两轮落地：`porter/log/` 统一框架（record 双 sink；v1.1 附加字段且
+phase 缺省回落 bind；run 登记 + prompt 归档 + context_block/
+tail_block 上下文接续 API 并接入 P4/ut_verify；`porter log` CLI；
+快照 >5MB 裁剪钳制；loop/events.py 转 re-export 门面零破坏）。
+**print 全量收编完成**：试点走 record()，其余 284 处（30 文件）经
+机械 codemod 统一 `_log.console_line`（byte 兼容 + 级别门控）。
+规范 = `docs/log.md`。
 
-**残余项（后续轮）**：
-- print 全量收编：剩余 ~270 处（main.py 62 / p6.py 36 / p3.py 19 /
-  strategy.py 18 / …），按文件分批，规范见 docs/log.md §8；
-- P4 重试的 err_info / ut_verify.feedback_block 改走
-  log.query.context_block（行为等价迁移）；
-- 域事件族补 phase/module 戳（routing/gates/candidates 的
-  append_event 调用点逐步加参）。
+**残余项（后续轮）**：真实 e2e 迁移跑一轮，验证新埋桩（prompt 归档/
+judge 流/界标/自动 phase）在真实工作区的累积形态；§15 重设计
+（第 3 条）时把诊断读路径接到 query API。
 
 ## 3. §15 失败自诊重设计
 

@@ -86,7 +86,7 @@ porter/loop/events.py  # 兼容门面（re-export；旧调用点零改动）
 | rc | int? | 存量 | 退出码 |
 | summary | str? | 存量 | 摘要（截断） |
 | mount | str? | 存量 | = phase 旧名（保留兼容） |
-| phase | str? | 新 | p0..p7 / loop / d1 / kb |
+| phase | str? | 新 | p0..p7 / loop / d1 / kb（缺省回落 bind 的 mount） |
 | module | str? | 新 | 模块名 |
 | step | str? | 新 | 步骤（fill/migrate/…） |
 | attempt | int? | 新 | 尝试号 |
@@ -169,6 +169,8 @@ log.record(kind, subject=…, summary=…, scope=…,          # console 行可�
            phase=…, module=…, step=…, attempt=…,
            run_id=…, ref={log,prompt,report}, **extra)
 log.console_only(scope, text, level)                      # 纯 console
+log.console_line(line, level="info")                      # 整行直打（print
+                                                          # 扫尾统一映射）
 with log.ctx(phase="p4", module="rx", attempt=2): …       # 上下文戳
                                                           # （显式>ctx>bind）
 log.phase_begin / phase_end / judge                       # 派生助手
@@ -183,6 +185,9 @@ log.query.runs(ws, subject=…, last_n=…)      # agent 运行登记（配对�
 log.query.context_block(ws, subject, includes=("outcome","log_tail"),
                         tail_lines=40)       # 上下文接续（拼 prompt 用）
 log.query.timeline(ws, module=…)
+log.query.tail_text(text, lines)             # 尾部 N 行共享格式器
+log.query.tail_block(ws, log_path, lines, title, note="")
+                                             # 日志文件尾部块（prompt 注入）
 ```
 
 CLI：
@@ -219,9 +224,11 @@ console 级别阈值：环境变量 `PORTER_LOG_LEVEL`（debug/info/warn/error�
   14 个存量调用点与行为级测试零改动；
 - 旧 events.jsonl（无附加字段）永久可读（缺键 = 无该维度）；
 - gates / knowledge 两子系统 §3.9 声明的事件族不变；
-- print 收编：试点已完成 loop/run.py + env/probe.py（console 输出
-  byte 兼容）；其余 ~270 处按文件分批，规范 = console_msg 逐字或
-  scope+summary 等价派生。
+- print 收编：**已完成**——试点（loop/run.py + env/probe.py）走
+  record()（事件+console）；其余 284 处（30 文件）经机械 codemod 统一
+  映射为 `_log.console_line(<原表达式>)`（byte 兼容，获得
+  PORTER_LOG_LEVEL 门控与单一咽喉点）；非 [porter] 前缀的用法提示行
+  有意保留 print。新增输出一律走 record/console_only/console_line。
 
 ## 9. 对其他子系统的接口
 
@@ -237,14 +244,14 @@ console 级别阈值：环境变量 `PORTER_LOG_LEVEL`（debug/info/warn/error�
 
 | 模块 | 职责 | 关键公共面 |
 |---|---|---|
-| porter/log/core.py | 写入口 + 上下文戳 + 派生助手 | record / console_only / ctx / phase_begin / phase_end / judge |
+| porter/log/core.py | 写入口 + 上下文戳 + 派生助手 | record / console_only / console_line / ctx / phase_begin / phase_end / judge |
 | porter/log/store.py | events.jsonl 读写 + bind | append_event / read_events / tail_events / bind / note_* |
 | porter/log/console.py | console sink | emit / emit_line / format_line |
-| porter/log/query.py | 查询/登记/接续 | events / runs / context_block / timeline |
+| porter/log/query.py | 查询/登记/接续 | events / runs / context_block / timeline / tail_text / tail_block |
 | porter/log/snapshot.py | 失败快照 | take_failure_snapshot |
 | porter/main.py cmd_log | CLI 查询面 | porter log tail/runs/show/timeline |
 
-测试：tests/test_log.py（core/console/上下文戳/v1.1 字段/run 登记/
-prompt 归档/CLI/judge/界标/快照钳制/run.py 事件）；
-tests/test_events.py（存量行为：append/read/tail/快照/埋桩——经门面
-跑，验证兼容）。
+测试：tests/test_log.py（core/console/console_line/上下文戳/v1.1 字段/
+run 登记/prompt 归档/CLI/judge/界标/快照钳制/run.py 事件/tail 助手/
+module 戳）；tests/test_events.py（存量行为：append/read/tail/快照/
+埋桩——经门面跑，验证兼容）。
