@@ -1,0 +1,10 @@
+[
+  {"file": "compile-fail.md", "desc": "编译失败即迁移代码问题：fix-code 按完整 build 日志修，修后双信号复验", "hits": 0},
+  {"file": "silent-success-contradiction.md", "desc": "rc==0 但 success_pattern 缺失：输出通道哑掉，查 runner console/重定向配置（fix-runner）", "hits": 0},
+  {"file": "empty-boot-log.md", "desc": "boot 日志空：两假设（console 配错=环境 / 内核早挂=真失败），先核配置后按真失败排查", "hits": 0},
+  {"file": "ansi-regex-boundary.md", "desc": "判据正则跨 ANSI 色码边界失配（\\b 型）：fix-criteria 须附日志/源码对照证据", "hits": 0},
+  {"file": "stale-plan-pseudo-defect.md", "desc": "计划/文档过期型假缺陷：对照代码实测核文档后闭账 stale（附 file:line）", "hits": 0},
+  {"file": "composite-defect-decompose.md", "desc": "复合迁移 bug：分解独立证据链逐条清偿，勿一次性大改", "hits": 0},
+  {"file": "deferred-uncleared-rehang.md", "desc": "deferred 清偿失败：核实真实消费者改挂（rehang），核实不到则升级", "hits": 0},
+  {"file": "platform-gap-pattern.md", "desc": "设备侧已证而消费侧恒零：平台缺口形态，park 泊车登记勿硬修", "hits": 0}
+]

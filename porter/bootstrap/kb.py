@@ -18,6 +18,8 @@ skills/kb-guide.md 补一节 + 调用点对照表补一行——单点改动：
   runbook  目标 OS 操作手册（一主题/一坑一文件）
   splits   拆分策略样例（splits/strategies/，一驱动一文件）
   pitfalls 踩坑记录（一坑一文件；方法教训亦入此域，标签区分）
+  failures 失败签名（一签名一文件：症状→归责→建议动作；
+           消费者 = 错误处理模块求解循环 porter/loop/errorloop.py）
 
 薄 INDEX（全域统一的条目目录，供 agent 检索）：
   [{"file": "<条目文件名>", "desc": "<一句话内容描述>",
@@ -61,6 +63,9 @@ DOMAINS: dict[str, dict] = {
     "pitfalls": {"subdir": "pitfalls",
                  "desc": "踩坑记录：平台/模拟器坑与方法教训"
                          "（一坑一文件，条目标签区分）"},
+    "failures": {"subdir": "failures",
+                 "desc": "失败签名：症状 → 归责回路 → 建议动作"
+                         "（一签名一文件；错误处理求解循环的检索面）"},
 }
 
 

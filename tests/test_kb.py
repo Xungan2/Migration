@@ -6,7 +6,9 @@
 - 薄 INDEX：load/save/upsert_entry（保 hits）/bump_hits
 - promote_entries：temp → 知识库目录（文件+INDEX 行搬运、选择性、
   同名再晋升保较高 hits）
-- 域注册表完整性：五域登记 + subdir 唯一
+- 域注册表完整性：六域登记 + subdir 唯一
+- failures 域内容：base/asterinas 两级 INDEX 可解析、条目四节齐、
+  归责词表合法、select_kb 传播 base/failures
 
 运行：python3 -m unittest tests.test_kb
 """
@@ -28,8 +30,8 @@ class TestKbSkeleton(unittest.TestCase):
     def test_registry(self):
         from porter.bootstrap import kb
         print("=== 域注册表 ===")
-        ok("K1 五域登记", set(kb.DOMAINS) ==
-           {"maps", "gaps", "runbook", "splits", "pitfalls"},
+        ok("K1 六域登记", set(kb.DOMAINS) ==
+           {"maps", "gaps", "runbook", "splits", "pitfalls", "failures"},
            str(sorted(kb.DOMAINS)))
         subdirs = [d["subdir"] for d in kb.DOMAINS.values()]
         ok("K2 subdir 唯一", len(subdirs) == len(set(subdirs)))
@@ -365,6 +367,70 @@ class TestKbSkeleton(unittest.TestCase):
         finally:
             kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR = \
                 old_root, old_base, old_temp
+            shutil.rmtree(tmp)
+
+    def test_failures_domain(self):
+        from porter.bootstrap import kb
+        print("=== failures 域（错误处理检索面）===")
+        circuits = {"infra", "criteria", "migration", "attribution",
+                    "platform", "unknown"}
+        zones = [("base", kb.BASE_DIR / "failures"),
+                 ("asterinas", kb.KB_ROOT / "asterinas" / "failures")]
+        total = 0
+        for label, d in zones:
+            ok(f"FD-{label}1 分区在位（README+INDEX）",
+               (d / "README.md").exists() and d.is_dir())
+            idx = kb.load_index(d)
+            ok(f"FD-{label}2 INDEX 可解析且非空", bool(idx))
+            for e in idx:
+                ok(f"FD-{label}3 薄格式行 {e.get('file')}",
+                   isinstance(e, dict) and e.get("file")
+                   and e.get("desc") and "hits" in e)
+                f = d / str(e["file"])
+                ok(f"FD-{label}4 条目在盘 {e.get('file')}", f.exists())
+                text = f.read_text(encoding="utf-8")
+                for sec in ("签名", "判别", "归责", "建议动作"):
+                    ok(f"FD-{label}5 四节齐[{sec}]（{e['file']}）",
+                       f"**{sec}**" in text)
+                import re as _re
+                m = _re.search(r"\*\*归责\*\*[:：]\s*([A-Za-z]+)", text)
+                ok(f"FD-{label}6 归责在词表（{e['file']}）",
+                   m is not None and m.group(1).rstrip("（(）)") in circuits)
+                total += 1
+        ok("FD7 两级条目总量 ≥10", total >= 10, f"实际 {total}")
+
+        # base 通用五形态 + lineage 环境签名都在
+        base_files = {e["file"] for e in
+                      kb.load_index(kb.BASE_DIR / "failures")}
+        for need in ("compile-fail.md", "silent-success-contradiction.md",
+                     "empty-boot-log.md", "ansi-regex-boundary.md",
+                     "stale-plan-pseudo-defect.md",
+                     "deferred-uncleared-rehang.md",
+                     "platform-gap-pattern.md",
+                     "composite-defect-decompose.md"):
+            ok(f"FD8 base 含 {need}", need in base_files)
+        lin = kb.load_index(kb.KB_ROOT / "asterinas" / "failures")
+        lin_files = {e["file"] for e in lin}
+        for need in ("docker-resource-lock.md",
+                     "ktest-silent-console-args.md",
+                     "killed-make-halfbuilt-iso-boot.md"):
+            ok(f"FD9 lineage 含 {need}", need in lin_files)
+
+        # select_kb 传播：new 复制 base → corpus 带 failures 分区
+        old_root, old_base, old_tool = kb.KB_ROOT, kb.BASE_DIR, kb.TOOL_ROOT
+        tmp = Path(tempfile.mkdtemp(prefix="kb_fd_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        kb.TOOL_ROOT = tmp
+        try:
+            shutil.copytree(old_base, kb.BASE_DIR)
+            ok("FD10 select_kb 传播 failures 分区",
+               kb.select_kb("new", "corpus") is not None
+               and (kb.KB_ROOT / "corpus" / "failures" / "INDEX.json")
+               .exists())
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR, kb.TOOL_ROOT = \
+                old_root, old_base, old_tool
             shutil.rmtree(tmp)
 
     def test_select_kb(self):

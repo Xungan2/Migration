@@ -1,0 +1,6 @@
+[
+  {"file": "docker-resource-lock.md", "desc": "docker 锁/资源文案（temporarily unavailable/database is locked 等）：幂等重跑即愈（rerun）", "hits": 0},
+  {"file": "ktest-silent-console-args.md", "desc": "cargo osdk test 静默（rc==0∧特征缺失∧全量重建后）：显式补 --kcmd-args console 参数（fix-runner）", "hits": 0},
+  {"file": "killed-make-halfbuilt-iso-boot.md", "desc": "杀 make 后 UEFI 起而内核无声：完整 make kernel 重烤一次即愈（rerun）", "hits": 0},
+  {"file": "rx-composite-signature.md", "desc": "e1000 rx=0 而 tx≠0：复合分解（接线/调用方/QEMU 行为），断点在平台层则 park", "hits": 0}
+]
