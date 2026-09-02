@@ -296,6 +296,9 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
     shutil.move(str(src), str(kdir / name))
     _save_index(tdir, [e for e in tidx if e is not entry])
     entry["entry_file"] = name
+    # 晋升折叠：运行时咨询热度从旁车并回 INDEX 行
+    entry["hits"] = int(entry.get("hits", 0) or 0) + int(
+        kb.fold_sidecar_hits(kb_dir, "splits", [name]).get(name, 0))
     kidx.append(entry)
     _save_index(kdir, kidx)
     _log.console_line(f"[porter] p1-promote: {entry.get('driver_name')} 已晋升"

@@ -52,15 +52,17 @@ def _ns(ws: Path) -> str:
 
 def _health_report(ws: Path, kb_dir: Path | None) -> list[str]:
     lines: list[str] = []
-    # KB hits（已审条目使用热度）
+    # KB hits（已审条目使用热度；INDEX 已折叠 + 旁车未折叠的合并值）
     if kb_dir is not None:
+        side = kb.load_hits_sidecar(kb_dir)
         rows: list[tuple[str, str, int]] = []
         for dom in kb.DOMAINS:
             idx = kb.load_index(kb.domain_kb(dom, kb_dir)) or []
             for e in idx:
                 if isinstance(e, dict) and e.get("file"):
-                    rows.append((dom, str(e["file"]),
-                                 int(e.get("hits", 0) or 0)))
+                    h = (int(e.get("hits", 0) or 0)
+                         + int(side.get(f"{dom}/{e['file']}", 0)))
+                    rows.append((dom, str(e["file"]), h))
         hot = [r for r in rows if r[2] > 0]
         cold = [r for r in rows if r[2] == 0]
         lines.append(f"- 已审条目 {len(rows)}：被咨询 {len(hot)} / "
@@ -294,6 +296,10 @@ def promote_candidate(ws: Path, cid: str, to: str | None = None) -> int:
     desc = f"[{ns}] {c['draft'][:96]}"
     didx = kb.load_index(ddir) or []
     didx = kb.upsert_entry(didx, rel, desc)
+    folded = kb.fold_sidecar_hits(kb_dir, domain, [rel])  # 晋升折叠旁车
+    for de in didx:
+        if isinstance(de, dict) and de.get("file") == rel:
+            de["hits"] = int(de.get("hits", 0)) + int(folded.get(rel, 0))
     kb.save_index(ddir, didx)
     cand.remove_candidate(ws, cid)
     _log.console_line(f"[porter] kb promote: {cid} 已晋升 → {tgt}")

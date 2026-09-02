@@ -66,7 +66,7 @@ agent 在干活时能查到它们。核心机制三句话：
 | **规则 0** | 总纲第一条：处理任务前必须先查本次提供的知识条目目录 | 提高 agent 主动访问知识库的权重 |
 | **知识面（KB 面）** | 一次 agent 调用携带的总纲 + 条目目录（`kb_face()`） | 检索的注入单位；无条目则无面 |
 | **kb_consulted** | agent 在输出 JSON 里报告实际读过的条目文件 | 使用热度遥测，人工策展决策依据 |
-| **hits** | 条目被报告阅读的累计次数（记在 INDEX 行） | 高频=健康、持续零=该复核或下架 |
+| **hits** | 条目被报告阅读的累计次数（INDEX 行记晋升时折叠值；运行时计数在旁车 `.hits.json`，晋升时折叠并入并清键） | 高频=健康、持续零=该复核或下架 |
 | **归类（classify）** | 为候选定去向子目录的动作（查表建议 → agent 批量 → 人在晋升时可改） | 分类决定哪些 agent 会查到它 |
 | **KB 健康报告** | CP5 材料里的聚合：hits 排行、零咨询清单、规则命中遥测、被否决自动决策聚类 | "哪些知识值得策展"的数据依据 |
 | **起点假设** | T3 注入 runbook 时的定位标注：环境会漂移，命令与特征本轮仍须实测复核 | 防止历史命令被当成免验答案 |
@@ -202,8 +202,11 @@ runbook、其余→pitfalls）——免费、仅供参考、非定案。
 - **核心字段就三个**：file（可携带相对子目录路径）、desc（一句话
   内容描述）、hits（被咨询次数）。旧富格式行（entry_file/title 等）
   渲染时兼容读取；
-- **写入者**：收成器/晋升命令写行；`kb_consulted` 回报给行 hits+1
-  （**只记已审分区**——temp 草稿不计数）；
+- **写入者**：收成器/晋升命令写行；`kb_consulted` 回报写**hits 旁车**
+  `<知识库目录>/.hits.json`（gitignore 覆盖；只计已审分区已登记条目，
+  幻影文件不计数；temp 草稿不计数）——**corpus 正式分区只在晋升时写**
+  （晋升把旁车计数折叠进 INDEX 行 hits 并清除键）；展示面（目录注入/
+  健康报告）显示合并值 = INDEX 已折叠 + 旁车未折叠；
 - **desc 与粒度的契约**：文件粒度细（一 API/一主题/一坑一文件），
   desc 才能短而准——这是检索质量的根基；
 - INDEX 缺失/损坏 → 渲染退化为该分区文件名清单（gaps/runbook 嵌套
@@ -273,8 +276,8 @@ CP5 检查点（p7 末，memo 非阻塞）生成**知识备审材料**
 
 | 信号 | 载体 | 消费者 |
 |---|---|---|
-| 条目 hits | 各域已审分区 INDEX 行 | KB 健康报告（策展依据） |
-| kb_consulted | agent 输出 JSON 字段 | record_consulted → hits |
+| 条目 hits | INDEX 行（晋升时折叠）+ 旁车 .hits.json（运行时回报，未折叠） | 目录注入显示 / KB 健康报告 |
+| kb_consulted | agent 输出 JSON 字段 | record_consulted → 旁车计数 |
 | kb-candidate 事件 | events.jsonl（log 子系统） | 观测层 |
 | policy_hits.json | 路由 rules 层命中计数 | KB 健康报告 |
 | veto 聚类 | gates 账本 vetoed 条目 | KB 健康报告 |
@@ -301,7 +304,7 @@ CP5 检查点（p7 末，memo 非阻塞）生成**知识备审材料**
 
 | 模块 | 职责 | 关键公共面 |
 |---|---|---|
-| `porter/bootstrap/kb.py` | 骨架：三区路径、域注册表、薄 INDEX、目录渲染、通用晋升、kb_face、kb_dir 解析、select_kb | `DOMAINS`、`domain_temp/kb/base`、`kb_dir_of/for`、`select_kb`、`load/save_index`、`upsert_entry`、`bump_hits`、`render_catalog`、`catalog_block`、`load_guide`、`kb_face`、`record_consulted`、`promote_entries` |
+| `porter/bootstrap/kb.py` | 骨架：三区路径、域注册表、薄 INDEX、hits 旁车、目录渲染、通用晋升、kb_face、kb_dir 解析、select_kb | `DOMAINS`、`domain_temp/kb/base`、`kb_dir_of/for`、`select_kb`、`load/save_index`、`upsert_entry`、`bump_hits`、`load/save_hits_sidecar`、`fold_sidecar_hits`、`render_catalog`、`catalog_block`、`load_guide`、`kb_face`、`record_consulted`、`promote_entries` |
 | `porter/bootstrap/knowledge.py` | maps 域收成/晋升 | `draft_knowledge`、`promote_map` |
 | `porter/bootstrap/gaps.py` | gaps 域收成/检索 | `draft_gaps`、`prior_entry`、`sanitize_api` |
 | `porter/bootstrap/runbook.py` | runbook 域收成 | `draft_runbook` |
@@ -374,8 +377,10 @@ porter p2-promote --output-dir <ws> --driver <名> [--target <名>]
    输出）无遥测；
 3. **maps 保持整表粒度**：与"细粒度文件"原则的偏离是有意为之
    （表型知识 + .json 机器表）；消费侧域过滤已退役，靠 desc 概括；
-4. **多工作区共用同一知识库目录为单写者假设**：并行收成/晋升可能
-   竞写 INDEX；
+4. **多工作区共用同一知识库目录为单写者假设**：并行晋升可能竞写
+   INDEX；hits 旁车为遥测级——并发丢失更新只丢计数不丢知识（已接受）。
+   corpus 正式分区只在晋升时写：运行时 kb_consulted 只动旁车
+   （gitignore 覆盖），跟踪中的知识库目录不因遥测变脏；
 5. **classify 的提示词未经实战校准**：改判日志已积累数据，校准属
    TODO 第 9 条；
 6. **base 回流无通道**（TODO 第 8 条）；**taxonomy 完备性**未检验
@@ -448,7 +453,8 @@ $ python3 porter/main.py kb --output-dir ws --classify
 $ python3 porter/main.py kb --output-dir ws --promote all
 [porter] kb promote: cand-0001 已晋升 → knowledge/<name>/pitfalls/…
 # 下一次迁移中路由层答 attempts 类关口时，agent 检索到该条目（已审），
-# 报 kb_consulted → hits+1；健康报告开始积累该条目的使用热度
+# 报 kb_consulted → 旁车计数+1（晋升时折叠回 INDEX）；健康报告
+# 开始积累该条目的使用热度
 ```
 
 **场景 B（固定知识复用）**：

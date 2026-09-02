@@ -187,6 +187,7 @@ def promote_map(driver: str, kb_dir: Path,
     kidx = [e for e in kidx if not (isinstance(e, dict)
                                     and (e.get("file") == fname
                                          or e.get("entry_file") == fname))]
+    hits += int(kb.fold_sidecar_hits(kb_dir, "maps", [fname]).get(fname, 0))
     kidx.append({"file": fname, "desc": desc, "hits": hits})
     kb.save_index(kdir, kidx)
     _log.console_line(f"[porter] p2-promote: {stem} 已晋升 → {kdir}")

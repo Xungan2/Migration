@@ -4,3 +4,5 @@ __pycache__/
 # temp 草稿区：目录骨架（README）跟踪，内容全部 ignore（未审工作产物）
 knowledge/temp/*
 !knowledge/temp/README.md
+# hits 旁车（运行时遥测计数，晋升时折叠回 INDEX）——不弄脏跟踪中的 corpus
+knowledge/*/.hits.json

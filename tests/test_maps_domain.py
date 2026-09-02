@@ -120,6 +120,15 @@ class TestMapsDomain(unittest.TestCase):
             ok("M9 同名替换保较高 hits", rc == 0 and len(kidx) == 1
                and kidx[0]["hits"] == 9)
 
+            # M9b 旁车折叠：运行时咨询计数在晋升时并入、键清除
+            kb.save_hits_sidecar(kb_dir, {"maps/e1000@asterinas.md": 4})
+            K.draft_knowledge(ws)
+            rc = K.promote_map("e1000", kb_dir)
+            kidx = rd(kdir / "INDEX.json")
+            ok("M9b promote_map 折叠旁车（9+4=13）", rc == 0
+               and kidx[0]["hits"] == 13
+               and kb.load_hits_sidecar(kb_dir) == {})
+
             # 多目标歧义
             (TD / "foo@bar.md").write_text("x", encoding="utf-8")
             (TD / "foo@qux.md").write_text("y", encoding="utf-8")

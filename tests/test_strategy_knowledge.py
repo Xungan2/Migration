@@ -157,8 +157,9 @@ class TestStrategyKnowledge(unittest.TestCase):
                isinstance(rd(TD / "INDEX.json"), list))
 
             print("=== B. 晋升 promote_sample ===")
-            # B9 正常晋升 temp → 知识库目录
+            # B9 正常晋升 temp → 知识库目录（含旁车折叠）
             reset()
+            kb.save_hits_sidecar(corpus, {"splits/foo.md": 3})
             (TD / "foo.md").write_text("# foo body")
             S._save_index(TD, [{"entry_file": "foo.md",
                                 "driver_name": "foo", "linux_dir": "/x/foo",
@@ -167,8 +168,11 @@ class TestStrategyKnowledge(unittest.TestCase):
             ok("B9a rc=0", rc == 0)
             ok("B9b 文件搬运", (KD / "foo.md").exists()
                and not (TD / "foo.md").exists())
-            ok("B9c INDEX 搬运", rd(TD / "INDEX.json") == []
-               and rd(KD / "INDEX.json")[0]["driver_name"] == "foo")
+            ok("B9c INDEX 搬运 + 旁车折叠（0+3=3）",
+               rd(TD / "INDEX.json") == []
+               and rd(KD / "INDEX.json")[0]["driver_name"] == "foo"
+               and rd(KD / "INDEX.json")[0]["hits"] == 3
+               and "splits/foo.md" not in kb.load_hits_sidecar(corpus))
             ok("B9d 内容不变",
                (KD / "foo.md").read_text() == "# foo body")
 

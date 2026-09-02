@@ -217,8 +217,10 @@ class TestKbSkeleton(unittest.TestCase):
                                     ["e1000@asterinas.md", "foo@bar.md"])
             idx = kb.load_index(mdir)
             tidx = kb.load_index(tdir)
-            ok("G9 只记已审命中", n == 1
-               and idx[0]["hits"] == 4 and tidx[0]["hits"] == 0)
+            side = kb.load_hits_sidecar(kb_dir)
+            ok("G9 只记已审命中（旁车，INDEX 不动）", n == 1
+               and side == {"maps/e1000@asterinas.md": 1}
+               and idx[0]["hits"] == 3 and tidx[0]["hits"] == 0)
             ok("G10 None kb_dir → 0",
                kb.record_consulted(None, "maps", ["x.md"]) == 0)
         finally:
@@ -282,7 +284,84 @@ class TestKbSkeleton(unittest.TestCase):
                and "pitfalls（草稿" not in captured["prompt"]
                and "pitfalls（已审）" in captured["prompt"])
             idx = kb.load_index(pdir)
-            ok("F6 kb_consulted 记 hits", idx[0]["hits"] == 1)
+            side = kb.load_hits_sidecar(kb_dir)
+            ok("F6 kb_consulted 记旁车（INDEX 不动）",
+               idx[0]["hits"] == 0
+               and side == {"pitfalls/ktest.md": 1})
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR = \
+                old_root, old_base, old_temp
+            shutil.rmtree(tmp)
+
+    def test_hits_sidecar(self):
+        from porter.bootstrap import kb
+        print("=== hits 旁车（.hits.json）===")
+        old_root, old_base, old_temp = kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR
+        tmp = Path(tempfile.mkdtemp(prefix="kb_side_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        kb.TEMP_DIR = kb.KB_ROOT / "temp"
+        try:
+            kb_dir = kb.KB_ROOT / "corpus"
+            gdir = kb.domain_kb("gaps", kb_dir)
+            gdir.mkdir(parents=True)
+            (gdir / "msleep.md").write_text("x", encoding="utf-8")
+            kb.save_index(gdir, [{"file": "msleep.md",
+                                  "desc": "msleep 忙等", "hits": 2}])
+
+            # 旁车累计 + 幻影不计数
+            kb.record_consulted(kb_dir, "gaps", ["msleep.md"])
+            kb.record_consulted(kb_dir, "gaps",
+                                ["msleep.md", "ghost.md"])
+            side = kb.load_hits_sidecar(kb_dir)
+            ok("H1 旁车累计且幻影不计数",
+               side == {"gaps/msleep.md": 2})
+            idx = kb.load_index(gdir)
+            ok("H2 INDEX 不被运行时触碰", idx[0]["hits"] == 2)
+
+            # 目录显示合并值（INDEX 2 + 旁车 2 → hits 4）
+            ws = tmp / "ws"
+            ws.mkdir()
+            (ws / "project.json").write_text(json.dumps({
+                "linux_driver": "/x/e1000", "target_os": "/y/a",
+                "kb_dir": "corpus"}), encoding="utf-8")
+            out = kb.kb_face(ws, ["gaps"])
+            ok("H3 显示合并值（INDEX+旁车）",
+               "msleep.md —— msleep 忙等（hits 4）" in out)
+
+            # 旁车损坏 → 视为空，不崩
+            kb.hits_path(kb_dir).write_text("{bad", encoding="utf-8")
+            ok("H4 旁车损坏→空", kb.load_hits_sidecar(kb_dir) == {})
+            kb.record_consulted(kb_dir, "gaps", ["msleep.md"])
+            ok("H5 损坏后重建", kb.load_hits_sidecar(kb_dir)
+               == {"gaps/msleep.md": 1})
+
+            # 折叠：promote_entries 把旁车并入 dst INDEX 行并清键
+            tdir = kb.domain_temp("gaps")
+            tdir.mkdir(parents=True, exist_ok=True)
+            (tdir / "msleep.md").write_text("v2", encoding="utf-8")
+            kb.save_index(tdir, [{"file": "msleep.md",
+                                  "desc": "msleep 忙等 v2", "hits": 0}])
+            n, _ = kb.promote_entries("gaps", ["msleep.md"], kb_dir)
+            idx = kb.load_index(gdir)
+            ok("H6 晋升折叠（旧 2 + 旁车 1 → 3；键清除）", n == 1
+               and idx[0]["hits"] == 3
+               and kb.load_hits_sidecar(kb_dir) == {})
+
+            # 再累计再折叠：promote 后旁车重新累计，下次晋升并入
+            kb.record_consulted(kb_dir, "gaps", ["msleep.md"])
+            kb.record_consulted(kb_dir, "gaps", ["msleep.md"])
+            (tdir / "msleep.md").write_text("v3", encoding="utf-8")
+            kb.save_index(tdir, [{"file": "msleep.md",
+                                  "desc": "v3", "hits": 0}])
+            kb.promote_entries("gaps", ["msleep.md"], kb_dir)
+            idx = kb.load_index(gdir)
+            ok("H7 二次折叠累计并入（3+2=5）", idx[0]["hits"] == 5
+               and kb.load_hits_sidecar(kb_dir) == {})
+
+            # fold_sidecar_hits 直调：无键返回空且不写盘
+            ok("H8 无键 fold → 空",
+               kb.fold_sidecar_hits(kb_dir, "gaps", ["msleep.md"]) == {})
         finally:
             kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR = \
                 old_root, old_base, old_temp

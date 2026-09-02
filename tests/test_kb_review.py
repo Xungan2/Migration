@@ -77,11 +77,14 @@ class TestKbReview(unittest.TestCase):
         R = self.R
         print("=== A. CP5 备审材料 ===")
         self.seed()
+        # 旁车合并显示：INDEX 5 + 旁车 2 → hits 7
+        self.kb.save_hits_sidecar(self.corpus,
+                                  {"pitfalls/ktest.md": 2})
         mat = R.build_cp5_material(self.ws)
         txt = mat.read_text(encoding="utf-8")
         ok("M1 候选队列", "cand-0001" in txt and "cand-0002" in txt
            and LONG1[:20] in txt and "kb promote" in txt)
-        ok("M2 健康报告（hits 聚合）", "ktest.md（hits 5）" in txt
+        ok("M2 健康报告（hits 合并值）", "ktest.md（hits 7）" in txt
            and "零咨询" in txt and "cold.md" in txt)
         ok("M3 草稿清点空态", "各域无草稿" in txt)
 
@@ -117,15 +120,21 @@ class TestKbReview(unittest.TestCase):
         R, C, kb = self.R, self.C, self.kb
         print("=== C/D. promote / reject ===")
         self.seed()
-        # 建议类晋升（pitfalls → 扁平 ns__slug 文件）
+        # 建议类晋升（pitfalls → 扁平 ns__slug 文件）+ 旁车折叠
+        self.kb.save_hits_sidecar(self.corpus, {
+            "pitfalls/e1000@asterinas__loop.attempts.rx-ring-p4.md": 3})
         rc = R.promote_candidate(self.ws, "cand-0001")
         f = (self.corpus / "pitfalls" /
              "e1000@asterinas__loop.attempts.rx-ring-p4.md")
         ok("P1 rc=0 文件落盘", rc == 0 and f.exists())
         idx = rd(self.corpus / "pitfalls" / "INDEX.json")
-        ok("P2 INDEX 行 + desc 带 ns", any(
+        ok("P2 INDEX 行 + desc 带 ns + 旁车折叠（0+3）", any(
             e["file"].endswith("rx-ring-p4.md")
-            and e["desc"].startswith("[e1000@asterinas]") for e in idx))
+            and e["desc"].startswith("[e1000@asterinas]")
+            and e["hits"] == 3 for e in idx))
+        ok("P2b 折叠后旁车清键",
+           "pitfalls/e1000@asterinas__loop.attempts.rx-ring-p4.md"
+           not in self.kb.load_hits_sidecar(self.corpus))
         ok("P3 出账", all(c["id"] != "cand-0001"
                           for c in C.load_candidates(self.ws)))
         body = f.read_text(encoding="utf-8")

@@ -101,21 +101,27 @@ def _has_entries(d: Path) -> bool:
 
 
 def render_catalog(parts: list[tuple[str, Path]],
-                   with_rule: bool = True) -> str:
+                   with_rule: bool = True,
+                   extra_hits: dict[Path, dict[str, int]] | None = None
+                   ) -> str:
     """渲染知识目录注入块（parts = [(标签, 目录), ...]，调用方已筛非空）。
 
-    行格式：- <文件> —— <一句话描述>（hits N>0 时附）。INDEX 缺失/损坏
-    → 该分区退化为文件名清单（排除 README/INDEX）。返回空串 = 无可注入。
+    行格式：- <文件> —— <一句话描述>（hits N>0 时附，N = INDEX 已折叠
+    + 旁车未折叠的合并值——extra_hits 按分区目录给未折叠部分）。
+    INDEX 缺失/损坏 → 该分区退化为文件名清单（排除 README/INDEX）。
+    返回空串 = 无可注入。
     """
     sections: list[str] = []
     for label, d in parts:
         idx = load_index(d) if d.is_dir() else None
         if idx is not None:
+            extra = (extra_hits or {}).get(d) or {}
             lines = []
             for e in idx:
                 if not isinstance(e, dict):
                     continue
-                hits = int(e.get("hits", 0) or 0)
+                hits = int(e.get("hits", 0) or 0) \
+                    + int(extra.get(_row_file(e), 0))
                 suffix = f"（hits {hits}）" if hits > 0 else ""
                 lines.append(f"- {_row_file(e)} —— {_row_desc(e)}{suffix}")
         else:
@@ -138,19 +144,31 @@ def catalog_block(kb_dir: Path | None, domains: list[str],
     """调用点注入块：各域的已审分区（知识库目录）+ 草稿分区（temp）。
 
     已审在前、草稿在后（冲突以已审为准）；目录为空不注入。
+    已审分区的 hits 显示 = INDEX 行（晋升时折叠）+ 旁车 .hits.json
+    （运行时回报，未折叠）的合并值。
     """
     parts: list[tuple[str, Path]] = []
+    extra: dict[Path, dict[str, int]] | None = None
     if kb_dir is not None:
+        side = load_hits_sidecar(kb_dir)
+        if side:
+            extra = {}
         for dom in domains:
             d = domain_kb(dom, kb_dir)
             if _has_entries(d):
                 parts.append((f"{dom}（已审）", d))
+                if extra is not None:
+                    prefix = f"{dom}/"
+                    m = {k[len(prefix):]: v for k, v in side.items()
+                         if k.startswith(prefix)}
+                    if m:
+                        extra[d] = m
     if include_temp:
         for dom in domains:
             d = domain_temp(dom)
             if _has_entries(d):
                 parts.append((f"{dom}（草稿，未经人审，冲突以已审为准）", d))
-    return render_catalog(parts, with_rule=with_rule)
+    return render_catalog(parts, with_rule=with_rule, extra_hits=extra)
 
 
 def load_guide() -> str:
@@ -177,16 +195,26 @@ def kb_face(ws: Path, domains: list[str], include_temp: bool = True) -> str:
 
 def record_consulted(kb_dir: Path | None, domain: str,
                      files: list) -> int:
-    """kb_consulted 回报 → 已审分区 INDEX hits+1（temp 草稿不计数）。"""
+    """kb_consulted 回报 → 旁车 .hits.json 计数（corpus 正式分区只在
+    晋升时写——运行时遥测不弄脏 git 跟踪的知识库目录）。
+
+    只计该域 INDEX 已登记的条目（幻影文件不计数）；temp 草稿不计数。
+    并发丢失更新按遥测级接受（丢计数不丢知识）。
+    """
     if kb_dir is None or not files:
         return 0
-    d = domain_kb(domain, kb_dir)
-    idx = load_index(d)
-    if not idx:
-        return 0
-    n = bump_hits(idx, [str(f) for f in files])
+    idx = load_index(domain_kb(domain, kb_dir)) or []
+    listed = {_row_file(e) for e in idx if isinstance(e, dict)}
+    counts = load_hits_sidecar(kb_dir)
+    n = 0
+    for f in files:
+        f = str(f)
+        if f in listed:
+            k = sidecar_key(domain, f)
+            counts[k] = counts.get(k, 0) + 1
+            n += 1
     if n:
-        save_index(d, idx)
+        save_hits_sidecar(kb_dir, counts)
     return n
 
 
@@ -312,6 +340,56 @@ def bump_hits(entries: list, files: list[str]) -> int:
     return n
 
 
+# ---------- hits 旁车（运行时遥测不写 corpus 正式分区） ----------
+
+HITS_SIDECAR = ".hits.json"
+
+
+def hits_path(kb_dir: Path) -> Path:
+    return Path(kb_dir) / HITS_SIDECAR
+
+
+def sidecar_key(domain: str, file: str) -> str:
+    return f"{domain}/{file}"
+
+
+def load_hits_sidecar(kb_dir: Path) -> dict[str, int]:
+    """旁车计数表 {<域>/<file>: n}（缺失/损坏 → 空）。"""
+    try:
+        data = json.loads(hits_path(kb_dir).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): int(v) for k, v in data.items()
+            if isinstance(v, (int, float))}
+
+
+def save_hits_sidecar(kb_dir: Path, counts: dict[str, int]) -> None:
+    p = hits_path(kb_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(counts, ensure_ascii=False, indent=2,
+                            sort_keys=True) + "\n", encoding="utf-8")
+
+
+def fold_sidecar_hits(kb_dir: Path, domain: str,
+                      files: list[str]) -> dict[str, int]:
+    """晋升折叠：把 <域>/<file> 的旁车计数取出并从旁车清除。
+
+    返回 {file: n}（无计数的 file 不在返回值中）。corpus 的 INDEX 行
+    在晋升时把返回值并入 hits——正式分区只在晋升时写的唯一例外来源。
+    """
+    counts = load_hits_sidecar(kb_dir)
+    out: dict[str, int] = {}
+    for f in {str(f) for f in files}:
+        k = sidecar_key(domain, f)
+        if k in counts:
+            out[f] = counts.pop(k)
+    if out:
+        save_hits_sidecar(kb_dir, counts)
+    return out
+
+
 # ---------- 通用晋升（薄格式域） ----------
 
 def promote_entries(domain: str, files: list[str] | None,
@@ -342,12 +420,14 @@ def promote_entries(domain: str, files: list[str] | None,
     save_index(src, [e for e in idx
                      if not (isinstance(e, dict)
                              and e.get("file") in mset)])
+    folded = fold_sidecar_hits(kb_dir, domain, moved)  # 晋升折叠旁车计数
     didx = load_index(dst) or []
     for e in rows:
         didx = upsert_entry(didx, str(e["file"]), str(e.get("desc", "")))
-        for de in didx:  # 同名再晋升保留较高热度
+        for de in didx:  # 同名再晋升保留较高热度 + 旁车折叠
             if isinstance(de, dict) and de.get("file") == e.get("file"):
-                de["hits"] = max(int(de.get("hits", 0)),
-                                 int(e.get("hits", 0)))
+                de["hits"] = (max(int(de.get("hits", 0)),
+                                  int(e.get("hits", 0)))
+                              + int(folded.get(str(e["file"]), 0)))
     save_index(dst, didx)
     return len(moved), moved
