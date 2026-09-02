@@ -179,11 +179,12 @@ def consult_policy(ws: Path, gate: dict) -> dict | None:
         return None
     if not (parsed and parsed.get("hit")):
         return None
-    _record_hit(ws, parsed.get("rule_id") or "?", gate["id"])
+    _record_hit(ws, parsed.get("rule_id") or "?", gate["id"], gate=gate)
     return parsed
 
 
-def _record_hit(ws: Path, rule_id: str, gate_id: str) -> None:
+def _record_hit(ws: Path, rule_id: str, gate_id: str,
+                gate: dict | None = None) -> None:
     hp = Path(ws) / "policy_hits.json"
     try:
         data = json.loads(hp.read_text(encoding="utf-8"))
@@ -195,7 +196,8 @@ def _record_hit(ws: Path, rule_id: str, gate_id: str) -> None:
     try:
         from . import events as _ev
         _ev.append_event("policy-hit", subject=gate_id,
-                         summary=f"rule={rule_id}")
+                         summary=f"rule={rule_id}",
+                         module=(gate or {}).get("module"))
     except Exception:
         pass
 
@@ -315,7 +317,8 @@ def maybe_auto_answer(ws: Path, ledger, gate: dict) -> bool:
     try:
         from . import events as _ev
         _ev.append_event("gate-auto-answered", subject=gate["id"],
-                         summary=f"{answered_by} conf={conf}")
+                         summary=f"{answered_by} conf={conf}",
+                         module=gate.get("module"))
     except Exception:
         pass
     return True

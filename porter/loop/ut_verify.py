@@ -43,8 +43,13 @@ def run_and_verify(cmd: str, cwd: Path, env: dict, timeout_sec: int,
 
 
 def feedback_block(detail: str, out: str, tail_lines: int = 25) -> str:
-    """给 agent 的失败反馈块（判定说明 + 观测输出尾部）。"""
-    tail = "\n".join(out.splitlines()[-tail_lines:])
+    """给 agent 的失败反馈块（判定说明 + 观测输出尾部）。
+
+    尾部切割经 log.query.tail_text（上下文接续的统一切口，
+    docs/log.md §6）；文案保持既有格式（byte 兼容）。
+    """
+    from ..log import query as _lq
+    tail = _lq.tail_text(out, tail_lines)
     return (f"\n\n---\n\n## 上一次烟测失败（{detail}）\n"
             f"观测输出尾部（去 ANSI）：\n```\n{tail}\n```\n"
             "请修正 cmd（确保结果文本送达 stdout——机制写文件就在命令尾部"

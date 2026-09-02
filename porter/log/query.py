@@ -115,6 +115,30 @@ def _tail_file(path: Path, lines: int) -> str:
     return _safe(_read, "")
 
 
+def tail_text(text: str, lines: int) -> str:
+    """字符串尾部 N 行（共享格式器——err_info/feedback_block 的统一切口）。
+
+    lines ≤0 返回 ""。永不抛异常。
+    """
+    if not text or lines <= 0:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def tail_block(ws: Path, log_path, lines: int = 40,
+               title: str = "上一次输出尾部",
+               note: str = "") -> str:
+    """日志文件尾部块（prompt 注入用；docs/log.md §6 上下文接续族）。
+
+    log_path 相对 ws 解析；文件缺失/为空返回 ""。产出形如：
+    "\\n\\n---\\n\\n## {title}\\n{note}```\\n{tail}\\n```"
+    """
+    tail = _tail_file(Path(ws) / Path(log_path), lines)
+    if not tail:
+        return ""
+    return f"\n\n---\n\n## {title}\n{note}```\n{tail}\n```"
+
+
 def context_block(ws: Path, subject: str, *, includes: tuple = (
         "outcome", "log_tail"), tail_lines: int = 40) -> str:
     """取 subject 最近一次（或未闭合）agent run 的上下文块，可直接拼 prompt。

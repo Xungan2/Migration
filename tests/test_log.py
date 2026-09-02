@@ -111,11 +111,11 @@ class LogCoreTest(unittest.TestCase):
         ok("B2 mount=phase 别名", evs[0]["mount"] == "p4")
         ok("B3 显式覆盖 ctx", evs[1]["attempt"] == 3)
         ok("B4 作用域退出还原", LOG.ctx_stamp() == {})
-        # bind 兜底（无 ctx 无显式 phase）
+        # bind 兜底（无 ctx 无显式 phase）：mount 与 phase 同源回落
         _cap(LOG.record, "plain", summary="s", store_only=True)
         evs = ST.read_events(self.ws)
-        ok("B5 bind 兜底 mount", evs[2]["mount"] == "p5"
-           and "phase" not in evs[2])
+        ok("B5 bind 兜底 mount+phase", evs[2]["mount"] == "p5"
+           and evs[2]["phase"] == "p5")
 
     def test_c_v11_fields(self):
         EV.bind(self.ws, "p4")
@@ -126,11 +126,12 @@ class LogCoreTest(unittest.TestCase):
         ev = ST.read_events(self.ws)[0]
         ok("C1 run_id/ref 落盘", ev["run_id"] == "P4/rx/logs/MIG_a.c_100_R1"
            and ev["ref"] == ref)
-        # 旧式调用（仅存量字段）→ 无新键
+        # 旧式调用（仅存量字段）→ 无新键（phase 自动回落 bind 除外）
         ST.append_event("cmd_end", cmd="make", rc=0)
         ev2 = ST.read_events(self.ws)[1]
-        ok("C2 旧式无新键", all(k not in ev2 for k in
-           ("phase", "module", "level", "run_id", "ref")))
+        ok("C2 旧式仅自动 phase", all(k not in ev2 for k in
+           ("module", "level", "run_id", "ref"))
+           and ev2["phase"] == "p4")
         # 旧文件（手工构造 v1 行）可读
         with open(self.ws / "events.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps({"time": "t", "kind": "legacy",
@@ -233,6 +234,55 @@ class QueryTest(unittest.TestCase):
         _, cout = self._run()
         ok("E8 未绑定 console 照打", "[porter] agent:" in cout
            and ST.read_events(self.ws) == [])
+
+
+class AdoptTest(unittest.TestCase):
+    """A/B 收编：tail 助手 / 域事件 module 戳 / bind phase 回落。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="porter_ad_t_"))
+        self.ws = self.tmp / "ws"
+        self.ws.mkdir()
+        EV.unbind()
+
+    def tearDown(self):
+        EV.unbind()
+
+    def test_h_tail_helpers(self):
+        ok("H1 tail_text 尾行",
+           LOG.query.tail_text("a\nb\nc\nd", 2) == "c\nd")
+        ok("H2 tail_text 空安全", LOG.query.tail_text("", 5) == ""
+           and LOG.query.tail_text("x", 0) == "")
+        (self.ws / "P4" / "logs").mkdir(parents=True)
+        log = self.ws / "P4" / "logs" / "b.log"
+        log.write_text("\n".join(f"l{i}" for i in range(100)),
+                       encoding="utf-8")
+        blk = LOG.query.tail_block(self.ws, "P4/logs/b.log", 40,
+                                   "上一次构建失败（修复后重做本片）")
+        ok("H3 tail_block 形态", blk.startswith(
+            "\n\n---\n\n## 上一次构建失败（修复后重做本片）\n```\nl60\n")
+            and blk.endswith("l99\n```"))
+        ok("H4 缺文件空串", LOG.query.tail_block(
+            self.ws, "nope.log", 40, "t") == "")
+
+    def test_h_domain_module_stamp(self):
+        from porter.loop import routing as RT
+        EV.bind(self.ws, "loop")
+        RT._record_hit(self.ws, "R1", "p3.gap.readb",
+                       gate={"module": "rx-ring", "phase": "P3"})
+        ev = ST.read_events(self.ws)[0]
+        ok("H5 policy-hit module 戳", ev["kind"] == "policy-hit"
+           and ev["module"] == "rx-ring" and ev["subject"] == "p3.gap.readb")
+        hits = json.loads((self.ws / "policy_hits.json")
+                          .read_text(encoding="utf-8"))
+        ok("H6 计数面不受影响", hits["hits"]["R1"] == 1)
+
+    def test_h_snapshot_event_phase(self):
+        LOG.take_failure_snapshot(self.ws, "p6", "P6.boot", "r")
+        ev = [e for e in ST.read_events(self.ws)
+              if e["kind"] == "snapshot"][0]
+        ok("H7 snapshot 事件 phase 回落", ev["mount"] == "p6"
+           and ev["phase"] == "p6")
 
 
 class S4Test(unittest.TestCase):

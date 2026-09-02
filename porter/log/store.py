@@ -65,9 +65,10 @@ def append_event(kind: str, subject: str | None = None,
             (_RECORDER or {}).get("ws")
         if rec_ws is None:
             return False
+        rec_mount = mount or (_RECORDER or {}).get("mount")
         ev = {"time": datetime.now().isoformat(timespec="milliseconds"),
               "kind": kind,
-              "mount": mount or (_RECORDER or {}).get("mount"),
+              "mount": rec_mount,
               "subject": subject,
               "intent": _clip(intent),
               "cmd": _clip(cmd),
@@ -81,6 +82,10 @@ def append_event(kind: str, subject: str | None = None,
         for k, v in extra.items():
             if v is not None:
                 ev[k] = _clip(v) if isinstance(v, str) else v
+        # phase 缺省回落 bind（与 mount 同源）——兼容面事件无需改调用点
+        # 即可按相位查询（显式 phase/record 的 ctx 优先级不受影响）
+        if "phase" not in ev and rec_mount is not None:
+            ev["phase"] = rec_mount
         path = Path(rec_ws) / "events.jsonl"
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(ev, ensure_ascii=False) + "\n")

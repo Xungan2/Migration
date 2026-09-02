@@ -446,7 +446,8 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
                 try:
                     from . import events as _ev
                     _ev.append_event("gate-veto", subject=gate_id,
-                                     summary=detail)
+                                     summary=detail,
+                                     module=gate.get("module"))
                 except Exception:
                     pass
                 try:                        # 类 1 钩子：veto 理由 → 候选
@@ -617,7 +618,8 @@ def panic(ws: Path, spec: dict, evidence: dict | None = None) -> int:
         try:
             from . import events as _ev
             _ev.append_event("gate-cluster", subject=gate["id"],
-                             summary=hint)
+                             summary=hint,
+                             module=gate.get("module"))
         except Exception:
             pass
     render_human_questions(ws, ledger)

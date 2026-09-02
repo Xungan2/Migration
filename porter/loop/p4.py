@@ -403,8 +403,15 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                             "applies_to": {"modules": [module]},
                         })
                         break
-                err_info = ("\n\n---\n\n## 上一次构建失败（修复后重做本片）\n"
-                            f"```\n{err_tail}\n```")
+                # 上下文接续（docs/log.md §6）：构建日志尾 40 行经
+                # log.query.tail_block 注入下一轮 prompt；文件缺失/为空
+                # 时保留旧空围栏形态（不无声变化）
+                from ..log import query as _lq
+                err_info = (_lq.tail_block(
+                    ws, log_path, 40,
+                    "上一次构建失败（修复后重做本片）")
+                    or "\n\n---\n\n## 上一次构建失败（修复后重做本片）"
+                    "\n```\n\n```")
             else:
                 err_info = ("\n\n---\n\n## 上一次输出的问题\n未报告完成。"
                             "修复后重做本片，输出紧凑 JSON。")
