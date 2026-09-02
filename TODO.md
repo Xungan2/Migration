@@ -22,9 +22,10 @@ tail_block 上下文接续 API 并接入 P4/ut_verify；`porter log` CLI；
 机械 codemod 统一 `_log.console_line`（byte 兼容 + 级别门控）。
 规范 = `docs/log.md`。
 
-**残余项（后续轮）**：真实 e2e 迁移跑一轮，验证新埋桩（prompt 归档/
-judge 流/界标/自动 phase）在真实工作区的累积形态；§15 重设计
-（第 3 条）时把诊断读路径接到 query API。
+**残余项（后续轮）**：真实 e2e 验证——留待下次真实迁移轮次顺带完成
+（2026-09-03 用户定案）：跑完后用 `porter log tail/timeline/runs` 核验
+新埋桩（prompt 归档 / judge 流 / 界标 / 自动 phase）的现场累积形态
+与体积预期；§15 重设计（第 3 条）时把诊断读路径接到 query API。
 
 ## 3. §15 失败自诊重设计
 
