@@ -224,7 +224,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     # runbook 目录注入（起点假设——环境会漂移，命令/特征仍须本轮实测复核）
     try:
         from ..bootstrap import kb as _kb
-        runbook_cat = _kb.catalog_block(_kb.kb_dir_for(ws), ["runbook"])
+        runbook_cat = _kb.kb_face(ws, ["runbook"])
     except Exception:
         runbook_cat = ""
     for round_no in range(1, MAX_AUTO_ROUNDS + 1):

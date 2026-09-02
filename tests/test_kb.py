@@ -226,6 +226,68 @@ class TestKbSkeleton(unittest.TestCase):
                 old_root, old_base, old_temp
             shutil.rmtree(tmp)
 
+    def test_kb_face_and_routing(self):
+        from porter.bootstrap import kb
+        print("=== 总纲 kb_face + 路由层检索 ===")
+        import unittest.mock as mock
+        old_root, old_base, old_temp = kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR
+        tmp = Path(tempfile.mkdtemp(prefix="kb_face_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        kb.TEMP_DIR = kb.KB_ROOT / "temp"
+        try:
+            ws = tmp / "ws"
+            (ws).mkdir()
+            (ws / "project.json").write_text(json.dumps({
+                "linux_driver": "/x/e1000", "target_os": "/y/asterinas",
+                "kb_dir": "corpus"}), encoding="utf-8")
+            kb_dir = kb.KB_ROOT / "corpus"
+            pdir = kb.domain_kb("pitfalls", kb_dir)
+            pdir.mkdir(parents=True)
+            (pdir / "ktest.md").write_text("z", encoding="utf-8")
+            kb.save_index(pdir, [{"file": "ktest.md",
+                                  "desc": "ktest 静默坑", "hits": 0}])
+
+            out = kb.kb_face(ws, ["pitfalls"])
+            ok("F1 总纲+目录合一（规则 0）", "规则 0" in out
+               and "ktest.md —— ktest 静默坑" in out
+               and "kb_consulted" in out)
+            ok("F2 铁律不重复（目录块不再自带）",
+               out.count("使用规则：以上为知识条目目录") == 0)
+            ok("F3 空域 → 无面", kb.kb_face(ws, ["gaps"]) == "")
+
+            # 路由层 agent_answer：注入 + kb_consulted 记账
+            from porter.loop import routing as RT
+            gate = {"id": "loop.attempts.rx-ring-p4",
+                    "question": "P4 反复失败，请裁定",
+                    "answer_form": [{"field": "note", "type": "text"}]}
+            captured = {}
+
+            def fake_run_agent(prompt, **kw):
+                captured["prompt"] = prompt
+                return 0, ('```json\n{"answer": {"note": "修了环境"},'
+                           '"confidence": "high", "rationale": "历史坑",'
+                           '"kb_consulted": ["ktest.md"]}\n```')
+
+            import os
+            os.environ.pop("PORTER_NO_AGENT", None)
+            with mock.patch("porter.common.agent.run_agent",
+                            side_effect=fake_run_agent):
+                ans = RT.agent_answer(ws, gate)
+            ok("F4 路由答案返回", ans is not None
+               and ans["answer"]["note"] == "修了环境")
+            ok("F5 prompt 含总纲+条目（已审 only）",
+               "规则 0" in captured["prompt"]
+               and "ktest.md" in captured["prompt"]
+               and "pitfalls（草稿" not in captured["prompt"]
+               and "pitfalls（已审）" in captured["prompt"])
+            idx = kb.load_index(pdir)
+            ok("F6 kb_consulted 记 hits", idx[0]["hits"] == 1)
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR = \
+                old_root, old_base, old_temp
+            shutil.rmtree(tmp)
+
     def test_select_kb(self):
         from porter.bootstrap import kb
         print("=== p0 --kb 选择（select_kb）===")

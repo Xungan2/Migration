@@ -99,7 +99,8 @@ def _has_entries(d: Path) -> bool:
                for f in d.iterdir())
 
 
-def render_catalog(parts: list[tuple[str, Path]]) -> str:
+def render_catalog(parts: list[tuple[str, Path]],
+                   with_rule: bool = True) -> str:
     """渲染知识目录注入块（parts = [(标签, 目录), ...]，调用方已筛非空）。
 
     行格式：- <文件> —— <一句话描述>（hits N>0 时附）。INDEX 缺失/损坏
@@ -126,12 +127,13 @@ def render_catalog(parts: list[tuple[str, Path]]) -> str:
                         + "\n".join(lines))
     if not sections:
         return ""
-    return ("## 知识库条目目录（按需自取）\n\n"
-            + "\n\n".join(sections) + "\n\n" + IRON_RULE)
+    head = "## 知识库条目目录（按需自取）\n\n" + "\n\n".join(sections)
+    return head + ("\n\n" + IRON_RULE if with_rule else "")
 
 
 def catalog_block(kb_dir: Path | None, domains: list[str],
-                  include_temp: bool = True) -> str:
+                  include_temp: bool = True,
+                  with_rule: bool = True) -> str:
     """调用点注入块：各域的已审分区（知识库目录）+ 草稿分区（temp）。
 
     已审在前、草稿在后（冲突以已审为准）；目录为空不注入。
@@ -147,7 +149,29 @@ def catalog_block(kb_dir: Path | None, domains: list[str],
             d = domain_temp(dom)
             if _has_entries(d):
                 parts.append((f"{dom}（草稿，未经人审，冲突以已审为准）", d))
-    return render_catalog(parts)
+    return render_catalog(parts, with_rule=with_rule)
+
+
+def load_guide() -> str:
+    """总纲 skill 文本（skills/kb-guide.md；缺失降级为空）。"""
+    try:
+        p = TOOL_ROOT / "skills" / "kb-guide.md"
+        return p.read_text(encoding="utf-8") if p.exists() else ""
+    except OSError:
+        return ""
+
+
+def kb_face(ws: Path, domains: list[str], include_temp: bool = True) -> str:
+    """KB 面注入文本 = 总纲 skill + 相应域的条目目录。
+
+    无任何可注入条目 → ""（调用方省略知识面；规则 0 不空转）。
+    """
+    cat = catalog_block(kb_dir_for(ws), domains,
+                        include_temp=include_temp, with_rule=False)
+    if not cat:
+        return ""
+    guide = load_guide()
+    return (guide + "\n\n---\n\n" + cat) if guide else cat
 
 
 def record_consulted(kb_dir: Path | None, domain: str,

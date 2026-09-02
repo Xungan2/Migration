@@ -146,9 +146,9 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
     skill = agent.load_skill("P3-module-map")
     failed: list[str] = []
     locs = surface.get("usage_locations") or {}
-    # 知识库目录注入（统一检索面：INDEX + agent 自取；替代旧内容注入）
+    # 知识库目录注入（统一检索面：总纲 + INDEX + agent 自取）
     kb_dir = kb.kb_dir_for(ws)
-    cat = kb.catalog_block(kb_dir, ["maps"])
+    cat = kb.kb_face(ws, ["maps"])
     for domain, syms in sorted(missing_by_domain.items()):
         for i in range(0, len(syms), BATCH_SIZE):
             batch = syms[i:i + BATCH_SIZE]
@@ -270,7 +270,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
     skill = agent.load_skill("P3-module-map")
     locs = surface.get("usage_locations") or {}
     kb_dir = kb.kb_dir_for(ws)
-    cat = kb.catalog_block(kb_dir, ["gaps"])
+    cat = kb.kb_face(ws, ["gaps"])
     base = _prompt_gap_classify(skill, Path(""), target_os, module, gaps,
                                 locs, cat)
     decisions: list[dict] = []

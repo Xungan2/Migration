@@ -203,11 +203,29 @@ def _record_hit(ws: Path, rule_id: str, gate_id: str) -> None:
 # ---------- agent 层（gate-answer skill·决策型） ----------
 
 def agent_answer(ws: Path, gate: dict) -> dict | None:
-    """agent 层：照表单作答。返回 {answer, confidence, rationale} 或 None。"""
+    """agent 层：知识库检索 + 照表单作答。
+
+    返回 {answer, confidence, rationale, kb_consulted?} 或 None。
+    检索面 = 已审分区（知识库目录 + base）——temp 草稿不参与自动应答
+    （信任分层定案：自动行为只依据人写的规则与人审过的知识）。
+    域选择 = 关口类型的确定性映射（suggest_class + pitfalls 兜底）。
+    """
     if os.environ.get("PORTER_NO_AGENT"):
         return None
     from ..common import agent as agent_mod
     skill = agent_mod.load_skill("gate-answer")
+    # KB 面：确定性域预选（无 agent 参与）→ 总纲 + 条目目录
+    kb_doms: list[str] = []
+    face = ""
+    try:
+        from ..bootstrap import candidates as _cand
+        from ..bootstrap import kb as _kb
+        for d in ([_cand.suggest_class(gate.get("id", ""))] + ["pitfalls"]):
+            if d not in kb_doms:
+                kb_doms.append(d)
+        face = _kb.kb_face(ws, kb_doms, include_temp=False)
+    except Exception:
+        pass
     ctx = ""
     for c in (gate.get("context_files") or [])[:4]:
         p = Path(ws) / c
@@ -220,10 +238,13 @@ def agent_answer(ws: Path, gate: dict) -> dict | None:
     prompt = (f"{skill}\n\n---\n\n## 待答关口\n- id: {gate['id']}\n"
               f"- 问题: {gate.get('question', '')[:600]}\n- 表单: "
               f"{json.dumps(gate.get('answer_form') or [], ensure_ascii=False)}"
-              f"\n## 证据材料{ctx or '（无）'}"
-              "\n\n## 任务（agent 层）\n照表单作答。输出紧凑 JSON："
+              + (f"\n---\n\n{face}\n" if face else "")
+              + f"\n## 证据材料{ctx or '（无）'}"
+              "\n\n## 任务（agent 层）\n先按知识面规则检索（规则 0），"
+              "再照表单作答。输出紧凑 JSON："
               '{"answer": {字段: 值}, "confidence": "high|low", '
-              '"rationale": "..."}。只输出一个 JSON。')
+              '"rationale": "...", "kb_consulted": [读过的条目文件名]}'
+              "（kb_consulted 未读则省略）。只输出一个 JSON。")
     try:
         rc, out = agent_mod.run_agent(
             prompt, workdir=Path(ws), timeout_sec=600,
@@ -233,6 +254,15 @@ def agent_answer(ws: Path, gate: dict) -> dict | None:
         return None
     if not (parsed and parsed.get("answer")):
         return None
+    cons = parsed.get("kb_consulted")
+    if isinstance(cons, list) and kb_doms:
+        try:
+            from ..bootstrap import kb as _kb
+            kb_dir = _kb.kb_dir_for(ws)
+            for d in kb_doms:
+                _kb.record_consulted(kb_dir, d, cons)
+        except Exception:
+            pass
     return parsed
 
 

@@ -267,7 +267,7 @@ gate_type 分派**：
 | 层 | gate_type=decision | gate_type=failure |
 |---|---|---|
 | rules | policy.md（工作区自然语言常备规则，agent 解释、命中留痕 `policy_hits.json` + event） | 相位内 triage 已消费（§15 bypass 下无） |
-| agent | gate-answer skill（照表单作答 + 置信度） | diagnose（§15 bypass 下休眠） |
+| agent | gate-answer skill + **知识库检索**（kb-guide 总纲 + 按关口类型确定性选域注入已审条目目录；答案可附 `kb_consulted` 记 hits；temp 草稿不参与自动应答） | diagnose（§15 bypass 下休眠） |
 | human | 人 | 人 |
 
 **自动应答仅作用于 kind=decision**（fact 的 agent 层已消耗于相位内、
@@ -352,7 +352,7 @@ cp5.promote（memo）。
 | 模块 | 职责 | 关键公共面 |
 |---|---|---|
 | `porter/loop/gates.py` | 账本 + 检查点 + panic + 渲染 | `GateLedger`（load/save/find/open_blocking/pending_review/add/note/mark）、`parse_gate_answers`、`validate_answer`、applier 注册表（@applier("retry/decision/approval/fact/memo")）、`process_answered_gates`、`resolve_applied`、`render_human_questions`、`panic`、`summary_line`、`load_config`、`self_diagnosis_enabled`、`checkpoint_enabled`、`first_module_review_enabled`、`checkpoint_digest`、`checkpoint_run`、`strategy_checkpoint` |
-| `porter/loop/routing.py` | 三级分流 + policy + 债计数 | `load_routing`、`validate_routing`、`route_for`、`consult_policy`、`agent_answer`、`maybe_auto_answer`、`debt_count`、`debt_limit`、`policy_path` |
+| `porter/loop/routing.py` | 三级分流 + policy + 债计数 | `load_routing`、`validate_routing`、`route_for`、`consult_policy`、`agent_answer`（含 KB 检索注入与 kb_consulted 记账）、`maybe_auto_answer`、`debt_count`、`debt_limit`、`policy_path` |
 | `skills/gate-answer.md` | rules/agent 层共用作答指令 | — |
 | `skills/L4-draft.md` / `skills/defect-fix.md` | S5 自动化的 skill | —（defect-fix 随 §15 休眠） |
 

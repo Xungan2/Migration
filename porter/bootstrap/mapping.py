@@ -280,7 +280,7 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     failed: list[str] = []
     # 知识库目录注入（修 A3 不对称：P2a 与 P3 同一检索面）
     kb_dir = kb.kb_dir_for(ws)
-    cat = kb.catalog_block(kb_dir, ["maps"])
+    cat = kb.kb_face(ws, ["maps"])
     # 域归属权威映射（脚本事实）：条目 domain 一律以此覆盖，不信 agent 抄写
     # （合并批的 agent 抄写会错标，2026-08-29 质检实证 152 例）
     sym_dom = {s: d for d, v in spine["domains"].items()
