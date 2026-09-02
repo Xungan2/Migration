@@ -277,38 +277,86 @@ python3 porter/main.py p5 --output-dir migrations/my-first-port [--module M]
 所有问题登记进工作区同一份台账（gates.json），你只负责表态，改文件
 由工具代做。完整协议/实现/演进见 docs/human-intervention.md。
 
-## 知识库（运行中生长的经验沉淀）
+## 知识库（工具用过的经验，越攒越省）
+
+<!-- 给未来 README 重写 session：本节为结构型介绍（两种知识+各自处理
+     方式+接入点清单+命令速查），协议细节全在 docs/knowledge.md，勿在
+     README 展开。新增知识域（kb.DOMAINS）或调用点时，下文"固定知识收
+     成点"与"检索接入点"两张表须与 docs/knowledge.md 3.3/3.6 同步更新。 -->
+
+设计目标一句话：**把"每次迁移从零摸索"变成"站在上次迁移的肩膀上"**
+——经验自动收集成草稿、人工把关晋升、下次 agent 自己查着用。知识放
+在工具仓库 `knowledge/` 下，分三个区：
 
 ```
 knowledge/
 ├── base/      # 工具随附的一般知识（任意目标 OS 可用；git 跟踪）
-├── temp/      # 草稿区（骨架跟踪，内容 gitignore）——固定域收成 +
-│              # 随机知识候选；agent 可写、未经人审
+├── temp/      # 草稿区（骨架跟踪，内容 gitignore）——agent 可写、未经人审
 └── <name>/    # 一次迁移（或自维语料）的知识库目录；本次迁移的
-               # 知识库 = temp ∪ <name>（p0 时显式指定）
+               # 知识库 = temp ∪ <name>（开始时显式指定）
 ```
 
-- **五个子目录 = 五种知识分类**：maps（API 映射表）/ gaps（API 缺口
-  处置，一 API 一文件）/ runbook（目标 OS 操作手册）/ splits（拆分
-  策略样例）/ pitfalls（踩坑记录）。
-- **固定知识**（每次必产）：定点收成进 temp（maps 于 P2/P3 末、gaps
-  于 P3 末、runbook 于 p0 末与 P5 回填后、splits 于 P1 末）；
-  **随机知识**（偶发发现）：四类探查钩子（gate 应答/CLI 台账/产物
-  翻转/agent 自报 lessons）→ 候选账（去重闸）。
-- **审核/分类/沉淀**：CP5 批审（材料 checkpoints/CP5_knowledge.md，
-  含 KB 健康报告）→ agent 批量归类（可选）→ `porter kb promote`：
-  ```bash
-  python3 porter/main.py kb --output-dir <ws>                 # 候选清单+材料
-  python3 porter/main.py kb --output-dir <ws> --classify      # agent 批量归类
-  python3 porter/main.py kb --output-dir <ws> --promote all   # 晋升（--to 可改类）
-  ```
-- **检索**：agent 调用点注入"总纲 skill（kb-guide，规则 0：动手前必须
-  先查 INDEX）+ 条目目录（file + 一句话 desc）"，agent 自取全文、
-  须重核实、回报 kb_consulted（记 hits）。路由层替人答关口时同样
-  检索已审知识（temp 草稿不参与自动应答）。
-- **p0 必须显式选知识库目录**：`--kb new <名> [--kb-empty]
-  [--kb-git track|ignore]`（缺省复制 base）或 `--kb use <名>`；
-  不带参数 rc 2。既有实例如 `knowledge/asterinas/`。
+每个区内分五个子目录，即五种知识分类：**maps**（API 映射表）/
+**gaps**（API 缺口处置，一个 API 一个文件）/**runbook**（目标 OS
+构建/启动/测试手册）/**splits**（拆分策略样例）/**pitfalls**
+（踩坑记录）。
+
+### 知识一：固定知识（每次迁移必然产出）
+
+流程到了固定位置就自动收成草稿进 temp（幂等，人工路径也不漏），
+人审后晋升：
+
+| 域 | 自动收成点 | 内容 |
+|---|---|---|
+| maps | P2 末 + 每轮 P3(M) 末 | API 映射整表（direct/adapt/gap/not-migrated 计数入描述） |
+| gaps | 每轮 P3(M) 末 | 每个 API 的处置决策（策略/指令/证据/人工理由）+ fill 成败 |
+| runbook | p0 末（环境探明后）+ P5 单测回填后 | 构建/启动/单测命令、成功特征、坑史 |
+| splits | P1 产出策略时 | 拆分策略样例（与已沉淀一致不重写） |
+
+### 知识二：随机知识（偶发发现）
+
+四类探查钩子自动捕获成**候选**（去重闸防灌爆），经人工审核后入库：
+
+| 钩子 | 捕获什么 |
+|---|---|
+| 关口答案 | 填表时写的诊断笔记/裁定理由（含 veto 理由） |
+| 台账命令 | 缺陷根因链（--defect-close）、泊车理由、L4 park 理由、补丁提案 |
+| 产物翻转 | 编译失败后重试成功的错误→修复留痕、探针降级判别现场 |
+| agent 自报 | agent 干活时顺手发现的坑（输出里的 lessons 字段） |
+
+处理流程：CP5 检查点生成备审材料（候选队列 + 草稿清点 + 健康报告：
+哪些知识被用过几次/从没用过）→ agent 批量归类（可选）→ 人晋升或
+拒绝。
+
+### 检索（agent 怎么用知识）
+
+agent 的任务指令里附带"知识条目目录"（每条一行：文件 + 一句话
+说明，总纲规则 0：动手前必须先查），agent 判断相关才读全文，用完
+报告读过哪些（计入热度）。**历史结论必须重新核实才能采用**；替人
+自动答问题时只查已审知识（草稿不参与自动决策）。各调用点接入：
+T3（runbook，历史基线把探测从 3 轮压到 1 轮）、P2a/P3 映射
+（maps）、P3 gap 分类与 P4 fill（gaps——"这个 API 以前 fill 失败
+过吗"直接查文件名）、P1 拆分（splits）、路由层答关（pitfalls 等）。
+
+### 操作速查
+
+```bash
+# 开始一次迁移：显式选知识库目录（必填，缺省 rc 2）
+python3 porter/main.py p0 … --kb new my-port          # 新建（复制 base）
+python3 porter/main.py p0 … --kb new my-port --kb-empty --kb-git ignore
+python3 porter/main.py p0 … --kb use asterinas        # 复用既有
+
+# 迁移结束后的审阅与晋升（CP5 材料：checkpoints/CP5_knowledge.md）
+python3 porter/main.py kb --output-dir <ws>                 # 候选清单+材料
+python3 porter/main.py kb --output-dir <ws> --classify      # agent 批量归类
+python3 porter/main.py kb --output-dir <ws> --promote all   # 晋升（--to 可改类）
+
+# 固定知识晋升（各域独立命令）
+python3 porter/main.py p2-promote --output-dir <ws> --driver e1000 --target asterinas
+python3 porter/main.py p1-promote --output-dir <ws> --driver e1000
+```
+
+完整协议/实现/演进见 docs/knowledge.md。
 
 ## 横切原则（实现与后续阶段必须遵守）
 
