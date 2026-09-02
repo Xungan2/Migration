@@ -61,7 +61,7 @@ class TestCandidates(unittest.TestCase):
 
     def ledger(self):
         return rd(self.kb.TEMP_DIR / "candidates" /
-                  "e1000@asterinas.json")
+                  "e1000@asterinas.json")["items"]
 
     def test_record(self):
         C = self.C

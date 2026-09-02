@@ -299,6 +299,48 @@ def _kb_dir_for_promote(ws_raw) -> "Path | None":
     return kb_dir
 
 
+def cmd_kb(args) -> int:
+    """知识库审核/分类/晋升 CLI（随机知识后段；CP5 材料见 checkpoints/）。"""
+    from porter.bootstrap import review as _rv
+    ws = Path(args.output_dir).resolve() if args.output_dir else None
+    if ws is None or not (ws / "project.json").exists():
+        print("[porter] kb: 需 --output-dir 指向迁移工作区")
+        return 2
+    acted = False
+    if args.classify:
+        acted = True
+        rc = _rv.classify_candidates(ws, ids=args.ids or None)
+        if rc != 0:
+            return rc
+    if args.promote:
+        acted = True
+        ids = (args.ids if args.ids
+               else [c["id"] for c in _cand_load(ws)])
+        if args.promote == "all" and not ids:
+            print("[porter] kb promote: 无候选")
+        for cid in ids:
+            rc = _rv.promote_candidate(ws, cid, to=args.to)
+            if rc != 0:
+                return rc
+    if args.reject:
+        acted = True
+        rc = _rv.reject_candidate(ws, args.reject)
+        if rc != 0:
+            return rc
+    if not acted or args.list:
+        mat = _rv.build_cp5_material(ws)
+        print(f"[porter] kb: 备审材料已刷新 {mat}")
+        for c in _cand_load(ws):
+            print(f"  - {c['id']}（建议类 {c.get('suggested_class')}）："
+                  f"{c['draft'][:80]}")
+    return 0
+
+
+def _cand_load(ws: Path) -> list[dict]:
+    from porter.bootstrap import candidates as _c
+    return _c.load_candidates(ws)
+
+
 def cmd_p1_promote(args) -> int:
     """样例草稿晋升（沉淀）：temp/splits → 本次知识库目录。"""
     kb_dir = _kb_dir_for_promote(args.output_dir)
@@ -514,15 +556,24 @@ def cmd_p7(args) -> int:
         rationale=args.rationale or "", patch_status=args.patch_status,
         status_to=args.to or "", doc=args.doc, note=args.note or "")
     if rc == 0:
-        # CP5 沉淀审：非阻塞（知识晋升是人工决定型命令，这里只提醒）
+        # CP5 沉淀审（知识面扩容：候选队列 + temp 草稿 + KB 健康报告）
+        try:
+            from porter.bootstrap import review as _rv
+            kb_mat = _rv.build_cp5_material(ws)
+        except Exception as _e:
+            kb_mat = None
+            print(f"[porter] CP5: ⚠️ 知识备审材料生成失败：{_e}")
         _gates.checkpoint_run(
             ws, "CP5", register=[{
                 "id": "cp5.promote", "kind": "memo", "gate_type": "decision",
                 "phase": "P7", "checkpoint": "CP5", "blocking": False,
-                "question": ("知识晋升提醒：knowledge/temp/maps 映射草稿、"
-                             "failures.md 候选区、pitfalls 手写——"
-                             "用 p2-promote / 人工晋升沉淀跨驱动知识。"),
-                "context_files": ["knowledge/temp/maps/INDEX.json"],
+                "question": ("知识晋升提醒：随机知识候选、temp 各域草稿、"
+                             "KB 健康报告——详见知识备审材料；"
+                             "用 porter kb promote / p1/p2-promote 沉淀。"),
+                "context_files": (["checkpoints/CP5_knowledge.md",
+                                   "knowledge/temp/maps/INDEX.json"]
+                                  if kb_mat else
+                                  ["knowledge/temp/maps/INDEX.json"]),
                 "answer_form": [{"field": "note", "type": "text",
                                  "required": False}]}],
             blocking=False)
@@ -921,6 +972,22 @@ def main(argv=None) -> int:
                        help="L4 判据草案生成（deferred/__P6__+P3 e2e → agent 起草；"
                             "人审入口 = --finalize-l4 / CP3）")
     p6cmd.set_defaults(func=cmd_p6)
+
+    kbcmd = sub.add_parser("kb", help="知识库审核/分类/晋升（随机知识后段；CP5 备审材料见 checkpoints/CP5_knowledge.md）")
+    kbcmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    kbcmd.add_argument("--list", action="store_true",
+                       help="列出候选 + 刷新 CP5 备审材料（默认动作）")
+    kbcmd.add_argument("--classify", action="store_true",
+                       help="agent 批量归类候选（审核后、晋升前；PORTER_NO_AGENT=1 跳过）")
+    kbcmd.add_argument("--promote", choices=["all"], default=None,
+                       help="晋升候选入知识库目录（配合 --id 或缺省全部）")
+    kbcmd.add_argument("--reject", default=None, metavar="ID",
+                       help="拒绝候选（人判无价值，出账）")
+    kbcmd.add_argument("--id", action="append", dest="ids", default=None,
+                       metavar="ID", help="指定候选 id（可多次；classify/promote 用）")
+    kbcmd.add_argument("--to", default=None, metavar="DOMAIN",
+                       help="晋升目标子目录（缺省取建议类；覆盖时条目内留改判记录）")
+    kbcmd.set_defaults(func=cmd_kb)
 
     gatecmd = sub.add_parser("gate", help="关口 CLI（list/show/answer/review——人工介入便利层）")
     gatecmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")

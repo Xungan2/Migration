@@ -83,12 +83,31 @@ def _ledger_path(ws: Path) -> Path | None:
     return kb.TEMP_DIR / "candidates" / f"{ns}.json"
 
 
-def _load_ledger(p: Path) -> list[dict]:
+def _load_doc(p: Path) -> dict:
+    """账本文档 {seq, items}。兼容旧裸数组格式（seq 取最大 id）。"""
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
     except (OSError, json.JSONDecodeError):
-        return []
+        data = None
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        return data
+    items = data if isinstance(data, list) else []
+    return {"seq": _max_id(items), "items": items}
+
+
+def _max_id(items: list[dict]) -> int:
+    ns = []
+    for c in items:
+        m = re.match(r"^cand-(\d+)$", str(c.get("id", "")))
+        if m:
+            ns.append(int(m.group(1)))
+    return max(ns) if ns else 0
+
+
+def _save_doc(p: Path, doc: dict) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+                 encoding="utf-8")
 
 
 def record_candidate(ws: Path, hook: str, ref: str, draft: str,
@@ -110,7 +129,8 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
     if p is None:
         return None
     sig = _signature(draft)
-    ledger = _load_ledger(p)
+    doc = _load_doc(p)
+    ledger = doc["items"]
     if cfg.get("dedup", True) and any(
             c.get("signature") == sig for c in ledger):
         return None
@@ -123,7 +143,8 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
         scope = {}
     if scope_extra:
         scope.update(scope_extra)
-    cid = f"cand-{len(ledger) + 1:04d}"
+    doc["seq"] = int(doc.get("seq", 0)) + 1
+    cid = f"cand-{doc['seq']:04d}"
     ledger.append({
         "id": cid,
         "source": {"hook": hook, "ref": str(ref), "time": _now()},
@@ -136,9 +157,7 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
         "history": [{"time": _now(),
                      "event": f"created（建议类 {suggested}）"}],
     })
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n",
-                 encoding="utf-8")
+    _save_doc(p, doc)
     print(f"[porter] kb 探查: 新候选 {cid}（{hook}，建议类 {suggested}）")
     try:
         from ..loop import events as _ev
@@ -152,20 +171,30 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
 def load_candidates(ws: Path) -> list[dict]:
     """本工作区命名空间的候选账（审核面/分类用）。"""
     p = _ledger_path(ws)
-    return _load_ledger(p) if p else []
+    return _load_doc(p)["items"] if p else []
 
 
-def remove_candidate(ws: Path, cid: str) -> bool:
-    """晋升/拒绝后出账。"""
+def _save_candidates(ws: Path, items: list[dict]) -> bool:
     p = _ledger_path(ws)
     if p is None:
         return False
-    ledger = _load_ledger(p)
-    rest = [c for c in ledger if c.get("id") != cid]
-    if len(rest) == len(ledger):
+    doc = _load_doc(p)
+    doc["items"] = items
+    _save_doc(p, doc)
+    return True
+
+
+def remove_candidate(ws: Path, cid: str) -> bool:
+    """晋升/拒绝后出账（seq 保留——id 单调不复用）。"""
+    p = _ledger_path(ws)
+    if p is None:
         return False
-    p.write_text(json.dumps(rest, ensure_ascii=False, indent=2) + "\n",
-                 encoding="utf-8")
+    doc = _load_doc(p)
+    rest = [c for c in doc["items"] if c.get("id") != cid]
+    if len(rest) == len(doc["items"]):
+        return False
+    doc["items"] = rest
+    _save_doc(p, doc)
     return True
 
 
