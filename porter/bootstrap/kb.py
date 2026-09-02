@@ -29,6 +29,7 @@ skills/kb-guide.md 补一节 + 调用点对照表补一行——单点改动：
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
@@ -37,6 +38,10 @@ from ..common.agent import TOOL_ROOT
 KB_ROOT = TOOL_ROOT / "knowledge"
 BASE_DIR = KB_ROOT / "base"
 TEMP_DIR = KB_ROOT / "temp"
+
+# 知识库目录命名（目录名；禁路径分隔与保留名）
+_KB_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_KB_RESERVED = {"base", "temp"}
 
 # 域注册表（分类学的唯一事实源）
 DOMAINS: dict[str, dict] = {
@@ -89,6 +94,64 @@ def kb_dir_for(ws: Path) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     return kb_dir_of(proj)
+
+
+def _gitignore_kb(name: str) -> bool:
+    """把 knowledge/<name>/ 追加进工具仓 .gitignore（已存在则跳过）。"""
+    gi = TOOL_ROOT / ".gitignore"
+    try:
+        line = f"knowledge/{name}/"
+        cur = gi.read_text(encoding="utf-8") if gi.exists() else ""
+        if line in cur.splitlines():
+            return True
+        gi.write_text(cur.rstrip("\n") + ("\n" if cur else "") + line + "\n",
+                      encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def select_kb(mode: str, name: str, empty: bool = False,
+              git_ignore: bool = False) -> Path | None:
+    """p0 --kb 参数处理。返回知识库目录；非法输入打印原因返回 None。
+
+    mode=new：新建 knowledge/<name>/（已存在 → 拒绝，提示改用 use）；
+      empty=False 复制 base 内容（缺省），True 建空目录。
+      git_ignore=True 时追加 .gitignore（缺省 track，不动 git）。
+    mode=use：指定既有 knowledge/<name>/。
+    """
+    if mode not in ("new", "use"):
+        print(f"[porter] --kb: 非法模式 {mode!r}（须 new|use）")
+        return None
+    if not _KB_NAME_RE.match(name or "") or name in _KB_RESERVED:
+        print(f"[porter] --kb: 非法目录名 {name!r}（单段名，不得为 "
+              "base/temp）")
+        return None
+    d = KB_ROOT / name
+    if mode == "new":
+        if d.exists():
+            print(f"[porter] --kb: {d} 已存在——要复用它请用 "
+                  f"`--kb use {name}`")
+            return None
+        if empty:
+            d.mkdir(parents=True)
+            print(f"[porter] --kb: 已新建空知识库目录 {d}")
+        else:
+            if not BASE_DIR.is_dir():
+                print(f"[porter] --kb: base 分区缺失（{BASE_DIR}）——"
+                      "无法复制，请检查工具仓")
+                return None
+            shutil.copytree(BASE_DIR, d)
+            print(f"[porter] --kb: 已新建知识库目录 {d}（复制 base）")
+        if git_ignore and not _gitignore_kb(name):
+            print(f"[porter] --kb: ⚠️ .gitignore 追加失败（{d} 未忽略，"
+                  "请手工处理）")
+        return d
+    if not d.is_dir():
+        print(f"[porter] --kb: 知识库目录不存在 {d}")
+        return None
+    print(f"[porter] --kb: 使用既有知识库目录 {d}")
+    return d
 
 
 # ---------- 薄 INDEX 助手 ----------

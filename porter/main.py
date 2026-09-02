@@ -82,9 +82,72 @@ from porter.env import gate as t5         # noqa: E402
 from porter.loop import run as loop_mod   # noqa: E402
 
 
+def _print_kb_guidance() -> None:
+    from porter.bootstrap import kb as _kb
+    existing = sorted(
+        d.name for d in _kb.KB_ROOT.iterdir()
+        if d.is_dir() and d.name not in ("base", "temp")
+    ) if _kb.KB_ROOT.is_dir() else []
+    print("[porter] p0: 未指定知识库目录——须显式选择（知识子系统）：")
+    print("  新建（复制 base 工具随附知识）：--kb new <名>")
+    print("  新建（空目录）：                --kb new <名> --kb-empty")
+    print("  指定既有：                      --kb use <名>")
+    if existing:
+        print(f"  既有目录：{', '.join(existing)}")
+    print("  git 策略：--kb-git track|ignore（新建目录内容是否进 git；"
+          "缺省 track）")
+
+
+def _p0_kb_decision(args, proj_path: Path) -> tuple[int | None, str | None]:
+    """p0 的知识库目录决策。返回 (rc, kb_name)；rc 非 None 时直接返回。
+
+    显式必填（定案）：新工作区或未记录 kb_dir 的旧工作区，缺 --kb 即
+    rc 2 并打印选择指引；已记录的工作区复用记录值。
+    """
+    from porter.bootstrap import kb as _kb
+    kb_arg = getattr(args, "kb", None)
+    if kb_arg:
+        mode, name = kb_arg[0], kb_arg[1]
+        d = _kb.select_kb(mode, name,
+                          empty=getattr(args, "kb_empty", False),
+                          git_ignore=(getattr(args, "kb_git", "track")
+                                      == "ignore"))
+        if d is None:
+            return 2, None
+        return None, name
+    if proj_path.exists():
+        try:
+            proj = json.loads(proj_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            proj = {}
+        if proj.get("kb_dir"):
+            print(f"[porter] p0: 复用已记录知识库目录 "
+                  f"kb_dir={proj['kb_dir']}")
+            return None, None
+    _print_kb_guidance()
+    return 2, None
+
+
+def _record_kb(proj_path: Path, kb_name: str) -> None:
+    """把 kb_dir 记入 project.json（幂等）。"""
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    if proj.get("kb_dir") == kb_name:
+        return
+    proj["kb_dir"] = kb_name
+    proj_path.write_text(
+        json.dumps(proj, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    print(f"[porter] p0: 知识库目录已记录 kb_dir={kb_name}")
+
+
 def cmd_p0(args) -> int:
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
+
+    # 知识库目录选择（显式必填；rc 2 逼选择——知识子系统定案）
+    kb_rc, kb_name = _p0_kb_decision(args, proj_path)
+    if kb_rc is not None:
+        return kb_rc
 
     # T1 输入解析
     if not proj_path.exists():
@@ -93,8 +156,12 @@ def cmd_p0(args) -> int:
             linux_driver=Path(args.linux_driver),
             target_os=Path(args.target_os),
             materials=[Path(m) for m in (args.materials or [])])
+        if kb_name is not None:
+            _record_kb(proj_path, kb_name)
     else:
         print(f"[porter] T1: 复用已有工作区 {ws}")
+        if kb_name is not None:
+            _record_kb(proj_path, kb_name)
 
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     linux_driver = Path(proj["linux_driver"])
@@ -729,6 +796,15 @@ def main(argv=None) -> int:
                     help="迁移工作区根目录（各阶段在内部建 P0/、P1/ 等子目录）")
     p0.add_argument("--category", default=None,
                     help="人工指定类别（逗号分隔多标签；缺省由 agent 识别）")
+    p0.add_argument("--kb", nargs=2, default=None, metavar=("MODE", "NAME"),
+                    help="知识库目录（必填）：new <名> 新建（缺省复制 base，"
+                         "--kb-empty 建空目录）或 use <名> 指定既有；"
+                         "已记录 kb_dir 的工作区复用记录值")
+    p0.add_argument("--kb-empty", action="store_true",
+                    help="--kb new 时创建空目录（缺省复制 base 内容）")
+    p0.add_argument("--kb-git", choices=["track", "ignore"], default="track",
+                    help="新建知识库目录的 git 策略（track=跟踪；"
+                         "ignore=追加 .gitignore；缺省 track）")
     p0.set_defaults(func=cmd_p0)
 
     p1all = sub.add_parser("p1", help="P1 全流程：strategy → divide → resolve（直通，末尾汇总报告）")

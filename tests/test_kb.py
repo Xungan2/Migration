@@ -154,6 +154,127 @@ class TestKbSkeleton(unittest.TestCase):
             kb.TEMP_DIR = old_temp
             shutil.rmtree(tmp)
 
+    def test_select_kb(self):
+        from porter.bootstrap import kb
+        print("=== p0 --kb 选择（select_kb）===")
+        old_root, old_base, old_tool = kb.KB_ROOT, kb.BASE_DIR, kb.TOOL_ROOT
+        tmp = Path(tempfile.mkdtemp(prefix="kb_sel_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        kb.TOOL_ROOT = tmp
+        try:
+            (kb.BASE_DIR / "splits" / "strategies").mkdir(parents=True)
+            (kb.BASE_DIR / "splits" / "strategies" / "INDEX.json").write_text(
+                "[]", encoding="utf-8")
+
+            ok("S1 new 复制 base", kb.select_kb("new", "corpus") ==
+               kb.KB_ROOT / "corpus"
+               and (kb.KB_ROOT / "corpus" / "splits" / "strategies" /
+                    "INDEX.json").exists())
+            ok("S2 new 已存在 → 拒绝",
+               kb.select_kb("new", "corpus") is None)
+            ok("S3 new 空目录", kb.select_kb("new", "empty1",
+                                             empty=True) is not None
+               and not any((kb.KB_ROOT / "empty1").iterdir()))
+            for bad in ("base", "temp", "a/b", "", "..x", "with space"):
+                ok(f"S4 非法名 {bad!r} → 拒绝",
+                   kb.select_kb("new", bad) is None)
+            ok("S5 非法模式", kb.select_kb("clone", "foo") is None)
+            ok("S6 use 不存在 → 拒绝", kb.select_kb("use", "ghost")
+               is None)
+            ok("S7 use 既有", kb.select_kb("use", "corpus") ==
+               kb.KB_ROOT / "corpus")
+
+            # git ignore 追加
+            (tmp / ".gitignore").write_text("migrations/\n",
+                                            encoding="utf-8")
+            kb.select_kb("new", "ignored", empty=True, git_ignore=True)
+            gi = (tmp / ".gitignore").read_text(encoding="utf-8")
+            ok("S8 gitignore 追加", "knowledge/ignored/" in gi.splitlines())
+            kb.select_kb("new", "ignored2", empty=True, git_ignore=True)
+            gi2 = (tmp / ".gitignore").read_text(encoding="utf-8")
+            ok("S9 重复追加不重复",
+               gi2.count("knowledge/ignored/") == 1)
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR, kb.TOOL_ROOT = \
+                old_root, old_base, old_tool
+            shutil.rmtree(tmp)
+
+    def test_p0_kb_decision(self):
+        import argparse
+        from porter.bootstrap import kb
+        from porter import main as M
+        print("=== p0 知识库决策（rc2 逼显式 + 记录）===")
+        old_root, old_base = kb.KB_ROOT, kb.BASE_DIR
+        tmp = Path(tempfile.mkdtemp(prefix="kb_p0_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        try:
+            (kb.BASE_DIR / "splits").mkdir(parents=True)
+            ws = tmp / "ws"
+            args = argparse.Namespace(
+                linux_driver="/x", target_os="/y", materials=None,
+                output_dir=str(ws), category=None,
+                kb=None, kb_empty=False, kb_git="track")
+
+            # rc 2：新工作区无 --kb
+            rc, name = M._p0_kb_decision(args, ws / "project.json")
+            ok("D1 无 --kb 新工作区 → rc 2", rc == 2 and name is None)
+
+            # rc 2：旧工作区未记录 kb_dir
+            ws.mkdir()
+            (ws / "project.json").write_text(
+                json.dumps({"linux_driver": "/x"}), encoding="utf-8")
+            rc, name = M._p0_kb_decision(args, ws / "project.json")
+            ok("D2 无 --kb 旧工作区无记录 → rc 2", rc == 2)
+
+            # 复用：已记录 kb_dir
+            (ws / "project.json").write_text(
+                json.dumps({"linux_driver": "/x", "kb_dir": "corpus"}),
+                encoding="utf-8")
+            rc, name = M._p0_kb_decision(args, ws / "project.json")
+            ok("D3 已记录 → 复用", rc is None and name is None)
+
+            # --kb use 既有目录 → 决策成功
+            (kb.KB_ROOT / "corpus").mkdir(parents=True)
+            args.kb = ["use", "corpus"]
+            rc, name = M._p0_kb_decision(args, ws / "project.json")
+            ok("D4 --kb use 既有 → 通过", rc is None and name == "corpus")
+
+            # --kb new 非法 → rc 2
+            args.kb = ["new", "base"]
+            rc, name = M._p0_kb_decision(args, ws / "project.json")
+            ok("D5 --kb new 保留名 → rc 2", rc == 2)
+
+            # _record_kb 落盘
+            args.kb = ["use", "corpus"]
+            _rc, name = M._p0_kb_decision(args, ws / "project.json")
+            M._record_kb(ws / "project.json", name)
+            proj = json.loads((ws / "project.json").read_text(
+                encoding="utf-8"))
+            ok("D6 kb_dir 记入 project.json", proj["kb_dir"] == "corpus")
+            M._record_kb(ws / "project.json", name)  # 幂等
+            ok("D7 记录幂等",
+               json.loads((ws / "project.json").read_text(
+                   encoding="utf-8"))["kb_dir"] == "corpus")
+
+            # cmd_p0 端到端 rc 2（新工作区、无 --kb——T1 之前即返回）
+            ws2 = tmp / "ws2"
+            args2 = argparse.Namespace(
+                linux_driver="/x", target_os="/y", materials=None,
+                output_dir=str(ws2), category=None,
+                kb=None, kb_empty=False, kb_git="track")
+            import io, contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = M.cmd_p0(args2)
+            ok("D8 cmd_p0 无 --kb → rc 2（指引打印）", rc == 2
+               and "未指定知识库目录" in buf.getvalue()
+               and not ws2.exists())
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR = old_root, old_base
+            shutil.rmtree(tmp)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
