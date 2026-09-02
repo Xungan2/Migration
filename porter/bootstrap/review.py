@@ -24,6 +24,7 @@ from pathlib import Path
 from ..common import agent
 from . import candidates as cand
 from . import kb
+from .. import log as _log
 
 _CLASSIFY_TIMEOUT_SEC = 600
 
@@ -168,14 +169,14 @@ def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
     PORTER_NO_AGENT=1 → 打印提示返回 0（人工经 promote --to 定案）。
     """
     if agent_lib_no_agent():
-        print("[porter] kb classify: PORTER_NO_AGENT=1——跳过 agent 归类，"
+        _log.console_line("[porter] kb classify: PORTER_NO_AGENT=1——跳过 agent 归类，"
               "人工用 `kb promote --to <域>` 定案即可")
         return 0
     led = cand.load_candidates(ws)
     if ids:
         led = [c for c in led if c.get("id") in set(ids)]
     if not led:
-        print("[porter] kb classify: 无待分类候选")
+        _log.console_line("[porter] kb classify: 无待分类候选")
         return 0
     kb_desc = "\n".join(f"- {d['subdir']}：{d['desc']}"
                         for d in kb.DOMAINS.values())
@@ -201,7 +202,7 @@ def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
     items_out = (parsed or {}).get("items") if isinstance(parsed, dict) \
         else None
     if not isinstance(items_out, list):
-        print("[porter] kb classify: agent 输出不可解析（见 "
+        _log.console_line("[porter] kb classify: agent 输出不可解析（见 "
               f"{log}.log）——人工用 `kb promote --to` 定案")
         return 1
     ledger = cand.load_candidates(ws)      # 重读全账（按 id 回写）
@@ -224,7 +225,7 @@ def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
             changed += 1
     if changed:
         cand._save_candidates(ws, ledger)    # noqa: SLF001（同包内部回写）
-    print(f"[porter] kb classify: 归类完成（改判 {changed}/{len(led)} 条）"
+    _log.console_line(f"[porter] kb classify: 归类完成（改判 {changed}/{len(led)} 条）"
           "——定案仍在 promote（--to 可覆盖）")
     return 0
 
@@ -262,16 +263,16 @@ def promote_candidate(ws: Path, cid: str, to: str | None = None) -> int:
     ws = Path(ws)
     kb_dir = kb.kb_dir_for(ws)
     if kb_dir is None:
-        print("[porter] kb promote: 工作区未记录知识库目录（kb_dir）")
+        _log.console_line("[porter] kb promote: 工作区未记录知识库目录（kb_dir）")
         return 1
     led = cand.load_candidates(ws)
     c = next((x for x in led if x.get("id") == cid), None)
     if c is None:
-        print(f"[porter] kb promote: 候选不存在 {cid}")
+        _log.console_line(f"[porter] kb promote: 候选不存在 {cid}")
         return 1
     domain = to or c.get("suggested_class") or "pitfalls"
     if domain not in kb.DOMAINS:
-        print(f"[porter] kb promote: 未知子目录 {domain!r}"
+        _log.console_line(f"[porter] kb promote: 未知子目录 {domain!r}"
               f"（须 {sorted(kb.DOMAINS)}）")
         return 1
     ns = _ns(ws)
@@ -295,13 +296,13 @@ def promote_candidate(ws: Path, cid: str, to: str | None = None) -> int:
     didx = kb.upsert_entry(didx, rel, desc)
     kb.save_index(ddir, didx)
     cand.remove_candidate(ws, cid)
-    print(f"[porter] kb promote: {cid} 已晋升 → {tgt}")
+    _log.console_line(f"[porter] kb promote: {cid} 已晋升 → {tgt}")
     return 0
 
 
 def reject_candidate(ws: Path, cid: str) -> int:
     if not cand.remove_candidate(Path(ws), cid):
-        print(f"[porter] kb reject: 候选不存在 {cid}")
+        _log.console_line(f"[porter] kb reject: 候选不存在 {cid}")
         return 1
-    print(f"[porter] kb reject: {cid} 已出账（人判无价值）")
+    _log.console_line(f"[porter] kb reject: {cid} 已出账（人判无价值）")
     return 0

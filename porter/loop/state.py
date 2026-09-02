@@ -26,6 +26,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from .. import log as _log
 
 PHASES = ("pending", "p3", "p4", "p5", "done")
 ATTEMPT_STEPS = ("p3", "p4", "p5")
@@ -60,16 +61,16 @@ class LoopState:
                         att.setdefault(step, 0)
             if self.order and set(self.order) == set(self.modules):
                 return True
-            print("[porter] loop: loop_state.json 结构异常——尝试自 deps.json 重建")
+            _log.console_line("[porter] loop: loop_state.json 结构异常——尝试自 deps.json 重建")
         if not deps_path.exists():
-            print(f"[porter] loop: 缺少 {deps_path}（先跑 p0/p1）")
+            _log.console_line(f"[porter] loop: 缺少 {deps_path}（先跑 p0/p1）")
             return False
         deps = json.loads(deps_path.read_text(encoding="utf-8"))
         self.order = list(deps.get("order") or [])
         self.modules = {m: {"phase": "pending", "attempts": _zero_attempts()}
                         for m in self.order}
         self.save()
-        print(f"[porter] loop: 初始化 loop_state（{len(self.order)} 模块，"
+        _log.console_line(f"[porter] loop: 初始化 loop_state（{len(self.order)} 模块，"
               f"拓扑序）")
         return True
 

@@ -18,6 +18,8 @@ import subprocess
 import time
 from pathlib import Path
 
+from ..log import core as _log
+
 
 def _base_env(target_os: Path, runner: dict, extra: dict | None = None) -> dict:
     return {**os.environ, **(runner.get("env") or {}),
@@ -26,18 +28,11 @@ def _base_env(target_os: Path, runner: dict, extra: dict | None = None) -> dict:
 
 def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
          log_path: Path) -> tuple[int, str]:
-    try:                                    # log 子系统（观测面永不打断）
-        from ..log import core as _log
-    except Exception:
-        _log = None
-    if _log is not None:
-        _log.record(
-            "cmd_start", cmd=cmd, summary=str(log_path),
-            console_msg=f"[porter] probe: "
-                        f"{cmd[:110]}{'…' if len(cmd) > 110 else ''}",
-            ref={"log": str(log_path)})
-    else:
-        print(f"[porter] probe: {cmd[:110]}{'…' if len(cmd) > 110 else ''}")
+    _log.record(
+        "cmd_start", cmd=cmd, summary=str(log_path),
+        console_msg=f"[porter] probe: "
+                    f"{cmd[:110]}{'…' if len(cmd) > 110 else ''}",
+        ref={"log": str(log_path)})
     t0 = time.time()
     try:
         proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), env=env,
@@ -51,15 +46,12 @@ def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(out, encoding="utf-8", errors="replace")
     elapsed = time.time() - t0
-    if _log is not None:
-        _log.record(
-            "cmd_end", cmd=cmd, rc=rc,
-            summary=f"{elapsed:.0f}s log={log_path}",
-            console_msg=f"[porter] probe: rc={rc} {elapsed:.0f}s "
-                        f"log={log_path.name}",
-            extra_out_tail=(out or "")[-200:].strip())
-    else:
-        print(f"[porter] probe: rc={rc} {elapsed:.0f}s log={log_path.name}")
+    _log.record(
+        "cmd_end", cmd=cmd, rc=rc,
+        summary=f"{elapsed:.0f}s log={log_path}",
+        console_msg=f"[porter] probe: rc={rc} {elapsed:.0f}s "
+                    f"log={log_path.name}",
+        extra_out_tail=(out or "")[-200:].strip())
     return rc, out
 
 
@@ -90,7 +82,6 @@ def probe_build(ws: Path, target_os: Path, runner: dict,
     if ok and b.get("success_pattern"):
         ok = b["success_pattern"] in _strip_ansi(out)
     try:                                    # judge 证据流（docs/log.md）
-        from ..log import core as _log
         _log.judge(label, ok, detail=f"rc={rc}" + (
             "" if not b.get("success_pattern")
             else f" pattern={'hit' if ok else 'MISS'}"),
@@ -142,7 +133,6 @@ def probe_boot(ws: Path, target_os: Path, runner: dict,
     log_state = mode if bo_log else f"{mode}:missing_or_empty"
     ok = (rc == 0) and success and not panic
     try:                                    # judge 证据流（boot 双信号）
-        from ..log import core as _log
         _log.judge(label, ok,
                    detail=f"rc={rc} success_pattern="
                           f"{'hit' if success else 'MISS'} "
@@ -167,7 +157,7 @@ def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
     if picked is None and examples:
         c0 = next(iter(examples))
         picked = (c0, examples[c0])
-        print(f"[porter] probe: ⚠️ 类别 {categories} 无设备实例，"
+        _log.console_line(f"[porter] probe: ⚠️ 类别 {categories} 无设备实例，"
               f"以 {c0} 实例做机制验证")
     if picked is None:
         return {"item": label, "ok": False,
@@ -203,7 +193,6 @@ def probe_development(ws: Path, target_os: Path, runner: dict,
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
         try:
-            from ..log import core as _log
             _log.record("t3_verdict", subject=r["item"], rc=0 if r["ok"]
                         else 1, level="info" if r["ok"] else "error",
                         console_msg=f"[porter] T3: {r['item']:<18} "
@@ -211,6 +200,5 @@ def probe_development(ws: Path, target_os: Path, runner: dict,
                                     f"{r['detail']}",
                         ref={"report": "P0/reports/T3_development.json"})
         except Exception:
-            print(f"[porter] T3: {r['item']:<18} "
-                  f"{'PASS' if r['ok'] else 'FAIL'}  {r['detail']}")
+            pass
     return report

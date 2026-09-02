@@ -34,6 +34,7 @@ import shutil
 from pathlib import Path
 
 from ..common.agent import TOOL_ROOT
+from .. import log as _log
 
 KB_ROOT = TOOL_ROOT / "knowledge"
 BASE_DIR = KB_ROOT / "base"
@@ -235,36 +236,36 @@ def select_kb(mode: str, name: str, empty: bool = False,
     mode=use：指定既有 knowledge/<name>/。
     """
     if mode not in ("new", "use"):
-        print(f"[porter] --kb: 非法模式 {mode!r}（须 new|use）")
+        _log.console_line(f"[porter] --kb: 非法模式 {mode!r}（须 new|use）")
         return None
     if not _KB_NAME_RE.match(name or "") or name in _KB_RESERVED:
-        print(f"[porter] --kb: 非法目录名 {name!r}（单段名，不得为 "
+        _log.console_line(f"[porter] --kb: 非法目录名 {name!r}（单段名，不得为 "
               "base/temp）")
         return None
     d = KB_ROOT / name
     if mode == "new":
         if d.exists():
-            print(f"[porter] --kb: {d} 已存在——要复用它请用 "
+            _log.console_line(f"[porter] --kb: {d} 已存在——要复用它请用 "
                   f"`--kb use {name}`")
             return None
         if empty:
             d.mkdir(parents=True)
-            print(f"[porter] --kb: 已新建空知识库目录 {d}")
+            _log.console_line(f"[porter] --kb: 已新建空知识库目录 {d}")
         else:
             if not BASE_DIR.is_dir():
-                print(f"[porter] --kb: base 分区缺失（{BASE_DIR}）——"
+                _log.console_line(f"[porter] --kb: base 分区缺失（{BASE_DIR}）——"
                       "无法复制，请检查工具仓")
                 return None
             shutil.copytree(BASE_DIR, d)
-            print(f"[porter] --kb: 已新建知识库目录 {d}（复制 base）")
+            _log.console_line(f"[porter] --kb: 已新建知识库目录 {d}（复制 base）")
         if git_ignore and not _gitignore_kb(name):
-            print(f"[porter] --kb: ⚠️ .gitignore 追加失败（{d} 未忽略，"
+            _log.console_line(f"[porter] --kb: ⚠️ .gitignore 追加失败（{d} 未忽略，"
                   "请手工处理）")
         return d
     if not d.is_dir():
-        print(f"[porter] --kb: 知识库目录不存在 {d}")
+        _log.console_line(f"[porter] --kb: 知识库目录不存在 {d}")
         return None
-    print(f"[porter] --kb: 使用既有知识库目录 {d}")
+    _log.console_line(f"[porter] --kb: 使用既有知识库目录 {d}")
     return d
 
 

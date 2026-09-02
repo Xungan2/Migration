@@ -30,6 +30,7 @@ from pathlib import Path
 from ..common import agent
 from ..env import probe as probe_mod
 from . import gates, probes as probe_lib
+from .. import log as _log
 
 AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
@@ -43,7 +44,7 @@ def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
                  ws / "P3" / module / "reports" / "criteria.json",
                  ws / "P3" / module / "reports" / "gap_decisions.json"):
         if not need.exists():
-            print(f"[porter] P4: 缺少 {need}（先跑 p3 {module}）")
+            _log.console_line(f"[porter] P4: 缺少 {need}（先跑 p3 {module}）")
             return None
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
@@ -88,7 +89,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
         api = d["linux_api"]
         if api in done and done[api].get("status") in ("filled", "fell-back"):
             continue
-        print(f"[porter] P4: fill {api} …")
+        _log.console_line(f"[porter] P4: fill {api} …")
         lines = (f"- {api}：缺什么/绕过候选={d.get('instruction', '')[:200]}；"
                  f"P3 建议 evidence={d.get('evidence', '')}")
         # gaps 域历史记录（文件名存在性；fill 曾失败者 agent 必读）
@@ -143,7 +144,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                     f"P4_{module}_fill_boot_{api}")
                 if log_state == "missing":
                     # 抢占（H9 重构）：判定输入不存在，infra 关口已登记
-                    print(f"[porter] P4: fill {api} 验证中止（boot 日志"
+                    _log.console_line(f"[porter] P4: fill {api} 验证中止（boot 日志"
                           "不可得）——exit 3")
                     return 3
             names = [p["name"] for p in probe_lib.load_registry(reg_path)
@@ -168,7 +169,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                                   ).lstrip("｜")
                     e["confidence"] = "high"
             else:
-                print(f"[porter] P4: fill {api} 三重验证 FAIL——回退 bypass")
+                _log.console_line(f"[porter] P4: fill {api} 三重验证 FAIL——回退 bypass")
         done[api] = {"status": status,
                      "patch": patch,
                      "time": datetime.now().isoformat(timespec="seconds")}
@@ -290,7 +291,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
         existing = sorted(p.name for p in (crate / "src").glob("*.rs")) \
             if (crate / "src").exists() else []
         before_lines = _src_line_counts(crate)
-        print(f"[porter] P4: 迁移切片 {f.name}:{start}-{end} …")
+        _log.console_line(f"[porter] P4: 迁移切片 {f.name}:{start}-{end} …")
         prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
                   f"- 驱动 crate：`{crate}`（src/ 现有 {existing}）\n"
                   f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
@@ -325,7 +326,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
             if parsed and parsed.get("status") == "blocked":
                 blocked = True
                 hard_stop = True
-                print(f"[porter] P4: 切片 {f.name}:{start}-{end} 被agent报"
+                _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} 被agent报"
                       f" blocked：{str(parsed.get('notes', ''))[:200]}"
                       "——立即停车（映射问题走人工，不烧 attempts）")
                 gates.panic(ws, {
@@ -356,7 +357,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                     shrunk = _shrunk_files(before_lines,
                                            _src_line_counts(crate))
                     if shrunk:
-                        print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                        _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
                               f"覆盖了既有内容（{'; '.join(shrunk)}）——判 FAIL")
                         err_info = ("\n\n---\n\n## 上一次的严重问题（本片 "
                                     "重做）\n你覆盖/删除了既有文件内容："
@@ -383,7 +384,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                     sig_counts[sig] = sig_counts.get(sig, 0) + 1
                     if sig_counts[sig] >= SAME_SIG_REPEAT:
                         hard_stop = True
-                        print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                        _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
                               f"同签名失败连发 {sig_counts[sig]} 次"
                               "（零进展）——panic")
                         gates.panic(ws, {
@@ -441,7 +442,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
             break
         if not ok:
             failures.append({"file": f.name, "start": start, "end": end})
-            print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+            _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
                   f"{MAX_TRIES} 次仍失败——停止本模块后续切片")
             break
     # hard_stop（blocked / 同签名连发）→ rc 3：立即停车不烧 attempts（H13）
@@ -461,16 +462,16 @@ def _quick_smoke(ws: Path, target_os: Path, module: str, proj: dict,
     b = probe_mod.probe_build(ws / "P4", target_os, runner,
                               label=f"P4_{module}_smoke_build")
     if not b["ok"]:
-        print(f"[porter] P4: 轮末快速冒烟 FAIL（build）：{b['detail']}")
+        _log.console_line(f"[porter] P4: 轮末快速冒烟 FAIL（build）：{b['detail']}")
         return False
-    boot_ok, _log, log_state = probe_lib.boot_and_log(
+    boot_ok, _raw_log, log_state = probe_lib.boot_and_log(
         ws, "P4", target_os, proj, f"P4_{module}_smoke_boot")
     if log_state == "missing":
         return "infra"            # 抢占：infra 关口已登记
     if not boot_ok:
-        print("[porter] P4: 轮末快速冒烟 FAIL（boot 双信号）")
+        _log.console_line("[porter] P4: 轮末快速冒烟 FAIL（boot 双信号）")
         return False
-    print("[porter] P4: 轮末快速冒烟 PASS（build+boot）——留下可启动树")
+    _log.console_line("[porter] P4: 轮末快速冒烟 PASS（build+boot）——留下可启动树")
     return True
 
 

@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import kb
+from .. import log as _log
 
 CONFIG_PATH = kb.TOOL_ROOT / "porter" / "config.json"
 
@@ -158,7 +159,7 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
                      "event": f"created（建议类 {suggested}）"}],
     })
     _save_doc(p, doc)
-    print(f"[porter] kb 探查: 新候选 {cid}（{hook}，建议类 {suggested}）")
+    _log.console_line(f"[porter] kb 探查: 新候选 {cid}（{hook}，建议类 {suggested}）")
     try:
         from ..loop import events as _ev
         _ev.append_event("kb-candidate", subject=str(ref),

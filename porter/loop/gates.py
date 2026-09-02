@@ -25,6 +25,7 @@ import re
 import hashlib
 from datetime import datetime
 from pathlib import Path
+from .. import log as _log
 
 LEDGER_NAME = "gates.json"
 VERSION = 1
@@ -62,7 +63,7 @@ class GateLedger:
                 self.version = data.get("version", 1)
                 self.gates = list(data.get("gates") or [])
             except (OSError, json.JSONDecodeError) as e:
-                print(f"[porter] gates: 账本损坏，重建（{e}）")
+                _log.console_line(f"[porter] gates: 账本损坏，重建（{e}）")
                 self.gates = []
         return self
 
@@ -442,7 +443,7 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
             consumed.add(gate_id)
             if verdict in ("veto", "reject", "否决"):
                 detail = _rollback_veto(ws, ledger, gate)
-                print(f"[porter] gates: 决策债被否决 {gate_id}（{detail}）")
+                _log.console_line(f"[porter] gates: 决策债被否决 {gate_id}（{detail}）")
                 try:
                     from . import events as _ev
                     _ev.append_event("gate-veto", subject=gate_id,
@@ -477,7 +478,7 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
                                 "detail": f"human; {resolution[:300]}"})
         consumed.add(gate_id)
         applied += 1
-        print(f"[porter] gates: 关口已应用 {gate_id}（{resolution[:120]}）")
+        _log.console_line(f"[porter] gates: 关口已应用 {gate_id}（{resolution[:120]}）")
         try:                            # 类 1 钩子：note/rationale → 候选
             from ..bootstrap import candidates as _cand
             _cand.record_from_gate(ws, gate, ans)
@@ -614,7 +615,7 @@ def panic(ws: Path, spec: dict, evidence: dict | None = None) -> int:
         hint = (f"关口 {gate['id']} 已第 {re_asked + 1} 次触发——"
                 "建议升为检查点（checkpoint 车道）或为该类问题写 policy "
                 "规则，而非反复人工应答")
-        print(f"[porter] gates: ⚠️ 聚类 {hint}")
+        _log.console_line(f"[porter] gates: ⚠️ 聚类 {hint}")
         try:
             from . import events as _ev
             _ev.append_event("gate-cluster", subject=gate["id"],
@@ -624,7 +625,7 @@ def panic(ws: Path, spec: dict, evidence: dict | None = None) -> int:
             pass
     render_human_questions(ws, ledger)
     blocking = len(ledger.open_blocking())
-    print(f"[porter] gates: panic {gate['id']}（待答关口 {blocking} 个）"
+    _log.console_line(f"[porter] gates: panic {gate['id']}（待答关口 {blocking} 个）"
           f"→ 详见 {ws / 'human_questions.md'}")
     return 3
 
@@ -733,10 +734,10 @@ def checkpoint_run(ws: Path, cp: str, register: list[dict] | None = None,
     blocking_open = [g for g in ledger.open_blocking()
                      if g.get("checkpoint") == cp]
     if blocking_open and blocking:
-        print(f"[porter] gates: {cp} 停车——{len(blocking_open)} 个待答关口"
+        _log.console_line(f"[porter] gates: {cp} 停车——{len(blocking_open)} 个待答关口"
               f"；批审材料 {digest}；待办见 human_questions.md")
         return 3
-    print(f"[porter] gates: {cp} 放行（digest：{digest}）")
+    _log.console_line(f"[porter] gates: {cp} 放行（digest：{digest}）")
     return 0
 
 
@@ -800,7 +801,7 @@ def strategy_checkpoint(ws: Path) -> int:
             ledger.save()
     checkpoint_digest(ws, "CP1", ledger)
     render_human_questions(ws, ledger)
-    print("[porter] gates: CP1 拆分审停车——读/改 P1/strategy.md 后在 "
+    _log.console_line("[porter] gates: CP1 拆分审停车——读/改 P1/strategy.md 后在 "
           "answers.md `## @cp1.strategy` verdict: approve 放行")
     return 3
 

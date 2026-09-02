@@ -36,6 +36,7 @@ from pathlib import Path
 
 from ..bootstrap import kb
 from ..common import agent
+from .. import log as _log
 
 # ---------- 样例库 ----------
 
@@ -84,7 +85,7 @@ def _merged_curated_index(kb_dir: Path | None) -> list:
         part = _load_index(d)
         if part is None:
             if (d / "INDEX.json").exists():
-                print(f"[porter] P1S: ⚠️ {d / 'INDEX.json'} 损坏，按空库判定")
+                _log.console_line(f"[porter] P1S: ⚠️ {d / 'INDEX.json'} 损坏，按空库判定")
             continue
         idx.extend(part)
     return idx
@@ -98,11 +99,11 @@ def _build_samples_injection(ws: Path) -> str:
         idx = _load_index(d)
         if not entries:
             if idx:
-                print(f"[porter] P1S: ⚠️ {label} INDEX 有条目登记但目录无 *.md")
+                _log.console_line(f"[porter] P1S: ⚠️ {label} INDEX 有条目登记但目录无 *.md")
             continue
         sec = [f"### {label}", f"样例目录: {d.resolve()}"]
         if idx is None:
-            print(f"[porter] P1S: ⚠️ {d / 'INDEX.json'} 缺失或损坏，"
+            _log.console_line(f"[porter] P1S: ⚠️ {d / 'INDEX.json'} 缺失或损坏，"
                   f"退化为条目文件清单")
             sec += [f"- {f.name}" for f in entries]
         else:
@@ -112,7 +113,7 @@ def _build_samples_injection(ws: Path) -> str:
             ghost = sorted(listed - actual)
             unlisted = sorted(actual - listed)
             if ghost or unlisted:
-                print(f"[porter] P1S: ⚠️ {label} INDEX 与条目不一致"
+                _log.console_line(f"[porter] P1S: ⚠️ {label} INDEX 与条目不一致"
                       f"（幽灵登记: {ghost or '无'}；"
                       f"未登记: {unlisted or '无'}）")
         sections.append("\n".join(sec))
@@ -261,10 +262,10 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
                (e.get("driver_name") == arg
                 or e.get("entry_file") in (arg, f"{arg}.md"))]
     if not matches:
-        print(f"[porter] p1-promote: temp 分区无匹配 {driver!r} 的草稿")
+        _log.console_line(f"[porter] p1-promote: temp 分区无匹配 {driver!r} 的草稿")
         return 1
     if len(matches) > 1:
-        print(f"[porter] p1-promote: temp 分区有 {len(matches)} 个匹配 "
+        _log.console_line(f"[porter] p1-promote: temp 分区有 {len(matches)} 个匹配 "
               f"{driver!r} 的草稿（同名不同构成），请指定条目文件名晋升：")
         for e in matches:
             print(f"  - {e.get('entry_file')}"
@@ -274,7 +275,7 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
 
     src = tdir / entry.get("entry_file", "")
     if not src.exists():
-        print(f"[porter] p1-promote: 草稿文件缺失 {src}"
+        _log.console_line(f"[porter] p1-promote: 草稿文件缺失 {src}"
               f"（temp INDEX 与磁盘不一致）")
         return 1
     kdir = kb.domain_kb("splits", kb_dir)
@@ -288,7 +289,7 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
         kdir, kidx, entry.get("driver_name", arg),
         set(entry.get("linux_files") or []))
     if name is None:
-        print(f"[porter] p1-promote: 已沉淀分区已有完全一致样例"
+        _log.console_line(f"[porter] p1-promote: 已沉淀分区已有完全一致样例"
               f"（同名+同文件集），拒绝重复晋升")
         return 1
     kdir.mkdir(parents=True, exist_ok=True)
@@ -297,7 +298,7 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
     entry["entry_file"] = name
     kidx.append(entry)
     _save_index(kdir, kidx)
-    print(f"[porter] p1-promote: {entry.get('driver_name')} 已晋升"
+    _log.console_line(f"[porter] p1-promote: {entry.get('driver_name')} 已晋升"
           f"（{src.name} → {kdir / name}）")
     return 0
 
@@ -338,7 +339,7 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
     out_path = p1 / "strategy.md"
 
     if out_path.exists():
-        print(f"[porter] P1S: 复用 {out_path}（如需重做请删除该文件）")
+        _log.console_line(f"[porter] P1S: 复用 {out_path}（如需重做请删除该文件）")
     else:
         skill = agent.load_skill("P1-strategy")
         prompt = (f"{skill}\n\n---\n\n"
@@ -351,7 +352,7 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
                                   log_stem=str(p1 / "logs" / "P1S_R1"),
                                   timeout_sec=1800)
         if rc != 0:
-            print(f"[porter] P1S: agent 调用失败（rc={rc}，见 P1/logs/P1S_R1.log）")
+            _log.console_line(f"[porter] P1S: agent 调用失败（rc={rc}，见 P1/logs/P1S_R1.log）")
             return 1
 
         # 提取正文：去掉 ANSI 色码；若 agent 用 ```markdown 包裹则剥壳
@@ -376,28 +377,28 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
         if out_path.exists():
             agent_written = out_path.read_text(encoding="utf-8").strip()
             if len(agent_written) > len(text):
-                print(f"[porter] P1S: agent 已自行写入 strategy.md"
+                _log.console_line(f"[porter] P1S: agent 已自行写入 strategy.md"
                       f"（{len(agent_written)} 字符），采用文件内容")
                 text = agent_written
 
         if len(text) < 400:
-            print(f"[porter] P1S: ⚠️ agent 输出过短（{len(text)} 字符），"
+            _log.console_line(f"[porter] P1S: ⚠️ agent 输出过短（{len(text)} 字符），"
                   f"疑似异常——请检查 P1/logs/P1S_R1.log 后重跑")
             return 1
 
         out_path.write_text(text, encoding="utf-8")
-        print(f"[porter] P1S: strategy.md 已生成（{len(text)} 字符）")
+        _log.console_line(f"[porter] P1S: strategy.md 已生成（{len(text)} 字符）")
 
     # 样例库：草稿 + 知识报告（生成/复用两路径都执行；幂等）。
     # 失败仅警告，不阻断主产物。
     try:
         res = _draft_to_temp(ws, proj, driver_root, out_path)
         rpt = _write_knowledge_report(ws, proj, res)
-        print(f"[porter] P1S: 样例草稿 {res['status']}（{res['driver']}）；"
+        _log.console_line(f"[porter] P1S: 样例草稿 {res['status']}（{res['driver']}）；"
               f"价值判定见 {rpt}")
     except (OSError, KeyError, TypeError) as e:
-        print(f"[porter] P1S: ⚠️ 样例草稿/报告失败（不影响策略）：{e}")
+        _log.console_line(f"[porter] P1S: ⚠️ 样例草稿/报告失败（不影响策略）：{e}")
 
-    print(f"[porter] P1S: 待人工审阅：{out_path} —— 放行后即可运行 p1-divide；"
+    _log.console_line(f"[porter] P1S: 待人工审阅：{out_path} —— 放行后即可运行 p1-divide；"
           f"不满意可删除该文件重跑，或直接人工编辑")
     return 0

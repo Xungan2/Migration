@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 from ..common.symbol import _IDENT, _KEYWORDS, scan_file
+from .. import log as _log
 
 _IDENT_RE = _IDENT  # 复用 symbol.py 的标识符正则与关键字表
 
@@ -71,7 +72,7 @@ def _header_index(kernel_root: Path) -> dict[str, list[str]]:
         for m in _IDENT_RE.findall(text):
             index.setdefault(m, set()).add(rel)
         n_files += 1
-    print(f"[porter] P2a: 内核头文件索引完成——{n_files} 个头文件, "
+    _log.console_line(f"[porter] P2a: 内核头文件索引完成——{n_files} 个头文件, "
           f"{len(index)} 个标识符")
     return {k: sorted(v) for k, v in index.items()}
 
@@ -111,18 +112,18 @@ def run_extract(ws: Path, driver_root: Path) -> int:
     p1_modules = ws / "P1" / "modules"
     deps_path = p1_modules / "deps.json"
     if not deps_path.exists():
-        print(f"[porter] P2a: 缺少 {deps_path}（先跑 p1）")
+        _log.console_line(f"[porter] P2a: 缺少 {deps_path}（先跑 p1）")
         return 2
     p2 = ws / "P2"
     out_path = p2 / "reports" / "spine_api.json"
     if out_path.exists():
-        print(f"[porter] P2a: 复用 {out_path}（如需重做请删除该文件）")
+        _log.console_line(f"[porter] P2a: 复用 {out_path}（如需重做请删除该文件）")
         return 0
 
     module_dirs = sorted(d for d in p1_modules.iterdir()
                          if d.is_dir() and (d / "module.json").exists())
     if not module_dirs:
-        print(f"[porter] P2a: {p1_modules} 下无模块目录——失败")
+        _log.console_line(f"[porter] P2a: {p1_modules} 下无模块目录——失败")
         return 2
 
     all_defs: set[str] = set()
@@ -145,7 +146,7 @@ def run_extract(ws: Path, driver_root: Path) -> int:
     orig_defs = _orig_driver_defs(driver_root)
     kernel_root = _find_kernel_root(driver_root)
     if kernel_root is None:
-        print("[porter] P2a: 未定位到 Linux 内核树根"
+        _log.console_line("[porter] P2a: 未定位到 Linux 内核树根"
               f"（自 {driver_root} 向上无 include/linux）——失败")
         return 2
     hdr_idx = _header_index(kernel_root)
@@ -198,7 +199,7 @@ def run_extract(ws: Path, driver_root: Path) -> int:
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2),
                         encoding="utf-8")
     st = out["stats"]
-    print(f"[porter] P2a: 主轴 API 提取完成——外部符号 {st['external_symbols']}"
+    _log.console_line(f"[porter] P2a: 主轴 API 提取完成——外部符号 {st['external_symbols']}"
           f"（resolved {st['resolved']} / 裁剪残留 {st['internal_cut']}"
           f" / 拼接碎片 {st['paste_fragments']}"
           f" / 未解析 {st['unresolved']}），{st['domains']} 个域 → {out_path}")

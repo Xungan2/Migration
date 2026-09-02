@@ -15,6 +15,7 @@ from pathlib import Path
 
 from ..env import probe as probe_mod
 from . import mapping, skeleton
+from .. import log as _log
 
 
 def _acceptance(ws: Path, target_os: Path) -> bool:
@@ -26,7 +27,7 @@ def _acceptance(ws: Path, target_os: Path) -> bool:
     results = [probe_mod.probe_build(p2, target_os, runner,
                                      label="P2_build")]
     if not results[-1]["ok"]:
-        print("[porter] P2: 验收 FAIL（build）")
+        _log.console_line("[porter] P2: 验收 FAIL（build）")
         return False
     results.append(probe_mod.probe_boot_with_device(
         p2, target_os, runner,
@@ -71,11 +72,11 @@ def _acceptance(ws: Path, target_os: Path) -> bool:
     (p2 / "reports" / "acceptance.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
-        print(f"[porter] P2: {r['item']:<14} {'PASS' if r['ok'] else 'FAIL'}  "
+        _log.console_line(f"[porter] P2: {r['item']:<14} {'PASS' if r['ok'] else 'FAIL'}  "
               f"{r['detail']}")
     for pat, n in patterns_hit.items():
-        print(f"[porter] P2: 日志特征 `{pat}` ×{n}")
-    print(f"[porter] P2: 验收 {'PASS' if report['pass'] else 'FAIL'}")
+        _log.console_line(f"[porter] P2: 日志特征 `{pat}` ×{n}")
+    _log.console_line(f"[porter] P2: 验收 {'PASS' if report['pass'] else 'FAIL'}")
     return report["pass"]
 
 
@@ -90,14 +91,14 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
     for need in (ws / "project.json", ws / "runner.json",
                  ws / "P1" / "modules" / "deps.json"):
         if not need.exists():
-            print(f"[porter] P2: 缺少 {need}（先跑 p0/p1）")
+            _log.console_line(f"[porter] P2: 缺少 {need}（先跑 p0/p1）")
             return 2
 
     rc = mapping.run_map(ws, driver_root, target_os)
     if rc == 2:
         return 2
     if rc == 1:
-        print("[porter] P2: ⚠ 映射存在失败批（详见 mapping_report.md）——"
+        _log.console_line("[porter] P2: ⚠ 映射存在失败批（详见 mapping_report.md）——"
               "骨架继续，失败批可断点重跑（幂等）")
 
     rc = skeleton.run_skeleton(ws, target_os, device_ids)
@@ -111,7 +112,7 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
     if rc == 2:
         return 2
     if rc != 0:
-        print("[porter] P2: ⚠ 探针预生成存在失败（详见 "
+        _log.console_line("[porter] P2: ⚠ 探针预生成存在失败（详见 "
               "P2/reports/pregen_report.md）——可 p2-probes 断点补跑")
 
     if not _acceptance(ws, target_os):

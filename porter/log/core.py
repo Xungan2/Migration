@@ -84,6 +84,16 @@ def console_only(scope: str, text: str, level: str = "info") -> bool:
     return console.emit(scope, text, level)
 
 
+def console_line(line: str, level: str = "info") -> bool:
+    """整行直打（存量 [porter] 格式行的机械收编通路；级别门控）。
+
+    print 扫尾（docs/log.md §8）的统一映射：print(f"[porter] …") →
+    _log.console_line(f"[porter] …")——输出 byte 兼容，获得
+    PORTER_LOG_LEVEL 门控与单一咽喉点。
+    """
+    return console.emit_line(line, level)
+
+
 # ---------- 派生事件助手（新增 kind 族，snake_case） ----------
 
 def phase_begin(phase: str, module: str | None = None,

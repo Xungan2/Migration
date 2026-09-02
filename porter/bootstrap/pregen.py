@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ..loop import probes as probe_lib
 from ..loop import surface as surface_mod
+from .. import log as _log
 
 
 def _targets(ws: Path, driver_root: Path, order: list[str],
@@ -74,12 +75,12 @@ def run_pregen(ws: Path, target_os: Path,
                  ws / "P1" / "modules" / "deps.json",
                  ws / "P2" / "mapping.json"):
         if not need.exists():
-            print(f"[porter] P2c: 缺少 {need}（先跑 p0/p1/p2-map）")
+            _log.console_line(f"[porter] P2c: 缺少 {need}（先跑 p0/p1/p2-map）")
             return 2
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
-        print(f"[porter] P2c: linux_driver 路径无效 {driver_root}")
+        _log.console_line(f"[porter] P2c: linux_driver 路径无效 {driver_root}")
         return 2
     deps = json.loads((ws / "P1" / "modules" / "deps.json").read_text(
         encoding="utf-8"))
@@ -88,14 +89,14 @@ def run_pregen(ws: Path, target_os: Path,
     # 骨架 crate 须已存在（探针要住进去）
     if not (target_os / "kernel" / "core" / "comps" / driver / "src"
             / "probes.rs").exists():
-        print(f"[porter] P2c: 骨架 probes.rs 不存在（先跑 p2-skeleton）")
+        _log.console_line(f"[porter] P2c: 骨架 probes.rs 不存在（先跑 p2-skeleton）")
         return 2
     (ws / "P2" / "logs").mkdir(parents=True, exist_ok=True)
 
     try:
         todo, locs = _targets(ws, driver_root, order, max_batches=max_batches)
     except (RuntimeError, json.JSONDecodeError, OSError) as e:
-        print(f"[porter] P2c: 目标计算失败——{e}")
+        _log.console_line(f"[porter] P2c: 目标计算失败——{e}")
         return 1
     known = probe_lib.known_claims(ws, order, None)
     print(f"[porter] P2c: 预生成目标 {len(todo)} 条"
@@ -137,4 +138,4 @@ def _write_report(ws: Path, todo: list[dict],
     ]
     (ws / "P2" / "reports" / "pregen_report.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8")
-    print(f"[porter] P2c: 报告 → {ws / 'P2' / 'reports' / 'pregen_report.md'}")
+    _log.console_line(f"[porter] P2c: 报告 → {ws / 'P2' / 'reports' / 'pregen_report.md'}")

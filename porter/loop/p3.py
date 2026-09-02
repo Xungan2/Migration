@@ -33,6 +33,7 @@ from ..env import probe as probe_mod
 from . import criteria as crit_mod
 from . import probes as probe_lib
 from . import surface as surface_mod
+from .. import log as _log
 
 AGENT_TIMEOUT_SEC = 900
 
@@ -40,13 +41,13 @@ AGENT_TIMEOUT_SEC = 900
 def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict] | None:
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] P3: 缺少 {proj_path}")
+        _log.console_line(f"[porter] P3: 缺少 {proj_path}")
         return None
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     target_os = Path(proj["target_os"])
     if not driver_root.is_dir() or not target_os.is_dir():
-        print(f"[porter] P3: 路径无效 {driver_root} / {target_os}")
+        _log.console_line(f"[porter] P3: 路径无效 {driver_root} / {target_os}")
         return None
     p3m = ws / "P3" / module
     (p3m / "logs").mkdir(parents=True, exist_ok=True)
@@ -94,7 +95,7 @@ def _apply_answers(ws: Path, module: str, p3m: Path) -> int:
     dec_path.write_text(json.dumps(dec, ensure_ascii=False, indent=2),
                         encoding="utf-8")
     if n:
-        print(f"[porter] P3: 人工答案写回 {n} 条（{module}）")
+        _log.console_line(f"[porter] P3: 人工答案写回 {n} 条（{module}）")
     remaining = [d["linux_api"] for d in dec["decisions"]
                  if d.get("strategy") == "human"]
     if remaining:
@@ -140,7 +141,7 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
         for d, syms in (surface.get("missing_by_domain") or {}).items()}
     missing_by_domain = {d: v for d, v in missing_by_domain.items() if v}
     if not missing_by_domain:
-        print(f"[porter] P3: {module} 无缺失符号——映射步骤跳过")
+        _log.console_line(f"[porter] P3: {module} 无缺失符号——映射步骤跳过")
         return []
     mapping = _load_mapping(ws / "P2")
     skill = agent.load_skill("P3-module-map")
@@ -203,10 +204,10 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
             have = {e["linux_api"] for e in mapping["entries"]}
             if [s for s in batch if s not in have]:
                 failed.append(f"{domain}[{i}:{i + len(batch)}]")
-                print(f"[porter] P3: 批 {domain} {MAX_TRIES} 次后仍有缺口"
+                _log.console_line(f"[porter] P3: 批 {domain} {MAX_TRIES} 次后仍有缺口"
                       "——登记失败，继续")
             else:
-                print(f"[porter] P3: 批 {domain} 完成（累计 "
+                _log.console_line(f"[porter] P3: 批 {domain} 完成（累计 "
                       f"{len(mapping['entries'])} 条）")
     return failed
 
@@ -255,7 +256,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
         dec_path.write_text(json.dumps({"decisions": []},
                                        ensure_ascii=False, indent=2),
                             encoding="utf-8")
-        print(f"[porter] P3: {module} 模块面无 gap——分类步骤跳过")
+        _log.console_line(f"[porter] P3: {module} 模块面无 gap——分类步骤跳过")
         return 0
     if dec_path.exists():
         dec = json.loads(dec_path.read_text(encoding="utf-8"))
@@ -264,7 +265,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
             rc = _apply_answers(ws, module, p3m)
             if rc == 3:
                 return 3
-            print(f"[porter] P3: {module} gap 分类已存在——复用")
+            _log.console_line(f"[porter] P3: {module} gap 分类已存在——复用")
             return 0
 
     skill = agent.load_skill("P3-module-map")
@@ -334,7 +335,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
             feedback = ("\n\n---\n\n## 上一次输出的问题\n未见合法 JSON。只输出"
                         "一个紧凑 JSON 对象（一行）。")
     if not decisions:
-        print(f"[porter] P3: {module} gap 分类失败——exit 1")
+        _log.console_line(f"[porter] P3: {module} gap 分类失败——exit 1")
         return 1
     dec_path.write_text(json.dumps(
         {"module": module, "generated": datetime.now().isoformat(
@@ -366,7 +367,7 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
     human = [d["linux_api"] for d in decisions if d["strategy"] == "human"]
     if human:
         _panic_gap_gates(ws, module, human)
-        print(f"[porter] P3: {module} 有 {len(human)} 条 gap 需人工决策"
+        _log.console_line(f"[porter] P3: {module} 有 {len(human)} 条 gap 需人工决策"
               "——exit 3")
         return 3
     by = {}
@@ -416,7 +417,7 @@ def _strategy_row(ws: Path, module: str) -> str:
 def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
     crit_path = p3m / "reports" / "criteria.json"
     if crit_path.exists():
-        print(f"[porter] P3: {module} 判据已存在——复用")
+        _log.console_line(f"[porter] P3: {module} 判据已存在——复用")
         return 0
     row = _strategy_row(ws, module)
     skill = agent.load_skill("P3-criteria")
@@ -452,14 +453,14 @@ def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
                 "\n\n---\n\n## 上一次输出的问题\n未见合法 JSON。只输出一个"
                 "紧凑 JSON 对象（一行）。")
     if not final:
-        print(f"[porter] P3: {module} 判据草案失败——exit 1")
+        _log.console_line(f"[porter] P3: {module} 判据草案失败——exit 1")
         return 1
     crit = {"module": module,
             "generated": datetime.now().isoformat(timespec="seconds"),
             "criteria": crit_mod.baseline_criteria(module) + final}
     crit_path.write_text(json.dumps(crit, ensure_ascii=False, indent=2),
                          encoding="utf-8")
-    print(f"[porter] P3: {module} 判据草案 {len(crit['criteria'])} 条"
+    _log.console_line(f"[porter] P3: {module} 判据草案 {len(crit['criteria'])} 条"
           f"（含基线 2）→ {crit_path}")
     return 0
 
@@ -478,7 +479,7 @@ def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
                probe_lib.known_claims(ws, order, module))
     todo = [e for e in risky if e["linux_api"] not in claimed]
     if not todo and not probe_lib.load_registry(reg_path).get("probes"):
-        print(f"[porter] P3: {module} 无新增风险条目（预生成/他模块已覆盖）"
+        _log.console_line(f"[porter] P3: {module} 无新增风险条目（预生成/他模块已覆盖）"
               "——探针步骤跳过")
         return 0
 
@@ -487,7 +488,7 @@ def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
         rc = _step_gap_decisions(ws_, target_os, module, p3m,
                                  _reload_surface(p3m))
         if rc != 0:
-            print(f"[porter] P3: {module} 降级项 gap 分类 rc={rc}（loop "
+            _log.console_line(f"[porter] P3: {module} 降级项 gap 分类 rc={rc}（loop "
                   "人工关口接管）")
             _step_probes.last_rc = rc      # 冒泡给调用方（见 run_p3）
 
@@ -521,12 +522,12 @@ def _refresh_drafts(ws: Path) -> None:
     try:
         kn.draft_knowledge(ws)
     except Exception as e:
-        print(f"[porter] P3: ⚠️ 知识草稿刷新失败（不影响主流程）：{e}")
+        _log.console_line(f"[porter] P3: ⚠️ 知识草稿刷新失败（不影响主流程）：{e}")
     try:
         from ..bootstrap import gaps as gaps_kb
         gaps_kb.draft_gaps(ws)
     except Exception as e:
-        print(f"[porter] P3: ⚠️ gaps 草稿刷新失败（不影响主流程）：{e}")
+        _log.console_line(f"[porter] P3: ⚠️ gaps 草稿刷新失败（不影响主流程）：{e}")
 
 
 def run_p3(ws: Path, module: str, order: list[str]) -> int:
@@ -610,5 +611,5 @@ def _write_report(ws: Path, module: str, p3m: Path,
                      f"expr=`{c['expr']}`{db}")
     (p3m / "reports" / "report.md").write_text("\n".join(lines) + "\n",
                                                encoding="utf-8")
-    print(f"[porter] P3: {module} 完成——报告 → "
+    _log.console_line(f"[porter] P3: {module} 完成——报告 → "
           f"{p3m / 'reports' / 'report.md'}")

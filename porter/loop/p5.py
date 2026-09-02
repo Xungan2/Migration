@@ -33,6 +33,7 @@ from . import criteria as crit_mod
 from . import events
 from . import gates
 from . import ut_verify
+from .. import log as _log
 
 # "归全局系统验收"哨兵：新写 __P6__（旧编号期的 P5/__P5__ 兼容读取，
 # 均不可在 P5(M) 内清偿——属 P6 系统验收）
@@ -51,7 +52,7 @@ def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
                  ws / "P3" / module / "reports" / "criteria.json",
                  ws / "P4" / module / "reports" / "migration.json"):
         if not need.exists():
-            print(f"[porter] P5: 缺少 {need}（先跑 p4 {module}）")
+            _log.console_line(f"[porter] P5: 缺少 {need}（先跑 p4 {module}）")
             return None
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
@@ -110,7 +111,7 @@ def _refresh_runbook(ws: Path) -> None:
         from ..bootstrap import runbook as _rb
         _rb.draft_runbook(ws)
     except Exception as e:
-        print(f"[porter] P5: ⚠️ runbook 草稿刷新失败（不影响主流程）：{e}")
+        _log.console_line(f"[porter] P5: ⚠️ runbook 草稿刷新失败（不影响主流程）：{e}")
 
 
 def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
@@ -133,13 +134,13 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
         _save_runner_ut(ws, runner, ut)
         _refresh_runbook(ws)
         if ok:
-            print("[porter] P5: unit_test 烟测 PASS（verified:true）")
+            _log.console_line("[porter] P5: unit_test 烟测 PASS（verified:true）")
         else:
-            print(f"[porter] P5: ⚠ unit_test 烟测 FAIL：{detail}"
+            _log.console_line(f"[porter] P5: ⚠ unit_test 烟测 FAIL：{detail}"
                   "（verified:false；验收将按此判定，建议人工修 runner.json）")
         return ut
 
-    print("[porter] P5: runner.json 缺 unit_test 节——一次性补探回填（含"
+    _log.console_line("[porter] P5: runner.json 缺 unit_test 节——一次性补探回填（含"
           "第二道烟测）")
     skill = agent.load_skill("P0-unit-test-discover")
     driver = Path(proj["linux_driver"]).name
@@ -168,7 +169,7 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
             ut["verified"] = ok
             if ok:
                 break
-            print(f"[porter] P5: 烟测失败（第 {attempt} 次）：{detail}")
+            _log.console_line(f"[porter] P5: 烟测失败（第 {attempt} 次）：{detail}")
             prompt = prompt + ut_verify.feedback_block(detail, observed)
         else:
             prompt = prompt + (
@@ -182,10 +183,10 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
     ut["discovered_by"] = "porter/loop backfill"
     _save_runner_ut(ws, runner, ut)
     _refresh_runbook(ws)
-    print(f"[porter] P5: unit_test 节回填 mechanism={ut.get('mechanism')}"
+    _log.console_line(f"[porter] P5: unit_test 节回填 mechanism={ut.get('mechanism')}"
           f" verified={ut.get('verified')}（reviewed:false）")
     if not ut.get("verified"):
-        print("[porter] P5: ⚠ 烟测未过——命令/特征不可信，验收将按此判定，"
+        _log.console_line("[porter] P5: ⚠ 烟测未过——命令/特征不可信，验收将按此判定，"
               "建议人工核查 runner.json 的 unit_test 节")
     return ut
 
@@ -463,7 +464,7 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
             acceptance_path(ws, module).write_text(
                 json.dumps(report, ensure_ascii=False, indent=2),
                 encoding="utf-8")
-            print(f"[porter] P5: {module} 判定中止（boot 日志不可得，"
+            _log.console_line(f"[porter] P5: {module} 判定中止（boot 日志不可得，"
                   "infra 关口待答）——exit 3")
             return 3
         if not hard_fail or attempt >= _P5_RERUN_MAX:
@@ -488,7 +489,7 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
         rerun_worthy = (circuits <= {"infra", "unknown"}) or fixed
         if not rerun_worthy:
             break
-        print(f"[porter] P5: infra/修正后重跑 {attempt + 1}/"
+        _log.console_line(f"[porter] P5: infra/修正后重跑 {attempt + 1}/"
               f"{_P5_RERUN_MAX}（不计 attempts）")
 
     # L4 e2e / deferred 登记（一次性，重跑圈外）
@@ -515,9 +516,9 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
     for r in results:
         mark = "PASS" if r["ok"] else ("DEFER" if r["ok"] is None
                                        else "FAIL")
-        print(f"[porter] P5: {r['id']:<40} {mark}  {r['detail']}")
+        _log.console_line(f"[porter] P5: {r['id']:<40} {mark}  {r['detail']}")
     _write_report(ws, module, p5m, report)
-    print(f"[porter] P5: {module} 验收 {'PASS' if report['pass'] else 'FAIL'}")
+    _log.console_line(f"[porter] P5: {module} 验收 {'PASS' if report['pass'] else 'FAIL'}")
     if not report["pass"]:
         return 1
     if rc_def == 3:

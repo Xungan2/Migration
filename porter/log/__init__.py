@@ -11,8 +11,8 @@
 
 from . import console, core, query, snapshot, store
 from .console import emit, format_line
-from .core import (console_only, ctx, ctx_stamp, judge, phase_begin,
-                   phase_end, record)
+from .core import (console_line, console_only, ctx, ctx_stamp, judge,
+                   phase_begin, phase_end, record)
 from .snapshot import take_failure_snapshot
 from .store import (append_event, bind, bound, note_agent_end,
                     note_agent_start, note_cmd_end, note_cmd_start,
@@ -20,7 +20,7 @@ from .store import (append_event, bind, bound, note_agent_end,
 
 __all__ = [
     "console", "core", "query", "snapshot", "store",
-    "record", "console_only", "emit", "format_line",
+    "record", "console_only", "console_line", "emit", "format_line",
     "ctx", "ctx_stamp", "phase_begin", "phase_end", "judge",
     "take_failure_snapshot",
     "append_event", "bind", "bound", "unbind",

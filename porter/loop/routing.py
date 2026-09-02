@@ -23,6 +23,7 @@ import os
 import re
 from datetime import datetime
 from pathlib import Path
+from .. import log as _log
 
 TIERS = ("rules", "agent", "human")
 
@@ -312,7 +313,7 @@ def maybe_auto_answer(ws: Path, ledger, gate: dict) -> bool:
     gate["history"].append({"time": datetime.now().isoformat(
         timespec="seconds"), "event": "auto-answered",
         "detail": f"{answered_by} conf={conf}; {resolution[:300]}"})
-    print(f"[porter] routing: {answered_by} 层自动应答 {gate['id']}"
+    _log.console_line(f"[porter] routing: {answered_by} 层自动应答 {gate['id']}"
           f"（conf={conf}）→ 决策债")
     try:
         from . import events as _ev

@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 
 from ..common import agent
+from .. import log as _log
 
 
 def identify_category(linux_driver: Path, workdir: Path,
@@ -31,7 +32,7 @@ def identify_category(linux_driver: Path, workdir: Path,
             "subsystems": [],
             "notes": "人工指定（--category）",
         }
-        print(f"[porter] T2: 类别={cats}（人工指定，跳过 agent）")
+        _log.console_line(f"[porter] T2: 类别={cats}（人工指定，跳过 agent）")
         return result
 
     p0 = workdir / "P0"
@@ -80,9 +81,9 @@ def identify_category(linux_driver: Path, workdir: Path,
 
     conf = parsed.get("confidence", "low")
     if conf == "low":
-        print(f"[porter] T2: ⚠️ 置信度 low——{parsed.get('notes', '')}"
+        _log.console_line(f"[porter] T2: ⚠️ 置信度 low——{parsed.get('notes', '')}"
               f"（建议 --category 人工指定；本次按结果继续，后续模板为并集/通用版）")
-    print(f"[porter] T2: categories={parsed['categories']} "
+    _log.console_line(f"[porter] T2: categories={parsed['categories']} "
           f"confidence={conf} subsystems={parsed.get('subsystems')}")
     return parsed
 

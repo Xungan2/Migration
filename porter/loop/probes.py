@@ -28,6 +28,7 @@ from pathlib import Path
 
 from ..common import agent
 from ..env import probe as probe_mod
+from .. import log as _log
 
 AGENT_TIMEOUT_SEC = 900
 MAX_ROUNDS = 3            # FAIL → 回映射改判的有界轮数（仿 T3 R1-R3）
@@ -304,7 +305,7 @@ def _log_face(ws: Path, phase_ws: Path, runner: dict, target_os: Path,
     if state == "missing":
         _append_event_safe("boot-log-missing", label,
                            "首次读取缺失——有界复探一次")
-        print(f"[porter] probes: boot 日志缺失（{label}）——复探一次")
+        _log.console_line(f"[porter] probes: boot 日志缺失（{label}）——复探一次")
         ok, log, state = reprobe()
         if state == "missing":
             _panic_no_log(ws, label, None)
@@ -319,7 +320,7 @@ def _note_empty_log(ws: Path, label: str) -> None:
     hint = ("boot 日志为空——两种可能：console 参数/重定向配错（infra），"
             "或内核在 console 初始化前早挂（真失败）。判定照常（boot 必 "
             "FAIL 是真信号）；现场见 events 与快照")
-    print(f"[porter] probes: ⚠️ {hint}（{label}）")
+    _log.console_line(f"[porter] probes: ⚠️ {hint}（{label}）")
     _append_event_safe("boot-log-empty", label, hint)
 
 
@@ -406,7 +407,7 @@ def _fix_compile(boot_ws: Path, target_os: Path, label: str,
     active = [p for p in reg["probes"] if p.get("status") == "active"]
     bad_set = _probes_owning_lines(target_os, driver, active, err_lines)
     if not bad_set:
-        print("[porter] 探针: 编译错误无法定位到探针——不回炉")
+        _log.console_line("[porter] 探针: 编译错误无法定位到探针——不回炉")
         return False
     texts = "\n\n".join(f"### {p['name']}（claim={p['claim']}）\n```rust\n"
                         f"{p['rust']}\n```"
@@ -430,7 +431,7 @@ def _fix_compile(boot_ws: Path, target_os: Path, label: str,
                     n += 1
             if n:
                 save_registry(registry_path, reg)
-                print(f"[porter] 探针: 编译回炉修正 {n} 个——重建")
+                _log.console_line(f"[porter] 探针: 编译回炉修正 {n} 个——重建")
                 return True
         prompt += ("\n\n---\n\n## 上一次输出的问题（重输出完整 JSON）\n"
                    + "; ".join(errs[:8] or ["无 JSON 输出"]))
@@ -555,9 +556,9 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
             save_registry(registry_path, reg)
         else:
             gen_failed += len(chunk)
-            print(f"[porter] 探针: 生成失败批（{len(chunk)} 条）——登记")
+            _log.console_line(f"[porter] 探针: 生成失败批（{len(chunk)} 条）——登记")
     if gen_failed and not reg["probes"]:
-        print(f"[porter] 探针: {label} 生成全败（{gen_failed} 条候选）"
+        _log.console_line(f"[porter] 探针: {label} 生成全败（{gen_failed} 条候选）"
               "——exit 1")
         return 1
 
@@ -575,7 +576,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
         b = probe_mod.probe_build(boot_ws, target_os, runner,
                                   label=f"{label}_probe_build_r{rnd}")
         if not b["ok"]:
-            print(f"[porter] 探针: {label} build FAIL（轮 {rnd}）——带错误回炉")
+            _log.console_line(f"[porter] 探针: {label} build FAIL（轮 {rnd}）——带错误回炉")
             if rnd < MAX_ROUNDS and _fix_compile(
                     boot_ws, target_os, label, reg, registry_path, driver,
                     rnd, logs_dir):
@@ -586,7 +587,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
         if log_state == "missing":
             # 抢占（H9 重构）：判定输入不存在——不判定、不批量降级，
             # infra 关口已由助手登记
-            print(f"[porter] 探针: {label} 日志不可得——中止判定与降级"
+            _log.console_line(f"[porter] 探针: {label} 日志不可得——中止判定与降级"
                   "（infra 关口待答）")
             return 3
         verdicts = judge(log, names)
@@ -595,9 +596,9 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
             reg["history"] = reg.get("history", []) + [
                 {"round": rnd, "result": "all-pass"}]
             save_registry(registry_path, reg)
-            print(f"[porter] 探针: {label} {len(names)} 个全 PASS")
+            _log.console_line(f"[porter] 探针: {label} {len(names)} 个全 PASS")
             return 0
-        print(f"[porter] 探针: {label} FAIL/missing: {bad}（轮 {rnd}）——"
+        _log.console_line(f"[porter] 探针: {label} FAIL/missing: {bad}（轮 {rnd}）——"
               "回映射改判")
         if rnd == MAX_ROUNDS:
             break
@@ -640,7 +641,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
         sections = collect_sections(ws, order, current_module,
                                     registry_path, kind=kind)
         sync_probes_rs(target_os, driver, sections)
-        print(f"[porter] 探针: {label} 降级 {len(downgraded)} 条为 gap："
+        _log.console_line(f"[porter] 探针: {label} 降级 {len(downgraded)} 条为 gap："
               f"{', '.join(downgraded[:10])}")
         if after_downgrade is not None:
             after_downgrade(ws, downgraded)

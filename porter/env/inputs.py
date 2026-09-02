@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as _dt
 import json
 from pathlib import Path
+from .. import log as _log
 
 TOOL_ROOT = Path(__file__).resolve().parent.parent
 
@@ -111,6 +112,6 @@ def init_workspace(output_dir: Path, linux_driver: Path, target_os: Path,
     # 真值源用 JSON（工具链零依赖；结构化真值源 + markdown 视图的原则）
     (ws / "project.json").write_text(
         json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[porter] T1: workspace {ws}")
-    print(f"[porter] T1: 输入校验通过 {summary}")
+    _log.console_line(f"[porter] T1: workspace {ws}")
+    _log.console_line(f"[porter] T1: 输入校验通过 {summary}")
     return ws

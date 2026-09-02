@@ -18,6 +18,7 @@ from pathlib import Path
 from ..common import agent
 from . import fragments as frag_mod
 from . import index
+from .. import log as _log
 
 MAX_TRIES = 2          # 每文件：首发 + 催补重试 1 次
 AGENT_TIMEOUT_SEC = 900
@@ -44,7 +45,7 @@ def _assign_one_file(skill: str, strategy: str, fname: str,
             desc = parsed.get("module_desc")
             return parsed, (desc if isinstance(desc, dict) else {})
         head = err.splitlines()[0]
-        print(f"[porter] P1D: {fname} 第 {attempt} 次输出不合规：{head}")
+        _log.console_line(f"[porter] P1D: {fname} 第 {attempt} 次输出不合规：{head}")
         feedback = (f"\n\n---\n\n## 上一次输出的问题（修正后重新输出"
                     f"完整 JSON）\n\n{err}")
     return None, {}
@@ -55,11 +56,11 @@ def run_divide(ws: Path, driver_root: Path) -> int:
     p1 = ws / "P1"
     plan_path = p1 / "reports" / "P1D_plan.json"
     if plan_path.exists():
-        print(f"[porter] P1D: 复用 {plan_path}（如需重做请删除该文件）")
+        _log.console_line(f"[porter] P1D: 复用 {plan_path}（如需重做请删除该文件）")
         return 0
     strategy_path = p1 / "strategy.md"
     if not strategy_path.exists():
-        print(f"[porter] P1D: 缺少 {strategy_path}（divide 执行已审阅的策略——"
+        _log.console_line(f"[porter] P1D: 缺少 {strategy_path}（divide 执行已审阅的策略——"
               f"先跑 p1-strategy 并人工放行）")
         return 2
     strategy = strategy_path.read_text(encoding="utf-8")
@@ -67,11 +68,11 @@ def run_divide(ws: Path, driver_root: Path) -> int:
     file_index = index.build_index(driver_root)
     files = index.call_order(file_index)
     if not files:
-        print(f"[porter] P1D: {driver_root} 下未发现含定义的 *.c/*.h——失败")
+        _log.console_line(f"[porter] P1D: {driver_root} 下未发现含定义的 *.c/*.h——失败")
         return 2
     (p1 / "logs").mkdir(parents=True, exist_ok=True)
     (p1 / "reports").mkdir(parents=True, exist_ok=True)
-    print(f"[porter] P1D: 索引预建完成——{len(files)} 个文件待分配："
+    _log.console_line(f"[porter] P1D: 索引预建完成——{len(files)} 个文件待分配："
           f"{' '.join(files)}")
 
     skill = agent.load_skill("P1-divide")
@@ -81,37 +82,37 @@ def run_divide(ws: Path, driver_root: Path) -> int:
         dec, desc = _assign_one_file(skill, strategy, fname,
                                      file_index[fname], p1)
         if dec is None:
-            print(f"[porter] P1D: {fname} {MAX_TRIES} 次尝试均失败——退出"
+            _log.console_line(f"[porter] P1D: {fname} {MAX_TRIES} 次尝试均失败——退出"
                   f"（见 P1/logs/P1D_F_{fname}_R*.log）")
             return 1
         decisions[fname] = dec
         module_desc.update(desc)
         if "whole_file" in dec:
-            print(f"[porter] P1D: {fname} → 整文件 → {dec['whole_file']}")
+            _log.console_line(f"[porter] P1D: {fname} → 整文件 → {dec['whole_file']}")
         else:
             asg = dec.get("assignments") or {}
             kept = sum(1 for v in asg.values() if v)
-            print(f"[porter] P1D: {fname} → {len(asg)} 符号分配"
+            _log.console_line(f"[porter] P1D: {fname} → {len(asg)} 符号分配"
                   f"（{kept} 保留 / {len(asg) - kept} 裁剪）")
 
     plan, audit_md = index.expand(file_index, decisions, module_desc, strategy)
     (p1 / "reports" / "P1D_plan.json").write_text(
         json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     (p1 / "reports" / "P1D_audit.md").write_text(audit_md, encoding="utf-8")
-    print(f"[porter] P1D: plan 落盘 P1/reports/P1D_plan.json"
+    _log.console_line(f"[porter] P1D: plan 落盘 P1/reports/P1D_plan.json"
           f"（{len(plan['modules'])} 个模块）；审计 → P1D_audit.md")
 
     try:
         summary = frag_mod.extract_modules(ws, driver_root, plan)
     except frag_mod.DivideError as e:
-        print(f"[porter] P1D: 方案致命缺陷（本轮不做自动修正）：\n{e}")
+        _log.console_line(f"[porter] P1D: 方案致命缺陷（本轮不做自动修正）：\n{e}")
         return 1
 
-    print(f"[porter] P1D: 抽取完成——{len(summary)} 个模块：")
+    _log.console_line(f"[porter] P1D: 抽取完成——{len(summary)} 个模块：")
     total = 0
     for mname, files_map in summary.items():
         n = sum(files_map.values())
         total += n
-        print(f"[porter] P1D:   {mname}（{len(files_map)} 文件，{n} 行）")
-    print(f"[porter] P1D: 合计抽取 {total} 行 → P1/modules/")
+        _log.console_line(f"[porter] P1D:   {mname}（{len(files_map)} 文件，{n} 行）")
+    _log.console_line(f"[porter] P1D: 合计抽取 {total} 行 → P1/modules/")
     return 0

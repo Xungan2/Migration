@@ -23,6 +23,7 @@ import shutil
 from pathlib import Path
 
 from . import kb
+from .. import log as _log
 
 # 域三级分类（价值判定用；启发式清单，未列出的域 = 驱动特异）
 OS_GENERIC_DOMAINS = {
@@ -86,7 +87,7 @@ def draft_knowledge(ws: Path) -> int:
     mapping_path = ws / "P2" / "mapping.json"
     md_path = ws / "P2" / "mapping.md"
     if not mapping_path.exists() or not md_path.exists():
-        print("[porter] P2 知识: 缺少 P2/mapping.json|md（先跑 p2-map）——跳过草稿")
+        _log.console_line("[porter] P2 知识: 缺少 P2/mapping.json|md（先跑 p2-map）——跳过草稿")
         return 1
     driver = Path(proj["linux_driver"]).name
     target = Path(proj["target_os"]).name
@@ -126,7 +127,7 @@ def draft_knowledge(ws: Path) -> int:
         if "## 沉淀价值判定" not in text:
             rpt.write_text(text.rstrip() + "\n\n" + "\n".join(lines) + "\n",
                            encoding="utf-8")
-    print(f"[porter] P2 知识: 草稿已刷新 knowledge/temp/maps/{stem}.md/.json"
+    _log.console_line(f"[porter] P2 知识: 草稿已刷新 knowledge/temp/maps/{stem}.md/.json"
           f"（{len(mapping.get('entries', []))} 条）；"
           f"人工审阅后可 `p2-promote --output-dir <ws> "
           f"--driver {driver} --target {target}`")
@@ -151,11 +152,11 @@ def promote_map(driver: str, kb_dir: Path,
                   or str(e.get("file") or e.get("entry_file"))
                   == f"{driver}@{target}.md")]
     if not cands:
-        print(f"[porter] p2-promote: knowledge/temp/maps 无匹配 "
+        _log.console_line(f"[porter] p2-promote: knowledge/temp/maps 无匹配 "
               f"{driver}@{target or '*'} 草稿")
         return 1
     if len(cands) > 1:
-        print(f"[porter] p2-promote: {len(cands)} 个匹配，请指定 --target：")
+        _log.console_line(f"[porter] p2-promote: {len(cands)} 个匹配，请指定 --target：")
         for e in cands:
             print(f"  - {e.get('file') or e.get('entry_file')}")
         return 1
@@ -164,7 +165,7 @@ def promote_map(driver: str, kb_dir: Path,
     stem = fname[:-3] if fname.endswith(".md") else fname
     src_md, src_json = tdir / fname, tdir / f"{stem}.json"
     if not src_md.exists():
-        print(f"[porter] p2-promote: 草稿缺失 {src_md}（temp INDEX 与磁盘不一致）")
+        _log.console_line(f"[porter] p2-promote: 草稿缺失 {src_md}（temp INDEX 与磁盘不一致）")
         return 1
 
     hits = int(entry.get("hits", 0) or 0)
@@ -188,5 +189,5 @@ def promote_map(driver: str, kb_dir: Path,
                                          or e.get("entry_file") == fname))]
     kidx.append({"file": fname, "desc": desc, "hits": hits})
     kb.save_index(kdir, kidx)
-    print(f"[porter] p2-promote: {stem} 已晋升 → {kdir}")
+    _log.console_line(f"[porter] p2-promote: {stem} 已晋升 → {kdir}")
     return 0

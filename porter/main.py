@@ -80,6 +80,7 @@ from porter.env import extract as t3      # noqa: E402
 from porter.env import inputs as t1      # noqa: E402
 from porter.env import gate as t5         # noqa: E402
 from porter.loop import run as loop_mod   # noqa: E402
+from porter import log as _log
 
 
 def _print_kb_guidance() -> None:
@@ -88,7 +89,7 @@ def _print_kb_guidance() -> None:
         d.name for d in _kb.KB_ROOT.iterdir()
         if d.is_dir() and d.name not in ("base", "temp")
     ) if _kb.KB_ROOT.is_dir() else []
-    print("[porter] p0: 未指定知识库目录——须显式选择（知识子系统）：")
+    _log.console_line("[porter] p0: 未指定知识库目录——须显式选择（知识子系统）：")
     print("  新建（复制 base 工具随附知识）：--kb new <名>")
     print("  新建（空目录）：                --kb new <名> --kb-empty")
     print("  指定既有：                      --kb use <名>")
@@ -121,7 +122,7 @@ def _p0_kb_decision(args, proj_path: Path) -> tuple[int | None, str | None]:
         except (OSError, json.JSONDecodeError):
             proj = {}
         if proj.get("kb_dir"):
-            print(f"[porter] p0: 复用已记录知识库目录 "
+            _log.console_line(f"[porter] p0: 复用已记录知识库目录 "
                   f"kb_dir={proj['kb_dir']}")
             return None, None
     _print_kb_guidance()
@@ -137,7 +138,7 @@ def _record_kb(proj_path: Path, kb_name: str) -> None:
     proj_path.write_text(
         json.dumps(proj, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8")
-    print(f"[porter] p0: 知识库目录已记录 kb_dir={kb_name}")
+    _log.console_line(f"[porter] p0: 知识库目录已记录 kb_dir={kb_name}")
 
 
 def cmd_p0(args) -> int:
@@ -159,7 +160,7 @@ def cmd_p0(args) -> int:
         if kb_name is not None:
             _record_kb(proj_path, kb_name)
     else:
-        print(f"[porter] T1: 复用已有工作区 {ws}")
+        _log.console_line(f"[porter] T1: 复用已有工作区 {ws}")
         if kb_name is not None:
             _record_kb(proj_path, kb_name)
 
@@ -170,7 +171,7 @@ def cmd_p0(args) -> int:
 
     # T2 类别识别
     if proj.get("category"):
-        print(f"[porter] T2: 复用 category={proj['category']}")
+        _log.console_line(f"[porter] T2: 复用 category={proj['category']}")
     else:
         t2.write_result(ws, t2.identify_category(linux_driver, ws,
                                                  override=args.category))
@@ -195,7 +196,7 @@ def cmd_p0(args) -> int:
             from porter.bootstrap import runbook as _rb
             _rb.draft_runbook(ws)
         except Exception as _e:
-            print(f"[porter] p0: ⚠️ runbook 草稿刷新失败（不影响主流程）：{_e}")
+            _log.console_line(f"[porter] p0: ⚠️ runbook 草稿刷新失败（不影响主流程）：{_e}")
         # CP0 环境审：非阻塞 memo（runner 复核建议，复活死标志
         # meta.reviewed 的意图）+ digest——T3 阻塞问题已是 panic 关口
         from porter.loop import gates as _gates3
@@ -241,13 +242,13 @@ def cmd_p1_strategy(args) -> int:
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     _log_bind(ws, "p1")
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
-        print(f"[porter] linux_driver 路径无效: {driver_root}")
+        _log.console_line(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
     return p1s.run_strategy(ws, driver_root)
 
@@ -257,12 +258,12 @@ def cmd_p1_resolve(args) -> int:
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
-        print(f"[porter] linux_driver 路径无效: {driver_root}")
+        _log.console_line(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
     strategy = Path(args.strategy).resolve() if args.strategy else None
     return p1r.run_resolve(ws, driver_root, strategy_path=strategy)
@@ -273,12 +274,12 @@ def cmd_p1_divide(args) -> int:
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
-        print(f"[porter] linux_driver 路径无效: {driver_root}")
+        _log.console_line(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
     # CP1 拆分审（#5 必人四点：strategy.md 人工审阅关口，修 H5）
     from porter.loop import gates as _gates
@@ -299,11 +300,11 @@ def _kb_dir_for_promote(ws_raw) -> "Path | None":
     from porter.bootstrap import kb as _kb
     ws = Path(ws_raw).resolve() if ws_raw else None
     if ws is None or not (ws / "project.json").exists():
-        print("[porter] 需 --output-dir 指向迁移工作区（解析知识库目录）")
+        _log.console_line("[porter] 需 --output-dir 指向迁移工作区（解析知识库目录）")
         return None
     kb_dir = _kb.kb_dir_for(ws)
     if kb_dir is None:
-        print(f"[porter] 工作区 {ws} 未记录知识库目录（kb_dir）——"
+        _log.console_line(f"[porter] 工作区 {ws} 未记录知识库目录（kb_dir）——"
               "新工作区请用 p0 --kb 显式指定；旧工作区请补 "
               '"kb_dir": "<knowledge/ 下的目录名>" 到 project.json')
         return None
@@ -315,7 +316,7 @@ def cmd_kb(args) -> int:
     from porter.bootstrap import review as _rv
     ws = Path(args.output_dir).resolve() if args.output_dir else None
     if ws is None or not (ws / "project.json").exists():
-        print("[porter] kb: 需 --output-dir 指向迁移工作区")
+        _log.console_line("[porter] kb: 需 --output-dir 指向迁移工作区")
         return 2
     _log_bind(ws, "kb")
     acted = False
@@ -329,7 +330,7 @@ def cmd_kb(args) -> int:
         ids = (args.ids if args.ids
                else [c["id"] for c in _cand_load(ws)])
         if args.promote == "all" and not ids:
-            print("[porter] kb promote: 无候选")
+            _log.console_line("[porter] kb promote: 无候选")
         for cid in ids:
             rc = _rv.promote_candidate(ws, cid, to=args.to)
             if rc != 0:
@@ -341,7 +342,7 @@ def cmd_kb(args) -> int:
             return rc
     if not acted or args.list:
         mat = _rv.build_cp5_material(ws)
-        print(f"[porter] kb: 备审材料已刷新 {mat}")
+        _log.console_line(f"[porter] kb: 备审材料已刷新 {mat}")
         for c in _cand_load(ws):
             print(f"  - {c['id']}（建议类 {c.get('suggested_class')}）："
                   f"{c['draft'][:80]}")
@@ -366,13 +367,13 @@ def _p2_context(args):
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return ws, None, None
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     target_os = Path(proj["target_os"])
     if not driver_root.is_dir() or not target_os.is_dir():
-        print(f"[porter] 路径无效: {driver_root} / {target_os}")
+        _log.console_line(f"[porter] 路径无效: {driver_root} / {target_os}")
         return ws, None, None
     return ws, driver_root, target_os
 
@@ -390,7 +391,7 @@ def _loop_module(args):
     """p3/p4/loop 公共：工作区校验 + 可选 --module。"""
     ws = Path(args.output_dir).resolve()
     if not (ws / "project.json").exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return ws, False
     return ws, True
 
@@ -407,7 +408,7 @@ def cmd_p3(args) -> int:
         return 2
     module = args.module or st.pointer()
     if module is None:
-        print("[porter] p3: 全部模块已完成")
+        _log.console_line("[porter] p3: 全部模块已完成")
         return 0
     print(f"[porter] p3: 目标模块 {module}"
           + ("（--module 指定）" if args.module else "（断点指针）"))
@@ -429,10 +430,10 @@ def cmd_p4(args) -> int:
         return 2
     module = args.module or st.pointer()
     if module is None:
-        print("[porter] p4: 全部模块已完成")
+        _log.console_line("[porter] p4: 全部模块已完成")
         return 0
     if st.phase_of(module) == "pending":
-        print(f"[porter] p4: 模块 {module} 尚未跑 P3（先 p3 或用 loop）")
+        _log.console_line(f"[porter] p4: 模块 {module} 尚未跑 P3（先 p3 或用 loop）")
         return 2
     rc = p4_mod.run_p4(ws, module, st.order)
     if rc == 0:
@@ -452,22 +453,22 @@ def cmd_p5(args) -> int:
         return 2
     module = args.module or st.pointer()
     if module is None:
-        print("[porter] p5: 全部模块已完成")
+        _log.console_line("[porter] p5: 全部模块已完成")
         return 0
     phase = st.phase_of(module)
     if phase in ("pending", "p3", "p4"):
-        print(f"[porter] p5: 模块 {module} 尚未跑 P4（先 p4 或用 loop）")
+        _log.console_line(f"[porter] p5: 模块 {module} 尚未跑 P4（先 p4 或用 loop）")
         return 2
     if phase == "done":
         acc = p5_mod.acceptance_path(ws, module)
         if acc.exists():
             try:
                 if json.loads(acc.read_text(encoding="utf-8")).get("pass"):
-                    print(f"[porter] p5: {module} 验收已 PASS——复用 {acc}")
+                    _log.console_line(f"[porter] p5: {module} 验收已 PASS——复用 {acc}")
                     return 0
             except (OSError, json.JSONDecodeError):
                 pass
-        print(f"[porter] p5: {module} 已 done——按显式请求重跑模块级验收")
+        _log.console_line(f"[porter] p5: {module} 已 done——按显式请求重跑模块级验收")
     rc = p5_mod.run_p5(ws, module, st.order)
     if rc == 0 and phase != "done":
         st.set_phase(module, "done")
@@ -488,7 +489,7 @@ def cmd_p6(args) -> int:
     from porter.loop import p6 as p6_mod
     ws = Path(args.output_dir).resolve()
     if not (ws / "project.json").exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
 
     # defects 账本子操作（P6-5 缺陷修复循环消费；与模式互斥）
@@ -496,10 +497,10 @@ def cmd_p6(args) -> int:
         try:
             e = p6_mod.add_defect(ws, args.defect_add, args.title or "",
                                   args.evidence or "")
-            print(f"[porter] P6: 缺陷登记 {e['id']}（{e['title']}）")
+            _log.console_line(f"[porter] P6: 缺陷登记 {e['id']}（{e['title']}）")
             return 0
         except ValueError as ex:
-            print(f"[porter] P6: {ex}")
+            _log.console_line(f"[porter] P6: {ex}")
             return 1
     if args.defect_close:
         try:
@@ -507,23 +508,23 @@ def cmd_p6(args) -> int:
                                     args.root_cause or "",
                                     args.fix or "",
                                     args.regression or "")
-            print(f"[porter] P6: 缺陷闭账 {e['id']}（根因/修复/回归证据"
+            _log.console_line(f"[porter] P6: 缺陷闭账 {e['id']}（根因/修复/回归证据"
                   "四字段完整）")
             return 0
         except ValueError as ex:
-            print(f"[porter] P6: {ex}")
+            _log.console_line(f"[porter] P6: {ex}")
             return 1
     if args.defect_park:
         try:
             e = p6_mod.park_defect(ws, args.defect_park, args.reason or "")
-            print(f"[porter] P6: 缺陷泊车 {e['id']}")
+            _log.console_line(f"[porter] P6: 缺陷泊车 {e['id']}")
             return 0
         except ValueError as ex:
-            print(f"[porter] P6: {ex}")
+            _log.console_line(f"[porter] P6: {ex}")
             return 1
     if args.defect_list:
         for e in p6_mod.load_defects(ws)["defects"]:
-            print(f"[porter] P6: {e['status']:<10} {e['id']:<44} "
+            _log.console_line(f"[porter] P6: {e['status']:<10} {e['id']:<44} "
                   f"{e['title']}")
         return 0
     if args.defect_diagnose:
@@ -541,7 +542,7 @@ def cmd_p7(args) -> int:
     from porter.loop import p7 as p7_mod
     ws = Path(args.output_dir).resolve()
     if not (ws / "project.json").exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     _log_bind(ws, "p7")
     # CP4 验收审：缺陷自动闭账的决策债未清 → 停车批审（防证据链注水）
@@ -575,7 +576,7 @@ def cmd_p7(args) -> int:
             kb_mat = _rv.build_cp5_material(ws)
         except Exception as _e:
             kb_mat = None
-            print(f"[porter] CP5: ⚠️ 知识备审材料生成失败：{_e}")
+            _log.console_line(f"[porter] CP5: ⚠️ 知识备审材料生成失败：{_e}")
         _gates.checkpoint_run(
             ws, "CP5", register=[{
                 "id": "cp5.promote", "kind": "memo", "gate_type": "decision",
@@ -742,12 +743,12 @@ def cmd_p1(args) -> int:
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
-        print(f"[porter] linux_driver 路径无效: {driver_root}")
+        _log.console_line(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
     from porter.loop import gates as _gates
     _gates.process_answered_gates(ws)
@@ -762,7 +763,7 @@ def cmd_p1(args) -> int:
         if rc != 0:
             return rc
     rpt = _write_p1_final_report(ws)
-    print(f"[porter] P1: 全流程完成，报告 → {rpt}")
+    _log.console_line(f"[porter] P1: 全流程完成，报告 → {rpt}")
     return 0
 
 
@@ -771,7 +772,7 @@ def cmd_gate(args) -> int:
     from porter.loop import gates as gates_mod
     ws = Path(args.output_dir).resolve()
     if not (ws / "project.json").exists():
-        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
     ledger = gates_mod.GateLedger(ws).load()
 
@@ -787,7 +788,7 @@ def cmd_gate(args) -> int:
                 continue
             rows.append(g)
         if not rows:
-            print(f"[porter] gate: 无 {args.status} 关口")
+            _log.console_line(f"[porter] gate: 无 {args.status} 关口")
             return 0
         print(f"{'ID':<44} {'状态':<9} {'车道':<11} 类型/应答者")
         for g in sorted(rows, key=lambda x: (x.get("status") or "",
@@ -802,7 +803,7 @@ def cmd_gate(args) -> int:
     if args.gate_cmd == "show":
         g = ledger.find(args.gate_id)
         if g is None:
-            print(f"[porter] gate: 关口不存在: {args.gate_id}")
+            _log.console_line(f"[porter] gate: 关口不存在: {args.gate_id}")
             return 2
         print(json.dumps(g, ensure_ascii=False, indent=2))
         return 0
@@ -810,10 +811,10 @@ def cmd_gate(args) -> int:
     if args.gate_cmd == "answer":
         g = ledger.find(args.gate_id)
         if g is None:
-            print(f"[porter] gate: 关口不存在: {args.gate_id}")
+            _log.console_line(f"[porter] gate: 关口不存在: {args.gate_id}")
             return 2
         if not args.set:
-            print("[porter] gate: 需要至少一个 --set field=value")
+            _log.console_line("[porter] gate: 需要至少一个 --set field=value")
             return 2
         lines = [f"## @{args.gate_id}"]
         for kv in args.set:
@@ -821,10 +822,10 @@ def cmd_gate(args) -> int:
             lines.append(f"{field.strip()}: {val.strip()}")
         with (ws / "answers.md").open("a", encoding="utf-8") as f:
             f.write("\n" + "\n".join(lines) + "\n")
-        print(f"[porter] gate: 答案已写入 answers.md（{args.gate_id}）")
+        _log.console_line(f"[porter] gate: 答案已写入 answers.md（{args.gate_id}）")
         applied, invalid = gates_mod.process_answered_gates(ws, ledger)
         if invalid:
-            print(f"[porter] gate: ⚠️ 校验失败 {invalid} 条——错误见 "
+            _log.console_line(f"[porter] gate: ⚠️ 校验失败 {invalid} 条——错误见 "
                   "human_questions.md 渲染面")
             gates_mod.render_human_questions(ws, ledger)
             return 1
@@ -837,9 +838,9 @@ def cmd_gate(args) -> int:
     if args.gate_cmd == "review":
         cp = args.cp or "REVIEW"
         p = gates_mod.checkpoint_digest(ws, cp, ledger)
-        print(f"[porter] gate: 批审材料 → {p}")
+        _log.console_line(f"[porter] gate: 批审材料 → {p}")
         gates_mod.render_human_questions(ws, ledger)
-        print("[porter] gate: 逐条否决：answers.md `## @<债项ID>` "
+        _log.console_line("[porter] gate: 逐条否决：answers.md `## @<债项ID>` "
               "verdict: veto；批量放行：`## @cp.debt.<n>` verdict: approve")
         return 0
     return 2
@@ -854,7 +855,7 @@ def cmd_log(args) -> int:
     from porter import log as log_mod
     ws = Path(args.output_dir).resolve()
     if not (ws / "events.jsonl").exists():
-        print(f"[porter] log: 工作区无 events.jsonl（{ws}）——尚未记录")
+        _log.console_line(f"[porter] log: 工作区无 events.jsonl（{ws}）——尚未记录")
         return 1
 
     if args.log_cmd == "tail":
@@ -863,7 +864,7 @@ def cmd_log(args) -> int:
                                    phase=args.phase, module=args.module,
                                    limit=args.n)
         if not evs:
-            print("[porter] log: 无匹配事件")
+            _log.console_line("[porter] log: 无匹配事件")
             return 0
         for e in evs:
             bits = [str(e.get("time") or "?")[:19],
@@ -875,14 +876,14 @@ def cmd_log(args) -> int:
                 bits.append(str(e["subject"]))
             bits.append(str(e.get("summary") or "")[:100])
             print("  ".join(b for b in bits if b))
-        print(f"[porter] log: 共 {len(evs)} 条（events.jsonl）")
+        _log.console_line(f"[porter] log: 共 {len(evs)} 条（events.jsonl）")
         return 0
 
     if args.log_cmd == "runs":
         rs = log_mod.query.runs(ws, subject=args.subject,
                                 last_n=args.n)
         if not rs:
-            print("[porter] log: 无 agent 运行记录")
+            _log.console_line("[porter] log: 无 agent 运行记录")
             return 0
         for r in rs:
             rc = "运行中" if r["rc"] is None else f"rc={r['rc']}"
@@ -890,7 +891,7 @@ def cmd_log(args) -> int:
                 is not None else "?"
             print(f"{r['run_id']}\n    {rc} {dur} "
                   f"{str(r.get('summary') or '')[:80]}")
-        print(f"[porter] log: 共 {len(rs)} 次 agent 运行（show <run_id> 看全文）")
+        _log.console_line(f"[porter] log: 共 {len(rs)} 次 agent 运行（show <run_id> 看全文）")
         return 0
 
     if args.log_cmd == "show":
@@ -899,7 +900,7 @@ def cmd_log(args) -> int:
             or next((r for r in rs if r["run_id"].endswith(args.run_id)),
                     None)
         if hit is None:
-            print(f"[porter] log: run 不存在: {args.run_id}（用 runs 列出）")
+            _log.console_line(f"[porter] log: run 不存在: {args.run_id}（用 runs 列出）")
             return 2
         print(json.dumps({k: v for k, v in hit.items()}, ensure_ascii=False,
                          indent=2))
@@ -922,7 +923,7 @@ def cmd_log(args) -> int:
         rows = log_mod.query.timeline(ws, module=args.module,
                                       limit=args.n)
         if not rows:
-            print("[porter] log: 无事件")
+            _log.console_line("[porter] log: 无事件")
             return 0
         for t in rows:
             print(f"{str(t['time'] or '?')[:19]}  "
@@ -944,7 +945,7 @@ def main(argv=None) -> int:
         from porter.loop import routing as _routing
         _warns = _routing.validate_routing(_routing.load_routing())
         for _w in _warns:
-            print(f"[porter] ⚠️ routing 配置: {_w}")
+            _log.console_line(f"[porter] ⚠️ routing 配置: {_w}")
     except Exception:
         pass
 

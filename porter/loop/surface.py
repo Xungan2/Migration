@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..common.symbol import _IDENT, _clean_source, scan_file
+from .. import log as _log
 
 MAX_LOC = 5            # 每符号使用位置上报上限
 
@@ -129,7 +130,7 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
     """
     mdir = ws / "P1" / "modules" / module
     if not (mdir / "module.json").exists():
-        print(f"[porter] P3: 模块不存在 {mdir}")
+        _log.console_line(f"[porter] P3: 模块不存在 {mdir}")
         return {}, 2
     out_dir = ws / "P3" / module / "reports"
     out_path = out_dir / "surface.json"
@@ -138,7 +139,7 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
 
     files = sorted(f for f in mdir.glob("*") if f.suffix in (".c", ".h"))
     if not files:
-        print(f"[porter] P3: 模块 {module} 无源文件")
+        _log.console_line(f"[porter] P3: 模块 {module} 无源文件")
         return {}, 2
 
     defs: set[str] = set()
@@ -228,7 +229,7 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
     out_path.write_text(json.dumps(surface, ensure_ascii=False, indent=2),
                         encoding="utf-8")
     st = surface["stats"]
-    print(f"[porter] P3: {module} 使用面——外部 {st['external']}"
+    _log.console_line(f"[porter] P3: {module} 使用面——外部 {st['external']}"
           f"（跨模块 {st['cross_module']} / 已映射 {st['mapped']}"
           f" / 缺失 {st['missing']} / 噪音 {st['noise']}）→ {out_path}")
     return surface, 0

@@ -21,6 +21,7 @@ from pathlib import Path
 from ..common import agent
 from . import extract_spine
 from . import kb
+from .. import log as _log
 
 BATCH_SIZE = 35          # 每批符号上限（32K 教训：小批次；输出帽已抬至 128K）
 MAX_TRIES = 3            # 每批：首发 + 带反馈重试 2 次
@@ -294,9 +295,9 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         have = {e["linux_api"] for e in mapping["entries"]}
         todo = [s for s in syms if s not in have]
         if not todo:
-            print(f"[porter] P2a: 批 {dom_key}（{len(syms)} 符号）已全映射——跳过")
+            _log.console_line(f"[porter] P2a: 批 {dom_key}（{len(syms)} 符号）已全映射——跳过")
             continue
-        print(f"[porter] P2a: 映射批 {dom_key}——{len(todo)}/{len(syms)} 待映射")
+        _log.console_line(f"[porter] P2a: 映射批 {dom_key}——{len(todo)}/{len(syms)} 待映射")
         feedback = ""
         base = _prompt_map(skill, driver_root, target_os, dom_key, todo,
                            mods, [s for s in syms if s in have][:10], cat)
@@ -342,16 +343,16 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         covered = {e["linux_api"] for e in mapping["entries"]}
         if [s for s in todo if s not in covered]:
             failed.append(dom_key)
-            print(f"[porter] P2a: 批 {dom_key} {MAX_TRIES} 次后仍有缺口——"
+            _log.console_line(f"[porter] P2a: 批 {dom_key} {MAX_TRIES} 次后仍有缺口——"
                   f"登记失败，继续")
         else:
-            print(f"[porter] P2a: 批 {dom_key} 完成（累计 "
+            _log.console_line(f"[porter] P2a: 批 {dom_key} 完成（累计 "
                   f"{len(mapping['entries'])} 条）")
         _save(mapping, p2)      # 每批 checkpoint：中断重启不重付已完成批
 
     # 类型 B：换思路 + 接线（幂等：已存在则跳过）
     if not mapping["redesigns"] and not mapping["wiring"]:
-        print("[porter] P2a: 换思路裁定 + 接线清单（类型 B）")
+        _log.console_line("[porter] P2a: 换思路裁定 + 接线清单（类型 B）")
         parsed = None
         for attempt in range(1, MAX_TRIES + 1):
             parsed = _call_agent(_prompt_redesign(skill, driver_root,
@@ -370,10 +371,10 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
                        if (p := _check_evidence(w.get("evidence", ""),
                                                 target_os))]
             if ev_errs:
-                print(f"[porter] P2a: ⚠ wiring evidence 问题：{ev_errs}")
+                _log.console_line(f"[porter] P2a: ⚠ wiring evidence 问题：{ev_errs}")
         else:
             failed.append("(redesign/wiring)")
-            print("[porter] P2a: 类型 B 调用失败——登记，继续")
+            _log.console_line("[porter] P2a: 类型 B 调用失败——登记，继续")
 
     _save(mapping, p2)
 
@@ -404,7 +405,7 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     ]
     (p2 / "reports" / "mapping_report.md").write_text(
         "\n".join(rpt) + "\n", encoding="utf-8")
-    print(f"[porter] P2a: 映射完成——{len(ents)} 条 → mapping.json/md；"
+    _log.console_line(f"[porter] P2a: 映射完成——{len(ents)} 条 → mapping.json/md；"
           f"报告 → {p2 / 'reports' / 'mapping_report.md'}")
 
     # 知识沉淀草稿（增量：P2 末首个点，此后每轮 P3(M) 末随 run_map 刷新）
@@ -412,5 +413,5 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         from . import knowledge as kn
         kn.draft_knowledge(ws)
     except Exception as e:      # 沉淀失败不影响映射主流程（仿 P1S 模式）
-        print(f"[porter] P2a: ⚠️ 知识草稿失败（不影响映射）：{e}")
+        _log.console_line(f"[porter] P2a: ⚠️ 知识草稿失败（不影响映射）：{e}")
     return 1 if failed else 0

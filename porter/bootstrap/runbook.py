@@ -19,6 +19,7 @@ import json
 from pathlib import Path
 
 from . import kb
+from .. import log as _log
 
 
 def _load(p: Path):
@@ -112,6 +113,6 @@ def draft_runbook(ws: Path) -> int:
     idx.extend(rows)
     kb.save_index(rdir, idx)
     if rows:
-        print(f"[porter] runbook 知识: 草稿已刷新 knowledge/temp/runbook/"
+        _log.console_line(f"[porter] runbook 知识: 草稿已刷新 knowledge/temp/runbook/"
               f"{target}/（{len(rows)} 主题）")
     return 0

@@ -18,6 +18,7 @@ from pathlib import Path
 
 from ..common import agent
 from . import probe as probe_mod
+from .. import log as _log
 
 MAX_AUTO_ROUNDS = 3
 
@@ -123,7 +124,7 @@ def _write_questions(ws: Path, rounds: list[dict], probes: list[list[dict]]) -> 
                       "- 完整日志见 P0/logs/ 下对应文件", ""]
     (p0 / "reports").mkdir(parents=True, exist_ok=True)
     (p0 / "reports" / "human_questions.md").write_text("\n".join(lines), encoding="utf-8")
-    print(f"[porter] T3: 人工问题已生成 {p0/'reports'/'human_questions.md'}（{n} 问）")
+    _log.console_line(f"[porter] T3: 人工问题已生成 {p0/'reports'/'human_questions.md'}（{n} 问）")
 
 
 # ---------- 探测（顺序依赖，全绿为过） ----------
@@ -160,7 +161,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     (p0 / "reports").mkdir(exist_ok=True)
     runner_path = ws / "runner.json"
     if runner_path.exists():
-        print(f"[porter] T3: 复用 {runner_path}")
+        _log.console_line(f"[porter] T3: 复用 {runner_path}")
         return 0
 
     skill = agent.load_skill("P0-env-extract")
@@ -207,17 +208,17 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             workdir=p0, log_stem=str(p0 / "logs" / "T3_R4"), timeout_sec=900)
         parsed = agent.extract_json(out) if rc == 0 else None
         if not parsed or not parsed.get("runner"):
-            print("[porter] T3: R4 输出无法解析——请检查 answers.md 后重跑")
+            _log.console_line("[porter] T3: R4 输出无法解析——请检查 answers.md 后重跑")
             return 1
         defects = validate_runner(parsed["runner"])
         if defects:
-            print(f"[porter] T3: R4 runner 仍有契约缺陷: {defects}")
+            _log.console_line(f"[porter] T3: R4 runner 仍有契约缺陷: {defects}")
             return 1
         probes = _run_probes(ws, target_os, parsed["runner"], categories, 4)
         if all(p["ok"] for p in probes):
             _finish(ws, parsed, probes)
             return 0
-        print(f"[porter] T3: R4 终测仍未全绿——见 P0/reports/T3_probes_R4.json")
+        _log.console_line(f"[porter] T3: R4 终测仍未全绿——见 P0/reports/T3_probes_R4.json")
         return 1
 
     # ---- R1..R3：自动循环 ----
@@ -253,14 +254,14 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             json.dumps(parsed, ensure_ascii=False, indent=2), encoding="utf-8")
 
         if prev_defects:
-            print(f"[porter] T3: R{round_no} 契约缺陷（作为反馈进下一轮）: "
+            _log.console_line(f"[porter] T3: R{round_no} 契约缺陷（作为反馈进下一轮）: "
                   f"{prev_defects}")
             rounds_probes.append([])
             continue
         probes = _run_probes(ws, target_os, parsed["runner"], categories, round_no)
         rounds_probes.append(probes)
         all_ok = len(probes) == 3 and all(p["ok"] for p in probes)
-        print(f"[porter] T3: R{round_no} 探测 "
+        _log.console_line(f"[porter] T3: R{round_no} 探测 "
               f"{'/'.join(p['item'] + '=' + ('P' if p['ok'] else 'F') for p in probes)}")
         if all_ok:
             _finish(ws, parsed, probes)
@@ -282,7 +283,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             {"field": "answers", "type": "text", "required": True,
              "hint": "逐题编号作答（自由文本，全文注入 R4 agent prompt）"}],
     })
-    print("[porter] T3: 3 轮自动提取未完成 → 请按表单作答后重跑（exit 3）")
+    _log.console_line("[porter] T3: 3 轮自动提取未完成 → 请按表单作答后重跑（exit 3）")
     return 3
 
 
@@ -298,12 +299,12 @@ def _finish(ws: Path, parsed: dict, probes: list[dict]) -> None:
         json.dumps({"kind": "development", "results": probes,
                     "hard_gate_pass": True}, ensure_ascii=False, indent=2),
         encoding="utf-8")
-    print(f"[porter] T3: runner.json 就绪（reviewed=false）+ 探测全绿")
+    _log.console_line(f"[porter] T3: runner.json 就绪（reviewed=false）+ 探测全绿")
     if parsed.get("missing"):
         # 探测金标准已过：剩余 missing 为非阻塞确认项。
         # 备忘降级（审计 H20/设计 memo 类）：只进独立 memo 文件 + events，
         # 永不写 questions 文件（防覆盖阻塞问题）。
-        print(f"[porter] T3: ⚠️ 通过，但 agent 声明 {len(parsed['missing'])} 项"
+        _log.console_line(f"[porter] T3: ⚠️ 通过，但 agent 声明 {len(parsed['missing'])} 项"
               f"非阻塞不确定项（已记入 P0/reports/memo.md 供有空确认）")
         lines = ["# 非阻塞确认项（探测已全绿，仅备忘）", ""]
         for m in parsed["missing"]:

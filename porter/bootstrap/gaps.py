@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 
 from . import kb
+from .. import log as _log
 
 _API_SAFE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -134,7 +135,7 @@ def draft_gaps(ws: Path) -> int:
     idx.extend(rows)
     kb.save_index(gdir, idx)
     if rows:
-        print(f"[porter] gaps 知识: 草稿已刷新 knowledge/temp/gaps/{ns}/"
+        _log.console_line(f"[porter] gaps 知识: 草稿已刷新 knowledge/temp/gaps/{ns}/"
               f"（{len(rows)} 个 API；含 fill 结果 {sum(1 for a in decisions if a in fills)} 条）")
     return 0
 

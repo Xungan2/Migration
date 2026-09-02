@@ -15,6 +15,7 @@ import json
 from pathlib import Path
 
 from .extract import validate_runner
+from .. import log as _log
 
 
 def run_gate(ws: Path) -> bool:
@@ -23,7 +24,7 @@ def run_gate(ws: Path) -> bool:
     # 1. project.json 完整性
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print("[porter] gate: project.json 缺失")
+        _log.console_line("[porter] gate: project.json 缺失")
         return False
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     checks.append(("project.json 完整",
@@ -93,6 +94,6 @@ def run_gate(ws: Path) -> bool:
     (p0 / "reports").mkdir(parents=True, exist_ok=True)
     (p0 / "reports" / "p0_report.md").write_text(
         "\n".join(lines), encoding="utf-8")
-    print(f"[porter] T5: 门禁 {'通过' if passed else '未通过'}"
+    _log.console_line(f"[porter] T5: 门禁 {'通过' if passed else '未通过'}"
           f"（详见 {p0/'reports'/'p0_report.md'}）")
     return passed

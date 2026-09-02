@@ -23,6 +23,7 @@ from pathlib import Path
 from ..common import agent
 from . import fragments as frag_mod
 from ..common.symbol import scan_module_dir
+from .. import log as _log
 
 MAX_ROUNDS = 3
 
@@ -350,7 +351,7 @@ def run_resolve(ws: Path, driver_root: Path,
     p1 = ws / "P1"
     plan_path = p1 / "reports" / "P1D_plan.json"
     if not plan_path.exists():
-        print(f"[porter] P1R: 缺少 {plan_path}（先跑 p1-divide）")
+        _log.console_line(f"[porter] P1R: 缺少 {plan_path}（先跑 p1-divide）")
         return 2
     (p1 / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -359,7 +360,7 @@ def run_resolve(ws: Path, driver_root: Path,
         tpl = STRATEGY_PROMPT_PATH.read_text(encoding="utf-8")
         strategy_block = tpl.replace("{strategy_path}", str(spath.resolve()))
     else:
-        print(f"[porter] P1R: 未找到策略文件 {spath}，prompt 不注入策略导读")
+        _log.console_line(f"[porter] P1R: 未找到策略文件 {spath}，prompt 不注入策略导读")
         strategy_block = ""
 
     skill = agent.load_skill("P1-resolve")
@@ -368,7 +369,7 @@ def run_resolve(ws: Path, driver_root: Path,
     for rnd in range(1, MAX_ROUNDS + 1):
         g = _build_graph(ws)
         cycles = _find_cycles(g["edges"])
-        print(f"[porter] P1R: 第 {rnd} 次扫描——{len(g['edges'])} 个模块有出边，"
+        _log.console_line(f"[porter] P1R: 第 {rnd} 次扫描——{len(g['edges'])} 个模块有出边，"
               f"{len(cycles)} 个环，重复符号 {len(g['dup'])}")
         if not cycles:
             order = _topo_order(g["edges"])
@@ -384,10 +385,10 @@ def run_resolve(ws: Path, driver_root: Path,
             (p1 / "modules" / "deps.json").write_text(
                 json.dumps(deps, ensure_ascii=False, indent=2),
                 encoding="utf-8")
-            print(f"[porter] P1R: 无环 ✅ 拓扑序落盘 P1/modules/deps.json")
-            print(f"[porter] P1R: 迁移序: {' → '.join(order)}")
+            _log.console_line(f"[porter] P1R: 无环 ✅ 拓扑序落盘 P1/modules/deps.json")
+            _log.console_line(f"[porter] P1R: 迁移序: {' → '.join(order)}")
             if g["dup"]:
-                print(f"[porter] P1R: ⚠️ {len(g['dup'])} 个重复定义符号"
+                _log.console_line(f"[porter] P1R: ⚠️ {len(g['dup'])} 个重复定义符号"
                       f"（所有权按 .c 侧，详见 deps.json）")
             return 0
 
@@ -402,19 +403,19 @@ def run_resolve(ws: Path, driver_root: Path,
         parsed = agent.extract_json(out) if rc == 0 else None
         moves = (parsed or {}).get("moves")
         if moves is None:
-            print(f"[porter] P1R: 第 {rnd} 轮输出无法解析为 moves JSON"
+            _log.console_line(f"[porter] P1R: 第 {rnd} 轮输出无法解析为 moves JSON"
                   f"（见 P1/logs/P1R_R{rnd}.log）")
             continue
 
         old_plan = json.loads(plan_path.read_text(encoding="utf-8"))
         new_plan, errs = _apply_moves(old_plan, moves)
         if errs:
-            print(f"[porter] P1R: 第 {rnd} 轮搬运校验未过：")
+            _log.console_line(f"[porter] P1R: 第 {rnd} 轮搬运校验未过：")
             for e in errs:
                 print(f"  - {e}")
             continue
         if not _conservation(old_plan, new_plan):
-            print(f"[porter] P1R: 第 {rnd} 轮守恒校验失败（片段集变化）——丢弃")
+            _log.console_line(f"[porter] P1R: 第 {rnd} 轮守恒校验失败（片段集变化）——丢弃")
             continue
         # 保存轮次审计 + 应用
         (p1 / "reports" / f"P1D_plan_R{rnd}.json").write_text(
@@ -425,13 +426,13 @@ def run_resolve(ws: Path, driver_root: Path,
         try:
             frag_mod.extract_modules(ws, driver_root, new_plan)
         except frag_mod.DivideError as e:
-            print(f"[porter] P1R: 搬运后重抽取失败（回滚本轮 plan）：\n{e}")
+            _log.console_line(f"[porter] P1R: 搬运后重抽取失败（回滚本轮 plan）：\n{e}")
             plan_path.write_text(json.dumps(old_plan, ensure_ascii=False,
                                             indent=2), encoding="utf-8")
             frag_mod.extract_modules(ws, driver_root, old_plan)
             continue
         history.append({"round": rnd, "moves": moves})
-        print(f"[porter] P1R: 第 {rnd} 轮应用 {len(moves)} 条搬运，"
+        _log.console_line(f"[porter] P1R: 第 {rnd} 轮应用 {len(moves)} 条搬运，"
               f"重新抽取完成")
 
     # 人工升级（统一 panic 关口：gates 账本 + 渲染）
@@ -461,5 +462,5 @@ def run_resolve(ws: Path, driver_root: Path,
             {"field": "ack", "type": "text", "required": True,
              "hint": "人工编辑 P1D_plan.json 完成后填 done（或其他说明）"}],
     })
-    print(f"[porter] P1R: {MAX_ROUNDS} 轮未解环 → 人工介入（exit 3）")
+    _log.console_line(f"[porter] P1R: {MAX_ROUNDS} 轮未解环 → 人工介入（exit 3）")
     return 3

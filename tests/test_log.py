@@ -96,6 +96,19 @@ class LogCoreTest(unittest.TestCase):
         out, _ = _cap(LOG.record, "normal", summary="x", scope="P4")
         ok("A10 默认阈值放行", out == "[porter] P4: x\n")
 
+    def test_a_console_line(self):
+        """print 扫尾通路：整行直打 byte 兼容 + 级别门控。"""
+        EV.bind(self.ws, "p6")
+        out, _ = _cap(LOG.console_line,
+                     "[porter] P6: 多行\nf-string 转换后 逐字兼容")
+        ok("A11 console_line 逐字",
+           out == "[porter] P6: 多行\nf-string 转换后 逐字兼容\n")
+        ok("A12 console_line 不落盘",
+           ST.read_events(self.ws) == [])
+        os.environ["PORTER_LOG_LEVEL"] = "error"
+        out, r = _cap(LOG.console_line, "[porter] x: 被门控")
+        ok("A13 级别门控", out == "" and r is False)
+
     def test_b_ctx_precedence(self):
         EV.bind(self.ws, "p5")
         with LOG.ctx(phase="p4", module="rx-ring", attempt=2):

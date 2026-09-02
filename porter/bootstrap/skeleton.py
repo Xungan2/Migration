@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
+from .. import log as _log
 
 # 默认设备 ID：QEMU `-device e1000` = 82540EM（P1 strategy §6.5 收敛决策，
 # 对 QEMU 验证无影响；--device-ids 可覆盖）
@@ -323,7 +324,7 @@ def run_skeleton(ws: Path, target_os: Path,
     p2 = ws / "P2"
     manifest_path = p2 / "reports" / "skeleton_manifest.json"
     if manifest_path.exists():
-        print(f"[porter] P2b: 复用骨架（{manifest_path} 存在；如需重做"
+        _log.console_line(f"[porter] P2b: 复用骨架（{manifest_path} 存在；如需重做"
               f"请删除该文件并还原目标树接线改动）")
         return 0
 
@@ -385,10 +386,10 @@ def run_skeleton(ws: Path, target_os: Path,
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False,
                                         indent=2), encoding="utf-8")
-    print(f"[porter] P2b: 骨架生成完成——新建 {len(created)} 文件，"
+    _log.console_line(f"[porter] P2b: 骨架生成完成——新建 {len(created)} 文件，"
           f"接线变更 {len([c for c in changes if not c.startswith('⚠')])} 项")
     for c in changes:
         print(f"    {c}")
     if any(c.startswith("⚠") for c in changes):
-        print("[porter] P2b: ⚠ 存在锚点漂移（见上）——验收若失败先查此处")
+        _log.console_line("[porter] P2b: ⚠ 存在锚点漂移（见上）——验收若失败先查此处")
     return 0

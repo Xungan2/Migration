@@ -23,6 +23,7 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from .. import log as _log
 
 PATCH_STATUSES = {"planned", "proposed", "closed"}
 
@@ -204,7 +205,7 @@ def _last_execution_verdict(ws: Path) -> dict | None:
 def run_p7(ws: Path) -> int:
     proj = _load(ws / "project.json")
     if not proj:
-        print("[porter] P7: 缺 project.json（先跑 p0）")
+        _log.console_line("[porter] P7: 缺 project.json（先跑 p0）")
         return 2
     target_os = Path(proj["target_os"])
     driver = Path(proj["linux_driver"]).name
@@ -260,8 +261,8 @@ def run_p7(ws: Path) -> int:
     (rp / "final_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     _write_md(ws, rp / "final_report.md", report)
-    print(f"[porter] P7: 聚合完成 → {rp / 'final_report.json'}")
-    print(f"[porter] P7: 模块 {report['pipeline']['phase_done']}"
+    _log.console_line(f"[porter] P7: 聚合完成 → {rp / 'final_report.json'}")
+    _log.console_line(f"[porter] P7: 模块 {report['pipeline']['phase_done']}"
           f"/{report['pipeline']['modules_total']} done（skip "
           f"{skipped}），crate {report['crate']['files']} 文件"
           f"/{report['crate']['lines']} 行/{report['crate']['ktests']} ktest，"
@@ -328,18 +329,18 @@ def run_p7_cli(ws: Path, patch_register: str | None = None,
     if patch_register:
         try:
             e = register_patch(ws, patch_register, title, rationale, doc)
-            print(f"[porter] P7: 补丁登记 {e['gap']}（proposed，文档 "
+            _log.console_line(f"[porter] P7: 补丁登记 {e['gap']}（proposed，文档 "
                   f"{e['doc']}）")
             return 0
         except ValueError as ex:
-            print(f"[porter] P7: {ex}")
+            _log.console_line(f"[porter] P7: {ex}")
             return 1
     if patch_status:
         try:
             e = set_patch_status(ws, patch_status, status_to, doc, note)
-            print(f"[porter] P7: 补丁 {e['gap']} → {e['status']}")
+            _log.console_line(f"[porter] P7: 补丁 {e['gap']} → {e['status']}")
             return 0
         except ValueError as ex:
-            print(f"[porter] P7: {ex}")
+            _log.console_line(f"[porter] P7: {ex}")
             return 1
     return run_p7(ws)
