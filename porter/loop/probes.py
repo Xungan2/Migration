@@ -297,9 +297,9 @@ def _log_face(ws: Path, phase_ws: Path, runner: dict, target_os: Path,
               reprobe) -> tuple[bool, str, str]:
     """日志面公共语义：missing → 有界复探一次 → 仍缺 → infra 关口。
 
-    复探吸收瞬时抖动（幂等安全，约一个 boot 的代价）——这是 §15 bypass
-    后对"infra 回路幂等重跑不计 attempts"能力的一小块补偿。
-    empty → 判定照常 + event 标注（两种根因假设交给人/后续分诊）。
+    复探吸收瞬时抖动（幂等安全，约一个 boot 的代价）。
+    empty → 判定照常 + event 标注（两种根因假设——判据 FAIL 后由
+    错误处理模块求解循环接手，知识面见 failures 域 empty-boot-log）。
     """
     ok, log, state = first
     if state == "missing":

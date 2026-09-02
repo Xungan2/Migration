@@ -67,7 +67,7 @@ porter gate review --output-dir <工作区>           # 生成批量审阅材料
 | **快照** | 判定失败瞬间的现场抢救（日志/判据状态/镜像哈希，不可变） | 人答关口时有证据可看，不是只有问题 |
 | **聚类检测** | 同一关口反复触发（≥3 次）时提示"该升检查点/写规则" | 让车道划分随实战自我校正 |
 | **指纹绑定** | 批准类答案附带所审文件的哈希，文件一改批准自动失效 | 杜绝"旧批准一直放行新内容" |
-| **§15 bypass** | 失败自诊（triage 分诊 + diagnose 诊断）整体旁路，config 开关默认关 | 该块未达质量预期，用户决策先旁路待重设计 |
+| **错误处理熔断（self_diagnosis）** | 错误处理模块求解循环的总开关兼熔断，config 开关默认开 | 重设计后直接生效（2026-09-03）；关 = 回退旧人工路径（p5 rc 1 → attempts→panic） |
 
 ---
 
@@ -162,7 +162,7 @@ verdict: approve       # 结清（resolved）
 | `## retry <module>[-p3|-p4|-p5]` | 清零 attempts | 保留（state.py 消费） |
 | `## <linux_api>` | gap 自由文本答案（强制 bypass） | 保留（p3 兼容路径） |
 | `l4_criteria_finalization: approve` 单行 | L4 定稿放行 | 保留（p6 兼容路径） |
-| `diagnosis_escalation: approve` / `b_class_autofix: approve` | §15 审核门 | **休眠**（路径不可达） |
+| `diagnosis_escalation: approve` / `b_class_autofix: approve` | 旧 §15 审核门 | **退役**（重设计后无此路径：criteria 修正走决策债审计、耗尽必停 unsolved 关口） |
 | answers.md 全文自由文本 | T3 环境答案 | 保留（无 @ 节内容时的回退） |
 
 ### 3.3 渲染协议
@@ -195,7 +195,7 @@ deferred.json+criteria.json、loop_state.json、defects.json 等）由应用器
   再走 legacy 兼容路径（retry/api 键），最后推进相位；
 - **agent 无状态**：每次 agent 调用都是单发；重跑时新 agent 的 prompt
   由盘上三块材料重建——①工作区正本状态 ②上一轮情况摘要（gates
-  history + §15 快照 + 升级报告）③人工答案含 rationale；
+  history + 失败快照 + 升级报告）③人工答案含 rationale；
 - **层已消费语义**：相位内已消耗的自动尝试（如 T3 的 3 轮 agent、
   p5 的分诊）记入 history，路由链相应短路（见 3.8 内置默认表）。
 
@@ -209,7 +209,7 @@ deferred.json+criteria.json、loop_state.json、defects.json 等）由应用器
 | FM | loop 首模块 done 后 | cp.fm.\<M\>（一次性：resolved 后永不再停） | 开 | verdict + note："这套模式可否复制给剩余模块" |
 | CP-DEBT | 债限额触达 | cp.debt.\<n\> | 开（限额 30） | approve=批量结清当前债；reject=关口重开逐条处理 |
 | CP3 | loop 完 / p6 | p6.l4.finalize（**绑定草案指纹**） | 开 | 草案由 `p6 --draft-l4` 生成；approve 定稿 |
-| CP4 | p7 入口 | cp4.defect_review | 开（§15 bypass 下无债可审，自然跳过） | 缺陷闭账批审；单条否决 `## @p6.defect.fix.<ID>` veto |
+| CP4 | p7 入口 | cp4.defect_review | 开 | 缺陷闭账批审；单条否决 `## @p6.defect.fix.<ID>` veto |
 | CP5 | p7 末 | cp5.promote（memo，非阻塞） | 开 | 晋升提醒 |
 
 **digest**：`checkpoints/<CP>_digest.md`——决策债按 kind 分组表格
@@ -242,7 +242,7 @@ migration.json 跳过——强制重迁须人工清对应切片记录（digest �
 **处置链（开给人之前）**：`panic()` 内先走路由自动应答（3.8，仅
 decision 类）→ 命中则转决策债、返回 0（调用方所在相位据此可续跑：
 run.py 对 rc==3 复查 open_blocking，空则幂等重进）→ 未命中才登记
-open 关口 + §15 快照 + 渲染 + exit 3。
+open 关口 + 失败快照 + 渲染 + exit 3。
 
 **日志面抢占语义（H9 重构）**：`boot_and_log` 系助手返回
 `(ok, log, state)`，state ∈ file/stdout/empty/missing——
@@ -266,8 +266,8 @@ gate_type 分派**：
 
 | 层 | gate_type=decision | gate_type=failure |
 |---|---|---|
-| rules | policy.md（工作区自然语言常备规则，agent 解释、命中留痕 `policy_hits.json` + event） | 相位内 triage 已消费（§15 bypass 下无） |
-| agent | gate-answer skill + **知识库检索**（kb-guide 总纲 + 按关口类型确定性选域注入已审条目目录；答案可附 `kb_consulted` 记 hits；temp 草稿不参与自动应答） | diagnose（§15 bypass 下休眠） |
+| rules | policy.md（工作区自然语言常备规则，agent 解释、命中留痕 `policy_hits.json` + event） | —（失败类由错误处理模块求解循环前置消化，docs/error-handling.md） |
+| agent | gate-answer skill + **知识库检索**（kb-guide 总纲 + 按关口类型确定性选域注入已审条目目录；答案可附 `kb_consulted` 记 hits；temp 草稿不参与自动应答） | —（求解循环含修复+验证，d1 挂载为人手按需入口） |
 | human | 人 | 人 |
 
 **自动应答仅作用于 kind=decision**（fact 的 agent 层已消耗于相位内、
@@ -303,24 +303,28 @@ human 且非全自动点），不阻塞（回落内置默认）。
 ### 3.9 观测协议
 
 **events.jsonl + 快照**（log 子系统 `porter/log/`，经 `loop/events.py`
-兼容门面；§15 bypass 不受控、保留；规范见 docs/log.md）。
+兼容门面；观测不受熔断控制、保留；规范见 docs/log.md）。
 子系统写入的事件类型：`gate-auto-answered`（路由自动应答）、
 `policy-hit`（规则命中 + 遥测 policy_hits.json）、`gate-veto`、
 `gate-cluster`（聚类）、`boot-log-missing` / `boot-log-empty`
-（日志面三态）、`memo`、`gate-cluster`；§15 内部的 `triage` /
-`escalation` / `snapshot` 在 bypass 下不产生。
+（日志面三态）、`memo`、`gate-cluster`；错误处理模块的
+`errorloop_round/_end` / `escalation` / `snapshot` 族见
+docs/error-handling.md §6。
 
-**§15 bypass 边界**（`self_diagnosis.enabled=false`，默认）：
-triage+diagnose 休眠（p5 失败不分诊直接走 attempts→panic；p6 红项
-直接进 verdict）；`--defect-diagnose` / `--defect-fix` 入口 rc 2；
-`PORTER_SELF_DIAGNOSIS=1` 强制开（存量测试用）。
+**§15 → 错误处理模块边界**（`self_diagnosis.enabled`，缺省 true——
+2026-09-03 重设计后直接生效）：p5/p6 失败与 d1 缺陷走求解循环
+（≤3 轮，知识辅助 + 双信号复验 + 同签名早退）；耗尽终态停
+`p5.unsolved.<M>` / `p6.unsolved` / `d1.unsolved.<did>` 关口（attempts
+在求解挂载点退役）。熔断关（enabled=false）回退旧人工路径；
+`PORTER_NO_AGENT=1` = 降级档（只出报告+关口）。规范见
+docs/error-handling.md。
 
 ### 3.10 关口 ID 命名规范与全目录
 
 **命名**：`<相位>.<种类>.<范围>.<主题>`，点分段、小写、稳定
 （前缀即路由特异性键）。
 
-**现存目录（21 个，截至本文撰写）**：
+**现存目录（23 个，2026-09-03 更新）**：
 
 panic 车道（12）：
 
@@ -337,11 +341,14 @@ panic 车道（12）：
 | loop.budget.\<M\> | retry/failure | [human] | note |
 | p5.deferred.\<M\>.\<id\> | decision/deferred | [rules, agent, human] | verdict(fix-criterion/fix-code)/new_expr |
 | infra.boot_no_log | retry/failure | —（抢占型） | note |
-| p6.escalation.\<did\> | approval | — | verdict（**§15 休眠**） |
+| p5.unsolved.\<M\> | retry/failure | —（求解耗尽停人） | note（重进 P5；attempts 已退役） |
+| p6.unsolved | retry/failure | —（求解耗尽停人） | note（重跑 --execute） |
+| d1.unsolved.\<did\> | retry/failure | —（d1 求解耗尽停人） | note（人工修后 --defect-close 或重跑） |
 
 checkpoint 车道（9）：cp0.runner_review（memo）、cp1.strategy、
 cp2.mapping_review、cp.fm.\<M\>、cp.debt.\<n\>、p6.l4.finalize、
-p6.defect.fix.\<did\>（**§15 休眠**）、cp4.defect_review、
+p6.defect.fix.\<did\>（求解闭账债，CP4 批审——d1 求解循环在产）、
+cp4.defect_review、
 cp5.promote（memo）。
 
 ---
@@ -370,8 +377,8 @@ cp5.promote（memo）。
 | loop/run.py | attempts/budget panic；rc==3 复查 open_blocking（空→续跑）；债限额软停 `_debt_checkpoint`；结算 `_settle_debt_checkpoint`；FM 检查点；全完→CP3 指针 |
 | loop/p3.py | gap human 关口（`_panic_gap_gates`）；register-fill 分类层转 human；双协议答案消费 |
 | loop/p4.py | blocked 立即停（rc 3）；同签名检测；fill/冒烟的日志面抢占 |
-| loop/p5.py | deferred 关口；`_judge_core` 返回 log_state、missing 抢占 rc 3；§15 bypass 断路 |
-| loop/p6.py | L4 finalize 审批关口（指纹绑定+刷新）；draft_l4 生成器；fix_defect（§15 守卫）；execute 红项 guard + 抢占；escalation 关口 |
+| loop/p5.py | deferred 关口；`_judge_core` 返回 log_state、missing 抢占 rc 3；求解循环挂载①（`_solve_failures`）+ `p5.unsolved.<M>` 关口 |
+| loop/p6.py | L4 finalize 审批关口（指纹绑定+刷新）；draft_l4 生成器；`_execute_judge` 判定核心 + 求解挂载②（`p6.unsolved`）；d1 挂载③（diagnose_defect = 求解 + 闭账 + CP4 债；fix_defect 重定向垫片） |
 | loop/probes.py | `_recover_boot_log`（三态）、`_log_face`（复探+panic）、空日志标注；生命周期 missing 抢占 |
 | env/extract.py、env/category.py、divide/resolve.py | T3/T2/解环关口 |
 
@@ -379,11 +386,10 @@ cp5.promote（memo）。
 
 ```json
 {
-  "self_diagnosis": {"enabled": false},          // §15 总开关
+  "self_diagnosis": {"enabled": true},           // 错误处理熔断（缺省开）
   "review_gates": {"l4_criteria_finalization": "human",
-                   "strategy_review": "human",
-                   "diagnosis_escalation": "agent",   // §15 休眠中
-                   "b_class_autofix": "agent"},       // §15 休眠中
+                   "strategy_review": "human"},      // diagnosis_escalation/
+                                                   // b_class_autofix 已退役
   "routing": {
     "default": ["rules", "agent", "human"],
     "gates": {"p0.t5.env_gate": ["human"], "…": "…"},
@@ -413,10 +419,10 @@ CLI 是便利层——协议本体是"账本 + answers.md"，纯文件操作完�
 | tests/test_gates.py | 3.1-3.4（账本/答案解析校验/应用器/渲染/panic 幂等） |
 | tests/test_s3_checkpoints.py | 3.6（digest/veto 回滚/CP1 指纹/CP2 开关/FM 一次性） |
 | tests/test_s4_routing.py | 3.8（层链/两级合并/自动应答三结局/债收窄） |
-| tests/test_s5_automation.py | draft-l4 / fix-defect（后者需 §15 开） |
-| tests/test_s15_bypass.py | 3.9（开关/入口守卫/p5 快速断路） |
+| tests/test_s5_automation.py | draft-l4 / d1 求解闭账（D/E） |
+| tests/test_s15_bypass.py | 3.9（开关缺省开/熔断守卫/降级档） |
 | tests/test_loop_state.py | 3.5/3.7（烧穿→关口→retry 恢复全链） |
-| tests/test_mounts.py / test_replay.py / test_p6.py | §15 强制开的存量行为 + 新关口断言 |
+| tests/test_mounts.py / test_replay.py / test_p6.py / test_errorloop.py / test_diagnose.py | 错误处理模块：挂载端到端 + 六案例回归基线 + 循环核心 + 报告面（docs/error-handling.md §8） |
 
 ---
 
@@ -426,10 +432,10 @@ CLI 是便利层——协议本体是"账本 + answers.md"，纯文件操作完�
    跳过——需要强制重迁的片须人工清除对应记录（digest 已注明）；
 2. **工作区覆写范围**：`routing.json` 仅覆写 routing.gates/default；
    checkpoints / policy_file / panic 阈值只认仓级配置（TODO 第 1 条）；
-3. **§15 休眠面**：triage.py 的 b_class 与 diagnose.py 的 escalation
-   两处 legacy md 写盘**不可达但未收编**——§15 重启用时须先转账本
-   （TODO 第 3 条）；`p6.defect.fix.*` / `p6.escalation.*` 关口在
-   bypass 下不会产生；
+3. **错误处理债审计面**：criteria 修正债（`<source>.criteria-fix.*`）与
+   求解闭账债（`p6.defect.fix.*`）均为非阻塞 checkpoint 条目——只进
+   CP digest 批审，不即时打扰；量尺作弊的兜底 = 证据门槛前置 +
+   阶末审计（docs/error-handling.md §3）；
 4. **CP2 默认关**：依据 = e2e 实证（无映射人审跑通）+ 下游机器验证
    兜底（探针/编译/判据会逮住错映射）+ 850 条人审成本高；
 5. **infra.boot_no_log 固定 id**：多处触发共用一个关口（re-asked 计数

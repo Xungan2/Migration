@@ -24,22 +24,23 @@ tail_block 上下文接续 API 并接入 P4/ut_verify；`porter log` CLI；
 
 **残余项（后续轮）**：真实 e2e 验证——留待下次真实迁移轮次顺带完成
 （2026-09-03 用户定案）：跑完后用 `porter log tail/timeline/runs` 核验
-新埋桩（prompt 归档 / judge 流 / 界标 / 自动 phase）的现场累积形态
-与体积预期；§15 重设计（第 3 条）时把诊断读路径接到 query API。
+新埋桩（prompt 归档 / judge 流 / 界标 / 自动 phase / **errorloop_round/
+end**）的现场累积形态与体积预期。§15 重设计的读路径已接 query API
+（errorloop 证据组装 + 轮间接续，2026-09-03 落地）。
 
-## 3. §15 失败自诊重设计
+## 3. §15 失败自诊重设计——已完成（2026-09-03）
 
-现状：`self_diagnosis.enabled=false`（整体 bypass，2026-09-02 用户决策
-——该块未做明白）。bypass 的已接受代价：失败无自动分诊 → 走 attempts
-（3 次）→ panic 停给人；`--defect-diagnose` / `--defect-fix` 休眠。
+重设计为**错误处理模块**（docs/error-handling.md 为规范）：知识辅助的
+agent 求解循环（≤3 轮 + 同签名早退 + 双信号复验），三挂载（p5/p6/d1）
++ unsolved 关口（attempts 在挂载点退役）；签名知识入 kb failures 域
+（base+lineage 两级，去硬编码）；报告生成接线到耗尽处；criteria 修正
+撤人工闸改决策债审计；旧机器（triage/diagnose 深诊/--defect-fix/
+skills 三件/failures.md）删除，六案例 fixture 迁移为 test_replay 新
+契约。直接生效（config enabled=true 兼熔断）。
 
-重设计要点：
-- triage 五回路规则的账本化（gates 关口）与去 e1000/QEMU 硬编码；
-- b_class / escalation 门的 legacy md 写盘收编（triage.py:510 /
-  diagnose.py:210 两处，bypass 下不可达，重启用时先转账本）；
-- **空日志/静默控制台回路优先重想**——bypass 后空日志会烧 attempts
-  （probes.py `_note_empty_log` 已按新语义标注两种根因假设）；
-- events 观测层保留不动（见第 2 条的关系）。
+**残余项（后续轮）**：首个真实迁移轮的实测校准——求解判定质量、
+轮数/早退命中分布、kb_consulted 遥测（failures 域命中率）、criteria
+修正债的审计实操（与 TODO #2 e2e 验证同轮顺带）。
 
 ## 4. p6 私有 boot 助手与共享版去重（审计 #19）
 
@@ -57,9 +58,10 @@ extra_env 注入 + ANSI 变体，p6 改调共享版。
 
 问题：静态分类可能不全。已知压力点：方法类教训只能挤 pitfalls
 （标签区分，长期稀释"平台坑"语义）；平台缺口/上游提案知识在
-pitfalls 与工作区 platform_patches 两处漂移；§15 失败签名
-（knowledge/failures.md）是事实上的第六类（域外待归位）。无家可归
-的新知识会被错分或流失。
+pitfalls 与工作区 platform_patches 两处漂移。~~§15 失败签名
+（knowledge/failures.md）是事实上的第六类（域外待归位）~~
+——已解决（2026-09-03）：failures 域归位（base+lineage 两级，
+docs/knowledge.md §3.2）。
 
 要做（后续轮）：
 - 复盘一次真实迁移产生的全部候选，检验五类的实际覆盖度；

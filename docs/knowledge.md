@@ -88,7 +88,7 @@ knowledge/
 ├── <name>/                  # 知识库目录（p0 --kb 指定；git 策略新建时定）
 │   ├── maps/  gaps/  runbook/  splits/strategies/  pitfalls/
 │   └── INDEX.json（每域每分区一份）
-└── failures.md              # §15 失败签名册（域外，原地不动）
+└── base/<域>/ + <name>/<域>/  # 各域含 failures/（失败签名，2026-09-03 归位）
 ```
 
 **命名空间**：temp 跨迁移共享，条目一律按 `<驱动名>@<目标OS名>`
@@ -124,6 +124,7 @@ knowledge/
 | runbook | `runbook/` | 目标 OS 操作手册：构建/启动/单测命令与坑史 | 一主题/一坑一文件 | (target, 环境) |
 | splits | `splits/strategies/` | 拆分策略样例（strategy.md 原样） | 一驱动一文件 | Linux 侧（任意目标可复用→base） |
 | pitfalls | `pitfalls/` | 踩坑记录：平台/模拟器坑与方法教训（条目标签区分） | 一坑一文件 | 跨领域 |
+| failures | `failures/` | 失败签名：症状 → 归责回路 → 建议动作（错误处理求解循环的检索面；细节指针指向 pitfalls） | 一签名一文件 | 跨领域（环境特定签名挂 lineage 分区） |
 
 **加一个域 = 单点改动**：注册表一行 + kb-guide 总纲补一节 + 调用点
 域预选补一行。完备性顾虑与扩展路径见 TODO 第 5 条。
@@ -332,6 +333,7 @@ CP5 检查点（p7 末，memo 非阻塞）生成**知识备审材料**
 | loop/gates.py | 应答收口钩子（applied/veto）；`_apply_gap` rationale 回写 |
 | loop/probes.py | 降级钩子 |
 | loop/routing.py | agent 层 KB 面（仅已审）+ kb_consulted 记账 |
+| loop/errorloop.py | 求解循环 KB 面（failures+pitfalls，轮 1 注入）+ kb_consulted 记账 + 候选回流（solve-loop/escalation 钩子） |
 
 ### 4.3 配置 schema（porter/config.json 的 kb 节）
 
@@ -385,9 +387,11 @@ porter p2-promote --output-dir <ws> --driver <名> [--target <名>]
    TODO 第 9 条；
 6. **base 回流无通道**（TODO 第 8 条）；**taxonomy 完备性**未检验
    （TODO 第 5 条）；
-7. **§15 相关域外**：failures.md 候选区生产源随 bypass 休眠；判据
-   auto_fixed 修正史无生产者——§15 重设计时其产出按第 3.4 节类 3
-   接入即可。
+7. **失败签名已归位**（2026-09-03 §15 重设计）：failures 域为第六
+   域（base=通用逻辑形态 + lineage=环境特定），消费方 = 错误处理模块
+   求解循环（errorloop，docs/error-handling.md）；候选回流走
+   candidates 账（solve-loop / escalation 两钩子）；判据 auto_fixed
+   修正史随决策债进 CP 审计面。
 
 ## 6. 演进方向与"该回头改"的信号
 
@@ -424,14 +428,14 @@ corpus→base 晋升 / CP5 审核细节。
 | 8-9 | fill 成功摘要 / 失败原因 | gaps 域（fill 结果入 API 文件——成败同渠道） |
 | 10 | 切片编译错误反馈 | 类 3 钩子原始留痕（蒸馏归人工） |
 | 11 | 探针验证史 | 结论随 maps notes；判别现场 → 类 3 钩子候选 |
-| 12 | 判据自动修正史 | §15 域外（bypass 休眠；重设计后按类 3 接入） |
+| 12 | 判据自动修正史 | 决策债 resolution + auto_fixed 档案（CP 审计面） |
 | 13 | 缺陷根因链 | 类 2 钩子（close/park 候选） |
-| 14 | 失败签名库 | failures.md（§15 域外，原地不动） |
+| 14 | 失败签名库 | failures 域（base + lineage 两级；候选经 CP5 晋升） |
 | 15 | 平台/模拟器坑 | pitfalls 域（手写保留 + 候选晋升入册） |
 | 16 | 设备行为仲裁源 | refs/（参考数据，不属 KB） |
 | 17 | 拆分策略样例 | base + temp + 知识库目录三分区（机制保留） |
 | 18 | 知识消费遥测 | kb_consulted → hits（全域）+ policy_hits |
-| 19 | §15 观测面 | events.jsonl 保留；新增 kb-candidate 事件 |
+| 19 | 错误处理观测面 | events.jsonl 保留（errorloop_round/end 族） |
 
 ## 附录 B：两条 walkthrough
 

@@ -132,14 +132,16 @@ ref/subject，不反向耦合。
 **存量族（冻结，字段与语义不变）**：agent_start / agent_end /
 cmd_start / cmd_end / snapshot / gate-veto / gate-cluster /
 gate-auto-answered / policy-hit / kb-candidate /
-boot-log-missing / boot-log-empty / memo / l4-draft / triage /
-triage_apply / escalation / diagnose_round / diagnose_round_end
-（后六族在 §15 bypass 下不产生，重启用后恢复）。
+boot-log-missing / boot-log-empty / memo / l4-draft /
+escalation / diagnose_round / diagnose_round_end
+（diagnose_round 族已随 §15 重设计退役——run_diagnosis 被求解循环
+替代，2026-09-03；escalation 保留，改由 errorloop 调用）。
 
 **新增族（snake_case）**：
 
 | kind | 产生点 | 用途 |
 |---|---|---|
+| errorloop_round / errorloop_end | porter/loop/errorloop.py（求解循环每轮/终态） | 错误处理轮次轨迹与结局 |
 | phase_begin / phase_end | run_p3/p4/p5 入口与成功出口 | 时间线界标 |
 | judge | probe_build / probe_boot | 双信号判定证据流 |
 | retry_reset / phase_fail / module_done / bypass_mode / bypass_rejected / bypass_done / parked_remaining / all_done / max_modules_reached / cp3_next / report_written / loop_abort | loop/run.py（print 收编试点） | 循环编排可查询化 |
@@ -236,7 +238,7 @@ console 级别阈值：环境变量 `PORTER_LOG_LEVEL`（debug/info/warn/error�
 |---|---|---|
 | gates（§3.9） | gate-* / policy-hit 事件族 + panic→快照 | 不变 |
 | knowledge（§3.9） | kb-candidate 事件 + CP5 健康报告（读域账本，不读流） | 不变 |
-| §15 重设计（TODO #3） | tail_events / query.events + evidence 的 events_tail + context_block | 预留（bypass 中） |
+| §15 重设计 → 错误处理模块（TODO #3，2026-09-03 落地） | query.events（judge 史/相关事件）+ runs/context_block（轮间接续）+ tail_text/tail_block（prompt 注入） | **已接入**（errorloop 证据组装与轮间上下文） |
 | P4 重试 | tail_block（err_info 构建）+ context_block | 已接入（tail_block；context_block 供跨 run 场景随用随取） |
 | TODO #6 kb_consulted 遥测 | query.events(kind_prefix="gate-auto-answered") 等 | 预留 |
 
