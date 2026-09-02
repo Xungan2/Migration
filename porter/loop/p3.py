@@ -168,6 +168,11 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
                     cons = parsed.get("kb_consulted")
                     if isinstance(cons, list):
                         kb.record_consulted(kb_dir, "maps", cons)
+                    try:
+                        from ..bootstrap import candidates as _cand
+                        _cand.record_lessons(ws, parsed, f"P3A/{dom_key}")
+                    except Exception:
+                        pass
                     got, errs = _validate_entries(parsed["entries"],
                                                    target_os, domain)
                     covered = {e["linux_api"] for e in got}
@@ -280,6 +285,12 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
             cons = parsed.get("kb_consulted")
             if isinstance(cons, list):
                 kb.record_consulted(kb_dir, "gaps", cons)
+            try:
+                from ..bootstrap import candidates as _cand
+                _cand.record_lessons(ws, parsed,
+                                     f"P3G/{module}")
+            except Exception:
+                pass
             decisions = []
             errs = []
             covered = set()

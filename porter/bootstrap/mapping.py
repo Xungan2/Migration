@@ -308,6 +308,11 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
                 cons = parsed.get("kb_consulted")
                 if isinstance(cons, list):
                     kb.record_consulted(kb_dir, "maps", cons)
+                try:
+                    from . import candidates as _cand
+                    _cand.record_lessons(ws, parsed, f"P2A/{dom_key}")
+                except Exception:
+                    pass
                 got, errs = _validate_entries(parsed["entries"], target_os,
                                               dom_key)
                 for e in got:       # 权威域覆盖（防合并批错标）

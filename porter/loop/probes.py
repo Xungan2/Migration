@@ -624,6 +624,19 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     if downgraded:
         _save_mapping(ws, mapping)
         save_registry(registry_path, reg)
+        try:                        # 类 3 钩子：探针降级判别现场 → 候选（B5）
+            from ..bootstrap import candidates as _cand
+            for claim in downgraded:
+                _cand.record_candidate(
+                    ws, hook="probe-downgrade", ref=str(claim),
+                    draft=f"探针主张 {claim} boot 判定 FAIL 降级 gap"
+                          f"（{label} {tag}）——判别材料：探针注册表 "
+                          f"history 与本轮启动日志",
+                    evidence=[str(registry_path)],
+                    suggested="pitfalls",
+                    scope_extra={"module": current_module})
+        except Exception:
+            pass
         sections = collect_sections(ws, order, current_module,
                                     registry_path, kind=kind)
         sync_probes_rs(target_os, driver, sections)

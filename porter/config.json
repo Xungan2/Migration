@@ -33,6 +33,12 @@
     "decision_debt_limit": 30
   },
   "policy_file": "policy.md",
+  "kb": {
+    "candidates": true,
+    "dedup": true,
+    "min_draft_len": 24,
+    "_notes": "随机知识探查：candidates=总开关；dedup=签名去重闸；min_draft_len=过短草稿视为无知识跳过。候选账在 knowledge/temp/candidates/<驱动>@<目标>.json，不进任何注入面"
+  },
   "panic": {
     "same_signature_repeat": 2,
     "cluster_threshold": 3

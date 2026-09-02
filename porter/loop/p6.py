@@ -133,6 +133,15 @@ def close_defect(ws: Path, did: str, root_cause: str, fix: str,
     e["history"].append({"time": _now(), "event": "fixed",
                          "detail": f"根因={root_cause[:120]}"})
     save_defects(ws, d)
+    try:                        # 类 2 钩子：缺陷根因链 → 候选（B11）
+        from ..bootstrap import candidates as _cand
+        _cand.record_candidate(
+            ws, hook="defect-close", ref=did,
+            draft=f"缺陷 {did}（{e.get('title', '')}）根因：{root_cause}"
+                  f"；修复：{fix}；回归证据：{regression_evidence[:200]}",
+            evidence=["defects.json"], suggested="pitfalls")
+    except Exception:
+        pass
     return e
 
 
@@ -145,6 +154,14 @@ def park_defect(ws: Path, did: str, reason: str) -> dict:
     e["history"].append({"time": _now(), "event": "parked",
                          "detail": reason})
     save_defects(ws, d)
+    try:                        # 类 2 钩子：泊车理由 → 候选（平台缺口类）
+        from ..bootstrap import candidates as _cand
+        _cand.record_candidate(
+            ws, hook="defect-park", ref=did,
+            draft=f"缺陷 {did}（{e.get('title', '')}）泊车：{reason}",
+            evidence=["defects.json"], suggested="pitfalls")
+    except Exception:
+        pass
     return e
 
 
@@ -292,6 +309,18 @@ def finalize_l4(ws: Path, cfg: dict | None = None) -> int:
                     encoding="utf-8")
     print(f"[porter] P6: L4 判据定稿完成（{len(ok_items)} 条，"
           f"park {sum(1 for c in ok_items if c['disposition'] == 'park')}）")
+    try:                        # 类 2 钩子：park 理由 → 候选（B12）
+        from ..bootstrap import candidates as _cand
+        for c in ok_items:
+            if c.get("disposition") == "park" and c.get("rationale"):
+                _cand.record_candidate(
+                    ws, hook="l4-park", ref=c["id"],
+                    draft=f"L4 判据 {c['id']}（{c.get('title', '')}）泊车："
+                          f"{c['rationale']}",
+                    evidence=["P6/reports/l4_criteria.json"],
+                    suggested="pitfalls")
+    except Exception:
+        pass
     return 0
 
 

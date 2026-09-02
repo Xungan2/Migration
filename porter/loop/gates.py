@@ -449,6 +449,11 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
                                      summary=detail)
                 except Exception:
                     pass
+                try:                        # 类 1 钩子：veto 理由 → 候选
+                    from ..bootstrap import candidates as _cand
+                    _cand.record_from_gate(ws, gate, ans)
+                except Exception:
+                    pass
             elif verdict in ("approve", "release", "放行", "通过"):
                 resolve_applied(ledger, gate_id, "检查点批审：approve")
             continue
@@ -472,6 +477,11 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
         consumed.add(gate_id)
         applied += 1
         print(f"[porter] gates: 关口已应用 {gate_id}（{resolution[:120]}）")
+        try:                            # 类 1 钩子：note/rationale → 候选
+            from ..bootstrap import candidates as _cand
+            _cand.record_from_gate(ws, gate, ans)
+        except Exception:
+            pass
     ledger.save()
     _remove_gate_sections(ws, consumed)
     return applied, invalid

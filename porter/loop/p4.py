@@ -412,6 +412,22 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                               "ok": ok, "blocked": blocked})
         mig_path.write_text(json.dumps(mig, ensure_ascii=False, indent=2),
                             encoding="utf-8")
+        if ok and attempt >= 2:
+            # 类 3 钩子：切片 FAIL→PASS 翻转——错误→修复原始留痕（B3；
+            # 蒸馏归人工，CP5 审核面处置）
+            try:
+                from ..bootstrap import candidates as _cand
+                _cand.record_candidate(
+                    ws, hook="slice-rework", ref=f"{module}/{f.name}:{start}",
+                    draft=f"切片 {f.name}:{start}-{end} 编译失败后第 "
+                          f"{attempt} 次重试成功（错误尾签名 {sig or '—'}）"
+                          f"——错误与修复对话见 P4/{module}/logs/"
+                          f"MIG_{f.name}_{start}_R1..R{attempt}",
+                    evidence=[f"P4/{module}/logs/"],
+                    suggested="pitfalls",
+                    scope_extra={"module": module})
+            except Exception:
+                pass
         if blocked:
             failures.append({"file": f.name, "start": start, "end": end,
                              "blocked": True})

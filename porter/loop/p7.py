@@ -77,6 +77,16 @@ def register_patch(ws: Path, gap: str, title: str, rationale: str = "",
              "registered": _now()}
     patches.append(entry)
     _save_patches(ws, patches)
+    try:                        # 类 2 钩子：平台补丁提案理由 → 候选
+        from ..bootstrap import candidates as _cand
+        if (rationale or "").strip():
+            _cand.record_candidate(
+                ws, hook="patch-register", ref=gap,
+                draft=f"平台缺口 {gap}（{title}）：{rationale}",
+                evidence=[entry["doc"], "platform_patches.json"],
+                suggested="pitfalls")
+    except Exception:
+        pass
     return entry
 
 
