@@ -4,7 +4,7 @@
 > （agent 建议，**未经人工晋升不得进本表**）；晋升 = 人工把候选改写为
 > 下述条目形态并入册。条目 = 症状特征 + 判别方法 + 所属回路 + 实证案例
 > + 首现排查代价（教训定价，防止"重新破案"）。
-> 素材上游：`knowledge/pitfalls/`（技术坑单页）、defects.json history。
+> 素材上游：知识库目录 pitfalls/（技术坑单页）、defects.json history。
 
 ## 签名库（六案例首批入册）
 
@@ -36,7 +36,7 @@
   timeout 杀掉的 run_kernel。
 - **判别**：boot 日志止于 UFI/BdsDxe 行 + events 有 killed cmd 记录。
 - **回路**：infra → 完整 `make kernel` 一次即愈。
-- **实证**：P6 §16 沉淀③；knowledge/pitfalls/killed-make-halfbuilt-iso.md。
+- **实证**：P6 §16 沉淀③；pitfalls/killed-make-halfbuilt-iso.md（现居知识库目录）。
 - **首现代价**：~30min（P6 会话）。
 
 ### SIG-03 测试期望错 / 判据正则错（criteria）

@@ -49,11 +49,11 @@ driver_migration_tool/
 | 阶段 | 职责 | 状态 |
 |---|---|---|
 | P0 | 开发能力硬门禁（编译/启动/设备挂载）+ 类别识别 + unit_test 烟测（agent 探明单测机制须附 smoke_cmd 并实跑过；门禁真跑复核——机制主张"agent 说"变"机器验"）。设备核心检索（原 T3d）已后移——归入未来"依赖分析补充流程"（约 P1 后，落点随该流程设计确定；现阶段优先驱动代码本体迁移） | ✅ 本仓 |
-| P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 knowledge/splits/strategies/，样例 = strategy.md 产物原样，INDEX.json 路由 + 按需读全文；run_strategy 自动草稿入 temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
+| P1 | ① 拆分策略（agent 读 Linux 源码产出自由 Markdown 策略分析 strategy.md——零 schema 契约，每次人工审阅放行；样例库 base 与知识库目录的 splits/strategies/，样例 = strategy.md 产物原样，INDEX 路由 + 按需读全文；run_strategy 自动草稿入 knowledge/temp/，产出 reports/P1-knowledge.md 价值判定，P1 后人工决定并用 p1-promote 沉淀）② 模块划分与依赖 DAG（策略指导下物理切分）③ MVP 门禁（人工审定范围）。进行中：strategy 已实现并实测 | 进行中 |
 | P2 | **引导映射 + 全局骨架**【一次性】：2a 引导映射（生命周期主轴系统级设施全景：注册枚举/MMIO/DMA/中断/锁上下文/内存设施/子系统对接 7 域 + 换思路裁定 + 接线清单；agent 分批小调用，evidence 源码核实铁律机器化）→ 2b 全局骨架（目标 OS 专属模板：crate + 空 probe + 探针宿舍 + ktest 位 + 栈接线桩 + 全部接线点；零驱动功能）→ **2c 探针预生成**（全模块使用面并集 ∩ 高风险映射 − 已探 claim，≤5 条/批；贵且长寿命的验证前置到流程头部的稳定阶段，P3 探针步骤退化为补新；残余 FAIL 降级 gap 留消费者模块处置）→ 验收（build/boot 双信号 + 组件日志特征 + 无 PROBE FAIL 行） | ✅ 本仓 |
-| P3-P4-P5 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序；方案 A 相位重构：P4=生产、P5=模块级验收）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面四分类：跨模块/已映射/噪音/真缺失 → 只补缺，knowledge/maps 消费侧 INDEX 路由+域过滤注入"仅提示"）→ gap 处置分类（bypass/fill/register-fill/human 四策略）→ 判据草案 criteria.json（strategy §5 机器化，L0-L4；仪式型模块强制组件级假后端判据）→ 高风险探针（≤5 条/批生成，住骨架，runner 双信号判定，FAIL 有界改判）；P4(M) fill 统一阶段（strategy=fill 的平台加法式补齐：新增 API 禁改默认 + 专属探针 + platform_patches.json 登记，失败回退 bypass）→ 迁移（文件×≤900 行切片，映射表作数据注入只翻译不研究；寄存器访问经 trait 抽象，仪式类切片附组件级测试）→ 轮末快速冒烟（compile+boot 防毒化闸门）；P5(M) 模块级验收：L1 build / L2 boot 双信号 / L0 ktest 同场（单测+组件级）/ L3 qemu.log regex + 累积回归（已 done 模块 L0+L3 重跑）+ deferred 登记（消费者落地当轮清偿）→ P5/<M>/reports/acceptance.json（兼容读旧 P4 位置）。人工关口：连续直通，仅 gap human/验收超界/deferred 无法清偿时 exit 3 介入（answers.md 承接；泊车模块可 `--module` 绕行后续独立模块） | ✅ 本仓（e2e-test-retry 16/16 完成） |
+| P3-P4-P5 | **单一垂直循环 ×N**（循环序 = P1 deps.json 拓扑序；方案 A 相位重构：P4=生产、P5=模块级验收）：P3(M) 增量映射（脚本提取 M 的外部 API 使用面四分类：跨模块/已映射/噪音/真缺失 → 只补缺，maps 域知识目录注入"仅提示"（INDEX + agent 自取））→ gap 处置分类（bypass/fill/register-fill/human 四策略）→ 判据草案 criteria.json（strategy §5 机器化，L0-L4；仪式型模块强制组件级假后端判据）→ 高风险探针（≤5 条/批生成，住骨架，runner 双信号判定，FAIL 有界改判）；P4(M) fill 统一阶段（strategy=fill 的平台加法式补齐：新增 API 禁改默认 + 专属探针 + platform_patches.json 登记，失败回退 bypass）→ 迁移（文件×≤900 行切片，映射表作数据注入只翻译不研究；寄存器访问经 trait 抽象，仪式类切片附组件级测试）→ 轮末快速冒烟（compile+boot 防毒化闸门）；P5(M) 模块级验收：L1 build / L2 boot 双信号 / L0 ktest 同场（单测+组件级）/ L3 qemu.log regex + 累积回归（已 done 模块 L0+L3 重跑）+ deferred 登记（消费者落地当轮清偿）→ P5/<M>/reports/acceptance.json（兼容读旧 P4 位置）。人工关口：连续直通，仅 gap human/验收超界/deferred 无法清偿时 exit 3 介入（answers.md 承接；泊车模块可 `--module` 绕行后续独立模块） | ✅ 本仓（e2e-test-retry 16/16 完成） |
 | P6 | 系统验收（全局收口）：**聚合模式**（默认，零重测：acceptance/deferred/判据状态全景 → P6/reports/health.json/.md）+ **执行模式** `--execute`（一轮 build + SLIRP boot + ktest → 全判据重判 + deferred 清偿——P6 为哨兵 `__P6__` 的 owner，读取兼容旧 `P5`/`__P5__`）+ `--l4`（L4 判据判定：驱动内核自测打 `L4 <id> PASS\|FAIL` 行，boot 日志正则判定；判据定稿走 `--finalize-l4` 审核门，porter/config.json 配 agent/human，human 停车等 answers.md 放行）；defects.json 缺陷账本（发现/根因/修复/回归证据四字段强制） | ✅ 本仓（e2e-test-retry 全绿除泊车） |
-| P7 | 终态报告（`p7` 聚合：P0→P6 全产物 + git baseline diff + crate/映射统计 → P7/reports/final_report.json/.md，人工撰写区收口）+ 知识沉淀（p2-promote 映射晋升同名版本替换；knowledge/pitfalls/ 踩坑域）+ 上游补丁提案台账（--patch-register/--patch-status：proposed 附 P7/reports/patches/ 提案文档；存量 planned 评估后 closed 理由入档） | ✅ 本仓（e2e-test-retry 完成） |
+| P7 | 终态报告（`p7` 聚合：P0→P6 全产物 + git baseline diff + crate/映射统计 → P7/reports/final_report.json/.md，人工撰写区收口）+ 知识沉淀（p2-promote 映射晋升同名替换；pitfalls 踩坑域在知识库目录）+ 上游补丁提案台账（--patch-register/--patch-status：proposed 附 P7/reports/patches/ 提案文档；存量 planned 评估后 closed 理由入档） | ✅ 本仓（e2e-test-retry 完成） |
 
 ## 核心设计决策（讨论定稿记录）
 
@@ -92,8 +92,12 @@ python3 porter/main.py p0 \
     --materials     examples/asterinas-materials/notes-build.md \
     --materials     examples/asterinas-materials/notes-device.md \
     --materials     examples/asterinas-materials/ci-snippet.md \
-    --name my-first-port
+    --name my-first-port \
+    --kb            new my-first-port   # 知识库目录（必填显式选择）
 # --materials 可多次且可省略（agent 将仅凭目标 OS 源码树提取）
+# --kb new <名>：新建（缺省复制 base 工具随附知识；--kb-empty 建空目录；
+#   --kb-git ignore 可把该目录加进 .gitignore，缺省 track）
+# --kb use <名>：指定既有目录（如 asterinas）复用；不带 --kb → rc 2
 
 # 产物：
 #   migrations/my-first-port/
@@ -143,10 +147,11 @@ python3 porter/main.py p2-probes --output-dir migrations/my-first-port \
 #   logs/               agent 与验收原始输出
 # 骨架实体文件生成在目标 OS 树（comps/<driver>/ + 接线点改动），
 # 验收 = P0 runner 双信号 + 骨架组件日志特征（manifest 内可查）。
-# 知识沉淀（增量）：p2-map 末自动草稿入 temp/maps/；P2 末（首个沉淀点）
-# 人工审阅 mapping.md 后晋升：
-#   python3 porter/main.py p2-promote --driver e1000 --target asterinas
-# （此后每轮 P3(M) 末自动刷新草稿，可再次晋升——同名=版本更新替换）
+# 知识沉淀（增量）：p2-map 末自动草稿入 knowledge/temp/maps/；P2 末
+# （首个沉淀点）人工审阅 mapping.md 后晋升：
+#   python3 porter/main.py p2-promote --output-dir <ws> --driver e1000 --target asterinas
+# （此后每轮 P3(M) 末自动刷新草稿——含人工路径 exit 3 后；可再次晋升——
+#   同名替换保 hits）
 ```
 
 # P3/P4/P5：垂直循环（须先跑过 p2；断点重入幂等）
@@ -271,6 +276,39 @@ python3 porter/main.py p5 --output-dir migrations/my-first-port [--module M]
 
 所有问题登记进工作区同一份台账（gates.json），你只负责表态，改文件
 由工具代做。完整协议/实现/演进见 docs/human-intervention.md。
+
+## 知识库（运行中生长的经验沉淀）
+
+```
+knowledge/
+├── base/      # 工具随附的一般知识（任意目标 OS 可用；git 跟踪）
+├── temp/      # 草稿区（骨架跟踪，内容 gitignore）——固定域收成 +
+│              # 随机知识候选；agent 可写、未经人审
+└── <name>/    # 一次迁移（或自维语料）的知识库目录；本次迁移的
+               # 知识库 = temp ∪ <name>（p0 时显式指定）
+```
+
+- **五个子目录 = 五种知识分类**：maps（API 映射表）/ gaps（API 缺口
+  处置，一 API 一文件）/ runbook（目标 OS 操作手册）/ splits（拆分
+  策略样例）/ pitfalls（踩坑记录）。
+- **固定知识**（每次必产）：定点收成进 temp（maps 于 P2/P3 末、gaps
+  于 P3 末、runbook 于 p0 末与 P5 回填后、splits 于 P1 末）；
+  **随机知识**（偶发发现）：四类探查钩子（gate 应答/CLI 台账/产物
+  翻转/agent 自报 lessons）→ 候选账（去重闸）。
+- **审核/分类/沉淀**：CP5 批审（材料 checkpoints/CP5_knowledge.md，
+  含 KB 健康报告）→ agent 批量归类（可选）→ `porter kb promote`：
+  ```bash
+  python3 porter/main.py kb --output-dir <ws>                 # 候选清单+材料
+  python3 porter/main.py kb --output-dir <ws> --classify      # agent 批量归类
+  python3 porter/main.py kb --output-dir <ws> --promote all   # 晋升（--to 可改类）
+  ```
+- **检索**：agent 调用点注入"总纲 skill（kb-guide，规则 0：动手前必须
+  先查 INDEX）+ 条目目录（file + 一句话 desc）"，agent 自取全文、
+  须重核实、回报 kb_consulted（记 hits）。路由层替人答关口时同样
+  检索已审知识（temp 草稿不参与自动应答）。
+- **p0 必须显式选知识库目录**：`--kb new <名> [--kb-empty]
+  [--kb-git track|ignore]`（缺省复制 base）或 `--kb use <名>`；
+  不带参数 rc 2。既有实例如 `knowledge/asterinas/`。
 
 ## 横切原则（实现与后续阶段必须遵守）
 
