@@ -105,7 +105,7 @@ python3 porter/main.py p0 \
 #     runner.json           机器可执行命令（待人工审核，reviewed=false）
 #     reports/p0_report.md  门禁结论（人读）
 #     reports/T3_*.json     T3 逐轮输出与探测结果（人工升级路径的历史回放源）
-#     logs/                 agent 与命令原始输出（审计）
+#     logs/                 agent 输入/输出与命令原始输出（成对归档，审计）
 ```
 
 环境变量：`PORTER_MODEL`（默认 `zhipu-ai/glm-5.2`）。
@@ -178,6 +178,9 @@ python3 porter/main.py p5 --output-dir migrations/my-first-port [--module M]
 #                        planned|proposed|closed，closed_note 入档）
 #   human_questions.md   exit 3 人工关口问题（answers.md 承接，被消费节自动移除）
 #   defects.json         P6 缺陷账本（发现/根因/修复/回归证据四字段）
+#   events.jsonl         log 子系统事件流（全部运行信息的结构化流水账；
+#                        porter log tail/timeline 查询，见 docs/log.md）
+#   failure-snapshot-<n>/ 失败现场不可变快照（判据 FAIL/panic 第一时间抢救）
 #   P3/<M>/reports/      surface.json（使用面四分类）/ gap_decisions.json
 #                        （处置分类）/ criteria.json（判据草案）/
 #                        probes.json（探针注册表）/ report.md
@@ -357,6 +360,43 @@ python3 porter/main.py p1-promote --output-dir <ws> --driver e1000
 ```
 
 完整协议/实现/演进见 docs/knowledge.md。
+
+## log（运行记录与排障，一条命令查时间线）
+
+<!-- 给未来 README 重写 session：本节为结构型介绍（记录什么+查什么+
+     agent 上下文接续+操作速查），格式规范（五类文件/kind 注册表/
+     命名/体积纪律/兼容策略）全在 docs/log.md，勿在 README 展开。
+     新增事件 kind 或 CLI 子命令时，下文表格与速查须与
+     docs/log.md 第 4/6 节同步更新。 -->
+
+设计目标一句话：**把"翻目录找日志"变成"查一条结构化时间线"**——
+工具跑的每一步（相位推进 / agent 调用 / 命令执行 / 判定结论 /
+人工介入）都进同一份 append-only 事件流（工作区 events.jsonl）；
+纯静态实现，零 agent 参与。
+
+记录的落点（五类，细节见 docs/log.md）：
+
+| 类 | 载体 | 内容 |
+|---|---|---|
+| 事件流 | events.jsonl | 一切运行信息的结构化流水账（真值源） |
+| 原始日志对 | P\<n\>/logs/ 下 \<STEM\>_R\<n\>.log + .prompt.md | agent/命令完整输出 + agent 输入原文（成对归档） |
+| 快照束 | failure-snapshot-\<n\>/ | 失败现场不可变证据（FAIL 第一时间抢救） |
+| 域账本/报告 | gates.json、policy_hits.json、P\<n\>/reports/ | 域所有；事件流持关联键（ref/subject） |
+| 人读渲染 | console 行 + CLI 视图 | 派生物，永不作真值源 |
+
+### 操作速查
+
+```bash
+porter log --output-dir <ws> tail [--kind K] [--subject S] [-n N]  # 事件尾随（可按相位/模块过滤）
+porter log --output-dir <ws> runs                                  # agent 运行登记（rc/耗时/结局）
+porter log --output-dir <ws> show <run_id>                         # 单次运行：元数据+日志尾+输入头
+porter log --output-dir <ws> timeline [--module M]                 # 浓缩时间线（resume 定位"上次停在哪"）
+```
+
+console 行为 `[porter] <scope>: <text>`；`PORTER_LOG_LEVEL`（debug/
+info/warn/error）可静噪。python 侧查询/上下文接续 API =
+porter.log.query（P4 重试的"上一次构建失败"反馈即经其统一切出）。
+完整规范/实现/演进见 docs/log.md。
 
 ## 横切原则（实现与后续阶段必须遵守）
 
