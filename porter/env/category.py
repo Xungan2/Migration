@@ -48,14 +48,35 @@ def identify_category(linux_driver: Path, workdir: Path,
     parsed = agent.extract_json(out) if rc == 0 else None
 
     if parsed is None or not parsed.get("categories"):
-        # 无法解析或空类别：区分"不是驱动"与"解析失败"
+        # 无法解析或空类别：区分"不是驱动"与"解析失败"——
+        # 均登记 panic 关口（关载体缺失的裸 SystemExit，H24 关联）。
+        from ..loop import gates as gates_mod
         if parsed is not None and parsed.get("confidence") == "none":
-            raise SystemExit(
-                "[porter] T2: 未发现内核驱动注册特征——输入可能不是内核驱动，"
-                "请检查 --linux-driver 路径。证据见 P0/logs/T2_category.log")
-        raise SystemExit(
-            "[porter] T2: 类别识别失败（输出无法解析）。"
-            "请重跑，或用 --category 人工指定。日志: P0/logs/T2_category.log")
+            gates_mod.panic(workdir, {
+                "id": "p0.category.none", "kind": "fact",
+                "gate_type": "decision", "phase": "P0",
+                "question": ("未发现内核驱动注册特征——输入可能不是内核"
+                             "驱动。请检查 --linux-driver 路径；确认后用 "
+                             "--category 人工指定重跑 p0。"
+                             "证据见 P0/logs/T2_category.log"),
+                "context_files": ["P0/logs/T2_category.log"],
+                "answer_form": [
+                    {"field": "category", "type": "text", "required": True,
+                     "hint": "确认类别（如 net）——或直接用 --category 重跑"}],
+            })
+            raise SystemExit(3)
+        gates_mod.panic(workdir, {
+            "id": "p0.category.unparseable", "kind": "fact",
+            "gate_type": "decision", "phase": "P0",
+            "question": ("类别识别失败（agent 输出无法解析）。可重跑 p0，"
+                         "或用 --category 人工指定。"
+                         "日志: P0/logs/T2_category.log"),
+            "context_files": ["P0/logs/T2_category.log"],
+            "answer_form": [
+                {"field": "category", "type": "text", "required": True,
+                 "hint": "人工指定类别（如 net）——或直接用 --category 重跑"}],
+        })
+        raise SystemExit(3)
 
     conf = parsed.get("confidence", "low")
     if conf == "low":

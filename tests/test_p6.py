@@ -26,10 +26,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 def setUpModule():
     # 挂载②红项分诊会走 agent 兜底——本模块单测禁真调（§15 实施纪律）
     os.environ.setdefault("PORTER_NO_AGENT", "1")
+    # execute/诊断路径测试：强制开 §15 自诊（仓级 config 默认 bypass）
+    os.environ.setdefault("PORTER_SELF_DIAGNOSIS", "1")
 
 
 def tearDownModule():
     os.environ.pop("PORTER_NO_AGENT", None)
+    os.environ.pop("PORTER_SELF_DIAGNOSIS", None)
 
 
 from porter.loop import p6 as P6
@@ -281,8 +284,12 @@ class TestFinalizeGate(unittest.TestCase):
         ok("REVIEW.md 落盘",
            (ws / "P6" / "reports" / "l4_criteria_REVIEW.md").exists())
         q = (ws / "human_questions.md").read_text(encoding="utf-8")
-        ok("questions 追加", "P6 L4 判据定稿" in q
-           and "l4_criteria_finalization: approve" in q)
+        led = json.loads((ws / "gates.json").read_text(encoding="utf-8"))
+        gate = [g for g in led["gates"] if g["id"] == "p6.l4.finalize"]
+        ok("审批关口已登记（账本）",
+           len(gate) == 1 and gate[0]["status"] == "open"
+           and gate[0]["lane"] == "checkpoint")
+        ok("渲染含表单", "@p6.l4.finalize" in q and "verdict" in q)
         doc = json.loads(P6.l4_criteria_path(ws).read_text(encoding="utf-8"))
         ok("停车保持 draft", doc["status"] == "draft")
         # 未放行重跑仍停

@@ -242,24 +242,49 @@ def finalize_l4(ws: Path, cfg: dict | None = None) -> int:
             print(f"  - {e}")
         return 1
     mode = review_gate_mode(cfg)
-    if mode == "human" and not _released(ws):
+    # 双协议放行：legacy 单行放行令（_RELEASE_RE）或 gates 审批关口
+    from . import gates as gates_mod
+    gates_mod.process_answered_gates(ws)
+    gate = gates_mod.GateLedger(ws).load().find("p6.l4.finalize")
+    gate_ok = bool(gate and gate.get("status") in ("applied", "resolved")
+                   and (gate.get("answer") or {}).get("verdict",
+                                                      "").lower()
+                   in ("approve", "release", "放行", "通过"))
+    if mode == "human" and not _released(ws) and not gate_ok:
         doc["status"] = "draft"
         path.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
                         encoding="utf-8")
         _write_l4_review(ws, ok_items)
-        q = ws / "human_questions.md"
-        block = ("\n\n---\n\n## P6 L4 判据定稿审核门（exit 3）\n"
-                 f"- 时间：{_now()}\n"
-                 f"- 草案：{len(ok_items)} 条已落盘 {path}\n"
-                 "- 评审摘要：P6/reports/l4_criteria_REVIEW.md\n"
-                 "- 放行：审阅后在 answers.md 写一行"
-                 " `l4_criteria_finalization: approve` 再重跑"
-                 " `p6 --finalize-l4`。\n")
-        with q.open("a", encoding="utf-8") as f:
-            f.write(block)
+        import hashlib as _hl
+        sha = _hl.sha256(path.read_bytes()).hexdigest()[:16]
+        led = gates_mod.GateLedger(ws).load()
+        gate = led.find("p6.l4.finalize")
+        if gate and gate.get("status") in ("open", "invalid"):
+            gate["artifact_sha"] = sha      # 草案可能已人工修改——刷新指纹
+            led.save()
+        elif not gate:
+            led.add(
+                id="p6.l4.finalize", lane="checkpoint", kind="approval",
+                gate_type="decision", phase="P6", checkpoint="CP3",
+                question=(f"L4 判据定稿审批（{len(ok_items)} 条，草案已落盘 "
+                          f"{path}）。这是对'完成'定义的签字：评审摘要见 "
+                          "P6/reports/l4_criteria_REVIEW.md。批准绑定草案"
+                          "指纹——草案变更后批准自动失效。"),
+                context_files=["P6/reports/l4_criteria.json",
+                               "P6/reports/l4_criteria_REVIEW.md"],
+                answer_form=[
+                    {"field": "verdict", "type": "enum",
+                     "options": ["approve", "reject"], "required": True}],
+                artifact_path=str(path.relative_to(ws)),
+                artifact_sha=sha,
+            )
+        gates_mod.render_human_questions(ws)
         print(f"[porter] P6: 审核门 human——草案落盘停车（exit 3），"
-              "等 answers.md 放行")
+              "等 answers.md 表单放行（verdict: approve）")
         return 3
+    if gate and gate.get("status") in ("applied", "resolved"):
+        gates_mod.resolve_applied(gates_mod.GateLedger(ws).load(),
+                                  "p6.l4.finalize", "L4 定稿完成结清")
     doc["status"] = "finalized"
     doc["finalized_time"] = _now()
     doc["criteria"] = ok_items
@@ -406,23 +431,30 @@ def _slirp_args(runner: dict) -> str:
 
 
 def _boot_and_log(ws: Path, target_os: Path, runner: dict
-                  ) -> tuple[bool, str, str]:
-    """SLIRP 环境 boot + 取回日志（去 ANSI 判定用文本 + 原文）。"""
+                  ) -> tuple[bool, str, str, str]:
+    """SLIRP 环境 boot + 取回日志（去 ANSI 判定用文本 + 原文 + state）。
+
+    日志面语义与共享助手一致（missing→复探→infra 关口抢占；empty→
+    判定照常）——接共享 _recover_boot_log/_log_face，保持 SLIRP 注入。
+    """
+    from . import probes as probe_lib
     extra = {}
     env_tpl = ((runner.get("inject_device") or {}).get("env") or {})
     for k in env_tpl:
         extra[k] = _slirp_args(runner)
     if not extra:
         extra = {"EXTRA_QEMU_ARGS": _slirp_args(runner)}
-    r = probe_mod.probe_boot(ws / "P6", target_os, runner,
-                             extra_env=extra, label="P6_exec_boot")
-    lf = (runner.get("boot") or {}).get("log_file")
-    raw = ""
-    if lf:
-        p = Path(lf) if Path(lf).is_absolute() else target_os / lf
-        if p.exists():
-            raw = p.read_text(encoding="utf-8", errors="replace")
-    return bool(r.get("ok")), raw, probe_mod._strip_ansi(raw)
+
+    def _run() -> tuple[bool, str, str]:
+        r = probe_mod.probe_boot(ws / "P6", target_os, runner,
+                                 extra_env=extra, label="P6_exec_boot")
+        raw, state = probe_lib._recover_boot_log(ws / "P6", runner,
+                                                 target_os, "P6_exec_boot")
+        return bool(r.get("ok")), raw, state
+
+    ok, raw, state = probe_lib._log_face(ws, ws / "P6", runner, target_os,
+                                         "P6_exec_boot", _run(), _run)
+    return ok, raw, probe_mod._strip_ansi(raw), state
 
 
 def _run_ktest(ws: Path, target_os: Path, runner: dict
@@ -550,9 +582,25 @@ def execute(ws: Path, l4: bool = False) -> int:
                               label="P6_exec_build")
     rec("P6.build", "L1", b["ok"], b["detail"])
     # L2 boot（SLIRP 环境）
-    boot_ok, _raw, log = _boot_and_log(ws, target_os, runner)
+    boot_ok, _raw, log, log_state = _boot_and_log(ws, target_os, runner)
     rec("P6.boot", "L2", boot_ok, "SLIRP boot 双信号" +
         ("PASS" if boot_ok else "FAIL"))
+    if log_state == "missing":
+        # 抢占（H9 重构）：判定输入不存在——本轮不判任何日志类判据，
+        # infra 关口已登记；health 落盘后 rc 3
+        rec("P6.infra_log", "infra", None,
+            "判定中止：boot 日志不可得（infra 关口待答）")
+        report = {"time": datetime.now().isoformat(), "mode": "execute",
+                  "infra": "boot_no_log", "results": results,
+                  "verdict": {"all_green_except_parked": False,
+                              "failing": [], "deferred_cleared": [],
+                              "deferred_uncleared": [],
+                              "deferred_pending_l4": [], "parked": []},
+                  "triage": []}
+        _write_health(ws, report)
+        print("[porter] P6: execute 判定中止（boot 日志不可得，"
+              "infra 关口待答）——exit 3")
+        return 3
     # ktest（L0）
     ut_ok, ut_out = _run_ktest(ws, target_os, runner)
     ut = runner.get("unit_test") or {}
@@ -622,9 +670,15 @@ def execute(ws: Path, l4: bool = False) -> int:
 
     # ---- 红项分诊（§15 挂载②）：失败即快照 → 逐红项 triage（不重跑，
     #      重跑 = 再次执行 p6 --execute 本身）----
-    triage_section = _triage_red_items(ws, target_os, runner, results,
-                                       uncleared_real, log, ut_out, mods,
-                                       cfg=None)
+    from . import gates as _gates_sd
+    if _gates_sd.self_diagnosis_enabled():
+        triage_section = _triage_red_items(ws, target_os, runner, results,
+                                           uncleared_real, log, ut_out, mods,
+                                           cfg=None)
+    else:
+        triage_section = []       # §15 bypass：红项直接进 verdict（failing）
+        print("[porter] P6: §15 bypass——红项不走自动分诊（人工/后续"
+              "重设计接管）")
     verdict = {"all_green_except_parked":
                bool(b["ok"]) and not hard_fail and not uncleared_real,
                "failing": hard_fail,
@@ -713,6 +767,12 @@ def diagnose_defect(ws: Path, did: str, cfg: dict | None = None) -> int:
     unknown/migration → 有界诊断（2 轮×≤10 调用）→ 升级报告 →
     全程 defects history 落账。
     """
+    from . import gates as _gates_sd
+    if not _gates_sd.self_diagnosis_enabled():
+        print(f"[porter] P6: §15 已 bypass（config self_diagnosis.enabled="
+              f"false）——--defect-diagnose {did} 不可用。人工诊断可翻 "
+              "events.jsonl / 各相位 logs；修好后 --defect-close 闭账")
+        return 2
     events.bind(ws, "d1")
     d = load_defects(ws)
     e = _find_defect(d, did)
@@ -757,7 +817,25 @@ def diagnose_defect(ws: Path, did: str, cfg: dict | None = None) -> int:
     applied_s = "; ".join(app["applied"]) or "无状态变更"
     print(f"[porter] P6: D1 完成 {did}（处置：{applied_s}；"
           f"考古包：{pack}）")
-    return 3 if human_stop else 0
+    if human_stop:
+        # §15 diagnosis_escalation human 门 → 统一 approval 关口
+        esc = sorted((ws / "escalations").glob("*.md"),
+                     key=lambda p: p.stat().st_mtime, reverse=True)
+        from . import gates as gates_mod
+        return gates_mod.panic(ws, {
+            "id": f"p6.escalation.{did}", "kind": "approval",
+            "gate_type": "failure", "phase": "P6", "subject": did,
+            "question": (
+                f"缺陷 {did} 诊断升格需人工放行（diagnosis_escalation="
+                "human）。最新升级报告见 escalations/；批准后重跑"
+                " --defect-diagnose 续跑。"),
+            "context_files": ([str(e.relative_to(ws)) for e in esc[:1]]
+                              or []),
+            "answer_form": [
+                {"field": "verdict", "type": "enum",
+                 "options": ["approve", "reject"], "required": True}],
+        })
+    return 0
 
 
 # ---------- health 报告 ----------
@@ -833,8 +911,280 @@ def _write_health(ws: Path, report: dict) -> None:
 
 # ---------- 入口 ----------
 
+# ---------- L4 草案生成（S5：修 H1/H2——"出题"自动化，人审归 CP3/定稿门） ----------
+
+_FORM_BY_KIND = {"log_pattern": "boot观测", "counter": "boot观测",
+                 "unit_test": "内核自测", "e2e": "流量驱动"}
+_DRAFT_TRIES = 2                     # agent 草案回炉上限
+
+
+def _collect_l4_material(ws: Path) -> list[dict]:
+    """机器段素材：deferred 全局哨兵条目 + 各模块 e2e 判据（预分类）。"""
+    mat: list[dict] = []
+    seen: set[str] = set()
+    dp = ws / "deferred.json"
+    if dp.exists():
+        try:
+            d = json.loads(dp.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            d = {}
+        for e in d.get("entries", []):
+            if not _is_global(e.get("deferred_by")):
+                continue
+            c = e.get("criterion") or {}
+            cid = c.get("id") or e.get("id")
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            mat.append({"id": cid, "source": f"deferred[{e.get('status')}]",
+                        "kind": c.get("kind"), "expr": c.get("expr") or "",
+                        "module": e.get("module")})
+    for crit_path in sorted((ws / "P3").glob("*/reports/criteria.json")):
+        try:
+            crit = json.loads(crit_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for c in crit.get("criteria", []):
+            if c.get("kind") != "e2e" or c.get("id") in seen:
+                continue
+            seen.add(c["id"])
+            mat.append({"id": c["id"], "source": "P3.e2e", "kind": "e2e",
+                        "expr": c.get("expr") or "",
+                        "module": crit_path.parts[-3]})
+    return mat
+
+
+def _machine_draft(ws: Path, mat: list[dict]) -> list[dict]:
+    """无 agent 兜底草案：kind→form 预分类；无 expr 的条目 park（schema
+    要求 clear 必有 expr——宁可泊车给人审，不造假正则）。"""
+    out = []
+    for m in mat:
+        form = _FORM_BY_KIND.get(m.get("kind") or "", "流量驱动")
+        expr = m.get("expr") or ""
+        if expr:
+            out.append({"id": m["id"], "title": f"{m['id']}（机器预分类）",
+                        "form": form, "expr": expr,
+                        "rationale": (f"机器预分类 {m.get('kind')} → {form}"
+                                      "（agent 不可用/失败，请人工补全理由）"),
+                        "disposition": "clear"})
+        else:
+            out.append({"id": m["id"], "title": f"{m['id']}（机器预分类）",
+                        "form": form, "expr": "",
+                        "rationale": (f"机器预分类 {m.get('kind')} → {form}；"
+                                      "素材无正则且 agent 不可用——请人审时"
+                                      "补 expr 改 clear，或维持 park"),
+                        "disposition": "park"})
+    return out
+
+
+def draft_l4(ws: Path, cfg: dict | None = None) -> int:
+    """`p6 --draft-l4`：deferred/__P6__ + P3 e2e 判据 → l4_criteria.json 草案。
+
+    机器段预分类 → agent（skill L4-draft）补全六字段 → validate_l4 复核
+    （失败带反馈回炉 ≤2）→ agent 不可用/失败时落机器草案（占位 rationale，
+    定稿门前人审补全）。修 H1（草案无生成器）/H2（出题工具化）。
+    """
+    import os
+    from ..common import agent as agent_mod
+    events.bind(ws, "p6")
+    path = l4_criteria_path(ws)
+    if path.exists() and (json.loads(path.read_text(encoding="utf-8"))
+                          .get("status")) in ("draft", "finalized"):
+        print(f"[porter] P6: L4 草案已存在（{path}）——跳过（删文件可重生成）")
+        return 0
+    mat = _collect_l4_material(ws)
+    if not mat:
+        print("[porter] P6: 无 L4 素材（deferred 无全局哨兵条目、P3 无 "
+              "e2e 判据）——先跑 loop/p6")
+        return 2
+    pp_open = []
+    try:
+        pp = json.loads((ws / "platform_patches.json").read_text(
+            encoding="utf-8"))
+        pp_open = [p.get("gap") for p in pp.get("patches", [])
+                   if p.get("status") in ("proposed", "planned")]
+    except (OSError, json.JSONDecodeError):
+        pass
+
+    criteria = None
+    agent_ok = False
+    if not os.environ.get("PORTER_NO_AGENT"):
+        skill = agent_mod.load_skill("L4-draft")
+        mat_block = json.dumps(mat, ensure_ascii=False, indent=1)
+        pp_block = "、".join(pp_open) if pp_open else "无"
+        feedback = ""
+        for attempt in range(1, _DRAFT_TRIES + 1):
+            prompt = (f"{skill}\n\n---\n\n## 素材（机器预分类）\n{mat_block}"
+                      f"\n\n## 已知平台缺口（相关判据建议 park）\n{pp_block}"
+                      f"\n\n## 任务\n产出全部条目的六字段草案（紧凑 JSON "
+                      "数组）。{feedback}")
+            rc, out = agent_mod.run_agent(
+                prompt, workdir=ws, timeout_sec=900,
+                log_stem=str(ws / "P6" / "logs" / f"L4_draft_R{attempt}"))
+            parsed = agent_mod.extract_json(out) if rc == 0 else None
+            cand = parsed.get("criteria") if isinstance(parsed, dict) \
+                else parsed
+            ok_items, errs = validate_l4(cand if isinstance(cand, list)
+                                         else [])
+            if cand and not errs:
+                criteria = ok_items
+                agent_ok = True
+                break
+            feedback = (f"\n\n---\n\n## 上次输出的问题（修正后重输出）\n"
+                        + "; ".join(errs[:8]))
+    if criteria is None:
+        criteria = _machine_draft(ws, mat)
+        print("[porter] P6: agent 草案不可用——落机器预分类草案"
+              "（rationale 占位，人审时补全）")
+    doc = {"status": "draft", "generated": _now(), "criteria": criteria}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    (ws / "P6" / "logs").mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2),
+                    encoding="utf-8")
+    n_form = {f: sum(1 for c in criteria if c["form"] == f)
+              for f in L4_FORMS}
+    print(f"[porter] P6: L4 草案就绪（{len(criteria)} 条："
+          + "，".join(f"{k} {v}" for k, v in n_form.items() if v)
+          + f"）→ {path}")
+    print("[porter] P6: 人审入口 = `p6 --finalize-l4`（CP3：审批关口）")
+    events.append_event("l4-draft", subject="draft-l4",
+                        summary=f"{len(criteria)} 条（agent="
+                                f"{'ok' if agent_ok else 'machine'}）")
+    return 0
+
+
+# ---------- 缺陷修复步（S5：修 H4——诊断→修复→验证→自动闭账→CP4 批审） ----------
+
+_FIX_TRIES = 2
+
+
+def fix_defect(ws: Path, did: str, cfg: dict | None = None) -> int:
+    """`p6 --defect-fix ID`：按升级报告驱动的有界修复会话。
+
+    升级报告 → agent 修目标树驱动 crate（≤2 轮）→ build+boot 验证 →
+    四字段自动回填闭账 → 登记决策债（CP4 批审）。--defect-close 退化为
+    手工逃生门。
+
+    §15 bypass 时休眠（用户决策选 b）：依赖 diagnose 的升级报告，
+    bypass 下报告不产出——缺陷修复回归人工/会话（events.jsonl 供翻查）。
+    """
+    import os
+    from ..common import agent as agent_mod
+    from . import gates as gates_mod
+    from . import probes as probe_lib
+    events.bind(ws, "d1")
+    if not gates_mod.self_diagnosis_enabled():
+        print(f"[porter] P6: §15 已 bypass——--defect-fix {did} 休眠"
+              "（前置的升级报告由 diagnose 产出，bypass 下不可用）。"
+              "缺陷修复走人工/会话；修好且验证后 --defect-close 闭账")
+        return 2
+    d = load_defects(ws)
+    e = _find_defect(d, did)
+    if not e:
+        print(f"[porter] P6: 缺陷不存在: {did}（先 --defect-add）")
+        return 2
+    if e.get("status") == "fixed":
+        print(f"[porter] P6: 缺陷 {did} 已 fixed——无需修复")
+        return 0
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", did)[:60]
+    esc = ws / "escalations" / f"{safe}.md"
+    if not esc.exists():
+        print(f"[porter] P6: 缺 {esc}——先跑 `p6 --defect-diagnose {did}`")
+        return 2
+    if os.environ.get("PORTER_NO_AGENT"):
+        print("[porter] P6: PORTER_NO_AGENT=1——自动修复不可用"
+              "（人工修后 --defect-close）")
+        return 2
+    proj = _load_json(ws / "project.json") or {}
+    target_os = Path(proj.get("target_os") or ws)
+    runner = _load_json(ws / "runner.json") or {}
+    skill = agent_mod.load_skill("defect-fix")
+    hist = json.dumps(e.get("history", []), ensure_ascii=False, indent=1)
+    build_cmd = (runner.get("build") or {}).get("cmd", "")
+    boot_cmd = (runner.get("boot") or {}).get("cmd", "")
+    prompt = (f"{skill}\n\n---\n\n## 升级报告（根因与修复方向）\n"
+              f"{esc.read_text(encoding='utf-8')[:8000]}"
+              f"\n\n## 缺陷账目（发现证据与历次处置）\n{hist}"
+              f"\n\n## 验证命令（只读参考——构建/启动由工具统一执行）\n"
+              f"- build: `{build_cmd}`\n- boot: `{boot_cmd}`"
+              f"\n\n## 任务\n在目标 OS 树（`{target_os}`，你的工作目录）"
+              "修复驱动 crate 中该缺陷的根因（最小改动；禁止动平台内核"
+              "无关文件）。完成后输出紧凑 JSON：{status: done|blocked, "
+              "root_cause, fix_summary, files: [改动文件相对路径]}。")
+    parsed = None
+    for attempt in range(1, _FIX_TRIES + 1):
+        rc, out = agent_mod.run_agent(
+            prompt, workdir=target_os, timeout_sec=1200,
+            log_stem=str(ws / "P6" / "logs" / f"D1FIX_{did}_R{attempt}"))
+        parsed = agent_mod.extract_json(out) if rc == 0 else None
+        if parsed and parsed.get("status") in ("done", "blocked"):
+            break
+        parsed = None
+    if not parsed or parsed.get("status") != "done":
+        bump_defect(ws, did, "fix-failed",
+                    "agent 修复会话未报告 done（见 P6/logs/D1FIX_*）")
+        print(f"[porter] P6: 修复会话未果（rc 1）——升级报告在手的"
+              "人工/会话修复后 --defect-close")
+        return 1
+    # 验证：build + boot 双信号
+    b = probe_mod.probe_build(ws / "P6", target_os, runner,
+                              label=f"D1FIX_{safe}_build")
+    if not b["ok"]:
+        bump_defect(ws, did, "fix-verify-fail", f"build FAIL {b['detail']}")
+        print(f"[porter] P6: 修复后 build FAIL（{b['detail']}）——rc 1")
+        return 1
+    boot_ok, _log, log_state = probe_lib.boot_and_log(ws, "P6", target_os,
+                                                      proj,
+                                                      f"D1FIX_{safe}_boot")
+    if log_state == "missing":
+        bump_defect(ws, did, "fix-infra-stop", "验证中止：boot 日志不可得")
+        print("[porter] P6: 修复验证中止（infra 关口待答）——rc 3")
+        return 3
+    if not boot_ok:
+        bump_defect(ws, did, "fix-verify-fail", "boot 双信号 FAIL")
+        print("[porter] P6: 修复后 boot FAIL——rc 1")
+        return 1
+    reg_ev = (f"build+boot PASS @{_now()}"
+              f"；修复日志 P6/logs/D1FIX_{safe}_R*.log；boot 判定输入 "
+              f"P6/logs/T3_D1FIX_{safe}_boot.log")
+    close_defect(ws, did,
+                 root_cause=str(parsed.get("root_cause", ""))[:400],
+                 fix=str(parsed.get("fix_summary", ""))[:400],
+                 regression_evidence=reg_ev)
+    bump_defect(ws, did, "fixed-auto",
+                "--defect-fix 自动闭账（CP4 批审）：改动 "
+                + ",".join((parsed.get("files") or [])[:8]))
+    # 决策债登记（CP4 批审对象：防"说修好了但证据链注水"）
+    from . import gates as gates_mod
+    led = gates_mod.GateLedger(ws).load()
+    led.add(id=f"p6.defect.fix.{did}", kind="decision", lane="checkpoint",
+            gate_type="failure", phase="P6", checkpoint="CP4", subject=did,
+            blocking=False,
+            question=(f"缺陷 {did} 已由 --defect-fix 自动闭账"
+                      "（四字段+build/boot 证据）——CP4 批审闭账。"),
+            context_files=["defects.json", f"escalations/{safe}.md"],
+            answer_form=[
+                {"field": "verdict", "type": "enum",
+                 "options": ["approve", "reject"], "required": True}],
+            applies_to={"files": (parsed.get("files") or [])})
+    g = led.find(f"p6.defect.fix.{did}")
+    g.update({"answer": {"verdict": "approve"}, "answered_by": "agent",
+              "answered_at": _now(),
+              "resolution": reg_ev[:300], "status": "applied"})
+    led.save()
+    print(f"[porter] P6: ✔ 缺陷 {did} 修复闭账（决策债 p6.defect.fix."
+          f"{did}，CP4 批审）")
+    return 0
+
+
 def run_p6(ws: Path, execute_flag: bool = False, l4: bool = False,
-           finalize_flag: bool = False, cfg: dict | None = None) -> int:
+           finalize_flag: bool = False, draft_flag: bool = False,
+           defect_fix: str | None = None,
+           cfg: dict | None = None) -> int:
+    if draft_flag:
+        return draft_l4(ws, cfg)
+    if defect_fix:
+        return fix_defect(ws, defect_fix, cfg)
     if finalize_flag:
         return finalize_l4(ws, cfg)
     if execute_flag:

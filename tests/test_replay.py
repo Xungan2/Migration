@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def setUpModule():
     os.environ.pop("PORTER_NO_AGENT", None)   # canned agent 走 mock 路径
+    os.environ.setdefault("PORTER_SELF_DIAGNOSIS", "1")  # §15 重放：强制开
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "replay"

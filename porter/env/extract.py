@@ -43,6 +43,10 @@ def validate_runner(r: dict) -> list[str]:
         defects.append("build.timeout_full_sec 应 ≥ timeout_inc_sec")
     if not bo.get("cmd"):
         defects.append("boot.cmd 为空")
+    if not isinstance(bo.get("timeout_sec"), (int, float)) or \
+            bo.get("timeout_sec", 0) <= 0:
+        defects.append("boot.timeout_sec 缺失或非法"
+                       "（probe_boot 强依赖——缺失会裸 KeyError，H10）")
     if not bo.get("log_is_stdout") and not bo.get("log_file"):
         defects.append("boot.log_file 为空（且 log_is_stdout 非 true）")
     for f in ("success_pattern", "panic_pattern"):
@@ -145,6 +149,11 @@ def _run_probes(ws: Path, target_os: Path, runner: dict,
 def extract_env(ws: Path, target_os: Path, materials: list[Path],
                 categories: list[str]) -> int:
     """返回 0=成功（runner.json 已写）；3=需人工（问题已生成）；其他=失败。"""
+    try:                                # 观测扩全（H12）：P0 相位埋桩
+        from ..loop import events as _ev
+        _ev.bind(ws, "p0")
+    except Exception:
+        pass
     p0 = ws / "P0"
     (p0 / "logs").mkdir(parents=True, exist_ok=True)
     (p0 / "reports").mkdir(exist_ok=True)
@@ -158,8 +167,33 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     rounds_out: list[dict] = []
     rounds_probes: list[list[dict]] = []
 
-    # ---- R4：answers 存在 → 答案整合 ----
+    # ---- R4：答案整合（双协议：gates 账本答案优先，legacy 全文兼容） ----
+    gate_text = ""
+    try:
+        from ..loop import gates as gates_mod
+        ledger = gates_mod.GateLedger(ws).load()
+        g = ledger.find("p0.t3.extract")
+        if g and g.get("answer") and (g["answer"].get("answers") or "").strip():
+            gate_text = g["answer"]["answers"]
+    except Exception:
+        pass
+    legacy_text = ""
     if answers_path.exists():
+        raw = answers_path.read_text(encoding="utf-8")
+        # 剔除 @ 关口节（已由账本管理）后仍有内容 → legacy 自由文本
+        keep: list[str] = []
+        skip = False
+        for ln in raw.splitlines():
+            if ln.startswith("## @"):
+                skip = True
+                continue
+            if ln.startswith("## "):
+                skip = False
+            if not skip:
+                keep.append(ln)
+        legacy_text = "\n".join(keep).strip()
+    answer_text = gate_text or legacy_text
+    if answer_text:
         for i in range(1, MAX_AUTO_ROUNDS + 1):
             p_out = p0 / "reports" / f"T3_R{i}.json"
             p_pr = p0 / "reports" / f"T3_probes_R{i}.json"
@@ -168,8 +202,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
                 rounds_probes.append(json.loads(
                     p_pr.read_text(encoding="utf-8")) if p_pr.exists() else [])
         rc, out = agent.run_agent(
-            _prompt_answers(skill, rounds_out, rounds_probes,
-                            answers_path.read_text(encoding="utf-8")),
+            _prompt_answers(skill, rounds_out, rounds_probes, answer_text),
             workdir=p0, log_stem=str(p0 / "logs" / "T3_R4"), timeout_sec=900)
         parsed = agent.extract_json(out) if rc == 0 else None
         if not parsed or not parsed.get("runner"):
@@ -225,9 +258,23 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             _finish(ws, parsed, probes)
             return 0
 
-    # ---- 3 轮未成 → 人工升级 ----
+    # ---- 3 轮未成 → 人工升级（统一 panic 关口） ----
     _write_questions(ws, rounds_out, rounds_probes)
-    print("[porter] T3: 3 轮自动提取未完成 → 请填写 answers.md 后重跑（exit 3）")
+    from ..loop import gates as gates_mod
+    gates_mod.panic(ws, {
+        "id": "p0.t3.extract", "kind": "fact", "gate_type": "decision",
+        "phase": "P0",
+        "question": (
+            "3 轮自动环境提取未完成——剩余环境事实在 agent 可猜测空间外，"
+            "需开发者书面补课（题面见 P0/reports/human_questions.md，"
+            "逐题编号作答）。答案全文将注入 R4 轮 agent。"),
+        "context_files": ["P0/reports/human_questions.md",
+                          "P0/reports/T3_R1.json"],
+        "answer_form": [
+            {"field": "answers", "type": "text", "required": True,
+             "hint": "逐题编号作答（自由文本，全文注入 R4 agent prompt）"}],
+    })
+    print("[porter] T3: 3 轮自动提取未完成 → 请按表单作答后重跑（exit 3）")
     return 3
 
 
@@ -245,11 +292,20 @@ def _finish(ws: Path, parsed: dict, probes: list[dict]) -> None:
         encoding="utf-8")
     print(f"[porter] T3: runner.json 就绪（reviewed=false）+ 探测全绿")
     if parsed.get("missing"):
-        # 探测金标准已过：剩余 missing 为非阻塞确认项
+        # 探测金标准已过：剩余 missing 为非阻塞确认项。
+        # 备忘降级（审计 H20/设计 memo 类）：只进独立 memo 文件 + events，
+        # 永不写 questions 文件（防覆盖阻塞问题）。
         print(f"[porter] T3: ⚠️ 通过，但 agent 声明 {len(parsed['missing'])} 项"
-              f"非阻塞不确定项（已记入 P0/reports/human_questions.md 供有空确认）")
+              f"非阻塞不确定项（已记入 P0/reports/memo.md 供有空确认）")
         lines = ["# 非阻塞确认项（探测已全绿，仅备忘）", ""]
         for m in parsed["missing"]:
             lines.append(f"- {m.get('field')}: {m.get('why_hard')}")
-        (p0 / "reports" / "human_questions.md").write_text(
+        (p0 / "reports" / "memo.md").write_text(
             "\n".join(lines), encoding="utf-8")
+        try:
+            from ..loop import events as _ev
+            _ev.append_event("memo", subject="p0.t3.missing",
+                             summary=f"{len(parsed['missing'])} 项非阻塞"
+                                     "不确定项（P0/reports/memo.md）")
+        except Exception:
+            pass

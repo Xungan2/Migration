@@ -342,6 +342,11 @@ def _conservation(plan_a: dict, plan_b: dict) -> bool:
 def run_resolve(ws: Path, driver_root: Path,
                 strategy_path: Path | None = None) -> int:
     """返回 0=成功（deps.json 落盘）；3=需人工；1=失败。"""
+    try:                                # 观测扩全（H12）：P1R 相位埋桩
+        from ..loop import events as _ev
+        _ev.bind(ws, "p1")
+    except Exception:
+        pass
     p1 = ws / "P1"
     plan_path = p1 / "reports" / "P1D_plan.json"
     if not plan_path.exists():
@@ -429,7 +434,7 @@ def run_resolve(ws: Path, driver_root: Path,
         print(f"[porter] P1R: 第 {rnd} 轮应用 {len(moves)} 条搬运，"
               f"重新抽取完成")
 
-    # 人工升级
+    # 人工升级（统一 panic 关口：gates 账本 + 渲染）
     g = _build_graph(ws)
     cycles = _find_cycles(g["edges"])
     q = ["# P1 依赖解环：人工介入（自动修复未果）", "",
@@ -437,8 +442,24 @@ def run_resolve(ws: Path, driver_root: Path,
     q += [f"- {' → '.join(c)}" for c in cycles[:10]]
     q += ["", "历史搬运与各轮报告见 P1/reports/（P1R_report_R*.md、P1D_plan_R*.json）。",
           "处理：人工编辑 P1/reports/P1D_plan.json（直接调整片段归属，保持片段",
-          "守恒）后重跑 `python3 porter/main.py p1-resolve --output-dir <项目>`。"]
+          "守恒）后，在 answers.md 写 `## @p1.resolve.cycles` 节、ack 填 done，",
+          "再重跑 `python3 porter/main.py p1-resolve --output-dir <项目>`。"]
     (p1 / "reports" / "human_questions.md").write_text("\n".join(q),
                                                        encoding="utf-8")
+    from ..loop import gates as gates_mod
+    gates_mod.panic(ws, {
+        "id": "p1.resolve.cycles", "kind": "decision", "gate_type": "decision",
+        "phase": "P1",
+        "question": (
+            f"依赖解环 agent {MAX_ROUNDS} 轮未果，剩余 {len(cycles)} 个环："
+            + "；".join(" → ".join(c) for c in cycles[:5])
+            + "。破环是代码布局取舍：人工编辑 P1D_plan.json 调整片段归属"
+            "（守恒校验兜底），完成后作答 ack=done 放行重跑。"),
+        "context_files": ["P1/reports/P1D_plan.json",
+                          "P1/reports/human_questions.md"],
+        "answer_form": [
+            {"field": "ack", "type": "text", "required": True,
+             "hint": "人工编辑 P1D_plan.json 完成后填 done（或其他说明）"}],
+    })
     print(f"[porter] P1R: {MAX_ROUNDS} 轮未解环 → 人工介入（exit 3）")
     return 3

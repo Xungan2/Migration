@@ -238,22 +238,123 @@ def call_probe_gen(prompt: str, target_os: Path,
 # ---------- 共享生命周期（P3 补新 / P2 预生成） ----------
 
 def _boot_and_log(boot_ws: Path, target_os: Path, proj: dict,
-                  label: str) -> tuple[bool, str]:
+                  label: str) -> tuple[bool, str, str]:
+    """boot 探测 + 日志恢复 + 日志面语义（missing→复探→infra 关口）。
+
+    返回 (ok, log, state)；state ∈ file|stdout|missing|empty。
+    """
     runner = json.loads((boot_ws.parent / "runner.json").read_text(
         encoding="utf-8"))
-    r = probe_mod.probe_boot_with_device(boot_ws, target_os, runner,
-                                         proj.get("category") or [],
-                                         label=label)
+
+    def _run() -> tuple[bool, str, str]:
+        r = probe_mod.probe_boot_with_device(boot_ws, target_os, runner,
+                                             proj.get("category") or [],
+                                             label=label)
+        log, state = _recover_boot_log(boot_ws, runner, target_os, label)
+        return bool(r.get("ok")), log, state
+
+    return _log_face(boot_ws.parent, boot_ws, runner, target_os, label,
+                     _run(), _run)
+
+
+def _recover_boot_log(phase_ws: Path, runner: dict, target_os: Path,
+                      label: str) -> tuple[str, str]:
+    """boot 日志恢复 + 三态判定。
+
+    state 语义（日志面判定语义重构定案）：
+      file/stdout  正典来源读到内容 → 正常判定
+      empty        来源在、内容空 → **有效失败信号**（boot 必 FAIL，
+                   判定照常；根因二择：console 配错 vs 内核早挂）
+      missing      来源不存在/不可读 → **判定输入不存在**（infra：
+                   复探一次后仍缺 → 抢占判定，infra 关口停）
+    log_is_stdout 模式下从探测自身落盘（phase_ws/logs/T3_<label>.log）
+    恢复——这是该配置的正典来源（审计 H9：loop 侧此前未跟进）。
+    """
     lf = (runner.get("boot") or {}).get("log_file")
-    log = ""
     if lf:
         p = Path(lf) if Path(lf).is_absolute() else target_os / lf
         try:
             if p.exists():
-                log = p.read_text(encoding="utf-8", errors="replace")
+                text = p.read_text(encoding="utf-8", errors="replace")
+                return text, ("file" if text.strip() else "empty")
+            return "", "missing"
         except OSError:
-            log = ""
-    return bool(r.get("ok")), log
+            return "", "missing"
+    if (runner.get("boot") or {}).get("log_is_stdout"):
+        pl = phase_ws / "logs" / f"T3_{label}.log"
+        try:
+            if pl.exists():
+                text = pl.read_text(encoding="utf-8", errors="replace")
+                return text, ("stdout" if text.strip() else "empty")
+        except OSError:
+            pass
+    return "", "missing"
+
+
+def _log_face(ws: Path, phase_ws: Path, runner: dict, target_os: Path,
+              label: str, first: tuple[bool, str, str],
+              reprobe) -> tuple[bool, str, str]:
+    """日志面公共语义：missing → 有界复探一次 → 仍缺 → infra 关口。
+
+    复探吸收瞬时抖动（幂等安全，约一个 boot 的代价）——这是 §15 bypass
+    后对"infra 回路幂等重跑不计 attempts"能力的一小块补偿。
+    empty → 判定照常 + event 标注（两种根因假设交给人/后续分诊）。
+    """
+    ok, log, state = first
+    if state == "missing":
+        _append_event_safe("boot-log-missing", label,
+                           "首次读取缺失——有界复探一次")
+        print(f"[porter] probes: boot 日志缺失（{label}）——复探一次")
+        ok, log, state = reprobe()
+        if state == "missing":
+            _panic_no_log(ws, label, None)
+            return ok, "", "missing"
+    if state == "empty":
+        _note_empty_log(ws, label)
+    return ok, log, state
+
+
+def _note_empty_log(ws: Path, label: str) -> None:
+    """空日志 = 有效失败信号（判定照常跑），标注两种根因假设。"""
+    hint = ("boot 日志为空——两种可能：console 参数/重定向配错（infra），"
+            "或内核在 console 初始化前早挂（真失败）。判定照常（boot 必 "
+            "FAIL 是真信号）；现场见 events 与快照")
+    print(f"[porter] probes: ⚠️ {hint}（{label}）")
+    _append_event_safe("boot-log-empty", label, hint)
+
+
+def _append_event_safe(kind: str, subject: str, summary: str) -> None:
+    try:
+        from . import events as _ev
+        _ev.append_event(kind, subject=subject, summary=summary)
+    except Exception:
+        pass                    # 观测面永不打断主流程
+
+
+def _panic_no_log(ws: Path, label: str, r: dict | None) -> None:
+    """复探后仍拿不到日志 → 显式 infra 关口【抢占判定】（H9 重构）。
+
+    消费方（p5 判定 / 探针生命周期 / p4 冒烟 / p6 execute）见
+    state=missing 即中止本轮全部日志类判定（判据一个都不判）——
+    判定输入不存在时拿空串判 FAIL 是本末倒置。人修 runner.boot
+    （log_file 路径/重定向）→ 答关口 → 重跑续判。不烧 attempts。
+    """
+    from . import gates
+    detail = f"；探测详情：{str((r or {}).get('detail', ''))[:200]}" if r \
+        else "（首次与复探均缺失）"
+    gates.panic(ws, {
+        "id": "infra.boot_no_log", "kind": "retry", "gate_type": "failure",
+        "phase": "infra",
+        "question": (f"boot 探测（{label}）复探后仍拿不到启动日志{detail}。"
+                     "判定输入不存在——本轮判定已中止（未按空串误判）。"
+                     "请检查 runner.boot.log_file 路径 / log_is_stdout "
+                     "配置 / QEMU 输出重定向；修复后在 answers.md 答此"
+                     "关口重跑。"),
+        "context_files": ["runner.json"],
+        "answer_form": [
+            {"field": "note", "type": "text", "required": False,
+             "hint": "修复说明（如改正 log_file 路径）"}],
+    })
 
 
 def _probes_owning_lines(target_os: Path, driver: str,
@@ -480,8 +581,14 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
                     rnd, logs_dir):
                 continue
             return 1
-        ok, log = _boot_and_log(boot_ws, target_os, proj,
-                                f"{label}_probe_boot_r{rnd}")
+        ok, log, log_state = _boot_and_log(boot_ws, target_os, proj,
+                                           f"{label}_probe_boot_r{rnd}")
+        if log_state == "missing":
+            # 抢占（H9 重构）：判定输入不存在——不判定、不批量降级，
+            # infra 关口已由助手登记
+            print(f"[porter] 探针: {label} 日志不可得——中止判定与降级"
+                  "（infra 关口待答）")
+            return 3
         verdicts = judge(log, names)
         bad = [n for n, v in verdicts.items() if v != "ok"]
         if ok and not bad:
@@ -531,20 +638,23 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
 # ---------- 共享 boot 助手（P4 fill 冒烟 / P5 L2 验收共用） ----------
 
 def boot_and_log(ws: Path, phase_dir: str, target_os: Path, proj: dict,
-                 label: str) -> tuple[bool, str]:
-    """boot 双信号判定 + 取回启动日志全文。
+                 label: str) -> tuple[bool, str, str]:
+    """boot 双信号判定 + 取回启动日志全文 + 日志面状态。
 
-    phase_dir ∈ {"P3","P4","P5"}：探测日志/落盘的相位子目录。
-    返回 (ok, log_text)。
+    phase_dir ∈ {"P3","P4","P5","P6"}：探测日志/落盘的相位子目录。
+    返回 (ok, log_text, state)；state=missing 时消费方应中止日志类判定
+    （infra 关口已由本函数登记，抢占语义）。
     """
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-    r = probe_mod.probe_boot_with_device(ws / phase_dir, target_os, runner,
-                                         proj.get("category") or [],
-                                         label=label)
-    lf = (runner.get("boot") or {}).get("log_file")
-    log = ""
-    if lf:
-        p = Path(lf) if Path(lf).is_absolute() else target_os / lf
-        if p.exists():
-            log = p.read_text(encoding="utf-8", errors="replace")
-    return bool(r.get("ok")), log
+
+    def _run() -> tuple[bool, str, str]:
+        r = probe_mod.probe_boot_with_device(ws / phase_dir, target_os,
+                                             runner,
+                                             proj.get("category") or [],
+                                             label=label)
+        log, state = _recover_boot_log(ws / phase_dir, runner, target_os,
+                                       label)
+        return bool(r.get("ok")), log, state
+
+    return _log_face(ws, ws / phase_dir, runner, target_os, label,
+                     _run(), _run)

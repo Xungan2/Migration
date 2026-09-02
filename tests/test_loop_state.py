@@ -23,6 +23,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -515,8 +516,10 @@ class _LoopHarness:
 
 
 class TestLoopOrchestration(unittest.TestCase):
-    def test_p3_p4_p5_done_transitions(self):
-        print("G1. p3→p4→p5→done 转移")
+    @mock.patch("porter.loop.gates.first_module_review_enabled",
+                return_value=False)
+    def test_p3_p4_p5_done_transitions(self, _fm):
+        print("G1. p3→p4→p5→done 转移（FM 审关闭——本测专注状态机）")
         ws, _drv = _mk_ws()
         with _LoopHarness() as h:
             rc = RUN.run_loop(ws)
@@ -534,8 +537,10 @@ class TestLoopOrchestration(unittest.TestCase):
             for m in saved["modules"].values()))
         shutil.rmtree(ws.parent)
 
-    def test_p4_fail_bump_then_recover(self):
-        print("G2. P4 失败一次 bump 后自愈")
+    @mock.patch("porter.loop.gates.first_module_review_enabled",
+                return_value=False)
+    def test_p4_fail_bump_then_recover(self, _fm):
+        print("G2. P4 失败一次 bump 后自愈（FM 审关闭）")
         ws, _drv = _mk_ws(order=("modA",))
         with _LoopHarness(rc_plan={("p4", 1): 1}) as h:
             rc = RUN.run_loop(ws)
@@ -547,8 +552,10 @@ class TestLoopOrchestration(unittest.TestCase):
         ok("p4 桶 attempts=1", st.attempts("modA", "p4") == 1)
         shutil.rmtree(ws.parent)
 
-    def test_p5_burnout_exit3(self):
-        print("G3. p5 桶烧穿 → exit 3 + 人工关口")
+    @mock.patch("porter.loop.gates.first_module_review_enabled",
+                return_value=False)
+    def test_p5_burnout_exit3(self, _fm):
+        print("G3. p5 桶烧穿 → exit 3 + panic 关口（FM 审关闭）")
         ws, _drv = _mk_ws(order=("modA",))
         with _LoopHarness(rc_plan={("p5", 1): 1, ("p5", 2): 1,
                                    ("p5", 3): 1}):
@@ -558,8 +565,15 @@ class TestLoopOrchestration(unittest.TestCase):
         st.load_or_init()
         ok("泊在 p5 相位", st.phase_of("modA") == "p5"
            and st.attempts("modA", "p5") == 3)
+        ledger = json.loads((ws / "gates.json").read_text(encoding="utf-8"))
+        gate_ids = [g["id"] for g in ledger["gates"]]
+        ok("panic 关口已登记", "loop.attempts.modA-p5" in gate_ids)
+        ok("关口 open", any(g["id"] == "loop.attempts.modA-p5"
+                            and g["status"] == "open"
+                            for g in ledger["gates"]))
         hq = (ws / "human_questions.md").read_text(encoding="utf-8")
-        ok("人工关口已写（retry modA-p5）", "retry modA-p5" in hq)
+        ok("渲染含关口表单", "@loop.attempts.modA-p5" in hq
+           and "note" in hq)
         # retry 答案清零后恢复
         (ws / "answers.md").write_text(
             "## retry modA-p5\n\nfixed\n", encoding="utf-8")

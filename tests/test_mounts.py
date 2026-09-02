@@ -21,10 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 def setUpModule():
     os.environ.setdefault("PORTER_NO_AGENT", "1")
+    # §15 三挂载测试：强制开自诊（仓级 config 默认 bypass）
+    os.environ.setdefault("PORTER_SELF_DIAGNOSIS", "1")
 
 
 def tearDownModule():
     os.environ.pop("PORTER_NO_AGENT", None)
+    os.environ.pop("PORTER_SELF_DIAGNOSIS", None)
 
 
 from porter.loop import events as EV
@@ -105,12 +108,13 @@ class MountP5Test(unittest.TestCase):
     def test_m1b_p5_migration_no_rerun(self):
         tmp = Path(tempfile.mkdtemp(prefix="porter_m1b_"))
         w = _Ws(tmp, "ws")
-        # 非 infra 且无自动修正 → 不重跑（一轮即收）：boot 恒 FAIL 的
-        # 判据判 migration（compile FAIL 路径）
+        # 非 infra 且无自动修正 → 不重跑（一轮即收）：compile 恒 FAIL 的
+        # 判据判 migration（boot 自产日志——新日志面语义下预置文件会被
+        # probe 的清旧日志删除，属 missing 而非本测场景）
         (w.ws / "runner.json").write_text(json.dumps({
             "build": {"cmd": "false", "timeout_full_sec": 5,
                       "success_pattern": ""},
-            "boot": {"cmd": "true", "timeout_sec": 5,
+            "boot": {"cmd": "echo OK > qemu.log", "timeout_sec": 5,
                      "log_file": "qemu.log", "success_pattern": "OK",
                      "panic_pattern": "panic"},
             "inject_device": {"mechanism": "env",

@@ -111,12 +111,47 @@ def cmd_p0(args) -> int:
     cats = proj.get("category") or []
 
     # T3 环境信息提取（多轮循环 + 探测交织 + 人工升级/答案整合）
+    # 先消费 answers.md 的 @ 关口答案（新协议）
+    try:
+        from porter.loop import gates as _gates
+        _gates.process_answered_gates(ws)
+    except Exception:
+        pass
     rc = t3.extract_env(ws, target_os, materials, cats)
     if rc != 0:
-        return rc        # 3=需人工（填 answers.md 后重跑）；1=失败
+        return rc        # 3=需人工（按表单作答后重跑）；1=失败
 
-    # T5 门禁
-    return 0 if t5.run_gate(ws) else 1
+    # T5 门禁（FAIL = 环境坏 → panic 关口：agent 只备料，人修环境）
+    if t5.run_gate(ws):
+        # CP0 环境审：非阻塞 memo（runner 复核建议，复活死标志
+        # meta.reviewed 的意图）+ digest——T3 阻塞问题已是 panic 关口
+        from porter.loop import gates as _gates3
+        _gates3.checkpoint_run(
+            ws, "CP0", register=[{
+                "id": "cp0.runner_review", "kind": "memo",
+                "gate_type": "decision", "phase": "P0", "checkpoint": "CP0",
+                "blocking": False,
+                "question": ("runner.json 驱动全流水线（构建/启动/测试命令"
+                             "）——建议扫一眼 P0/reports/memo.md 与 "
+                             "runner.json 再进入 P1（非阻塞建议）。"),
+                "context_files": ["runner.json", "P0/reports/memo.md"],
+                "answer_form": [{"field": "note", "type": "text",
+                                 "required": False}]}],
+            blocking=False)
+        return 0
+    from porter.loop import gates as _gates2
+    return _gates2.panic(ws, {
+        "id": "p0.t5.env_gate", "kind": "fact", "gate_type": "physical",
+        "phase": "P0",
+        "question": ("P0 门禁 FAIL：未动过的目标树单测烟测未过——验证"
+                     "基线本身是坏的，后续所有机器判定都会把环境故障"
+                     "误判为迁移故障。请修复开发环境后重跑 p0。"
+                     "报告见 P0/reports/p0_report.md。"),
+        "context_files": ["P0/reports/p0_report.md"],
+        "answer_form": [
+            {"field": "note", "type": "text", "required": False,
+             "hint": "修复说明（留档）"}],
+    })
 
 
 def cmd_p1_strategy(args) -> int:
@@ -162,6 +197,13 @@ def cmd_p1_divide(args) -> int:
     if not driver_root.is_dir():
         print(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
+    # CP1 拆分审（#5 必人四点：strategy.md 人工审阅关口，修 H5）
+    from porter.loop import gates as _gates
+    _gates.process_answered_gates(ws)
+    if (ws / "P1" / "strategy.md").exists():
+        rc = _gates.strategy_checkpoint(ws)
+        if rc != 0:
+            return rc
     return p1a.run_divide(ws, driver_root)
 
 
@@ -334,9 +376,12 @@ def cmd_p6(args) -> int:
         return 0
     if args.defect_diagnose:
         return p6_mod.diagnose_defect(ws, args.defect_diagnose)
+    if args.defect_fix:
+        return p6_mod.fix_defect(ws, args.defect_fix)
 
     return p6_mod.run_p6(ws, execute_flag=args.execute, l4=args.l4,
-                         finalize_flag=args.finalize_l4)
+                         finalize_flag=args.finalize_l4,
+                         draft_flag=args.draft_l4)
 
 
 def cmd_p7(args) -> int:
@@ -346,10 +391,44 @@ def cmd_p7(args) -> int:
     if not (ws / "project.json").exists():
         print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
-    return p7_mod.run_p7_cli(
+    # CP4 验收审：缺陷自动闭账的决策债未清 → 停车批审（防证据链注水）
+    from porter.loop import gates as _gates
+    _gates.process_answered_gates(ws)
+    ledger = _gates.GateLedger(ws).load()
+    fix_debt = [g for g in ledger.pending_review()
+                if g["id"].startswith("p6.defect.fix.")]
+    if fix_debt:
+        rc = _gates.checkpoint_run(ws, "CP4", register=[{
+            "id": "cp4.defect_review", "kind": "approval",
+            "gate_type": "failure", "phase": "P6", "checkpoint": "CP4",
+            "question": (f"{len(fix_debt)} 条 --defect-fix 自动闭账待批审"
+                         "（四字段+build/boot 证据）——逐条核对后放行；"
+                         "否决单条用 `## @p6.defect.fix.<ID>` "
+                         "verdict: veto。"),
+            "context_files": ["defects.json", "checkpoints/CP4_digest.md"],
+            "answer_form": [{"field": "verdict", "type": "enum",
+                             "options": ["approve", "reject"],
+                             "required": True}]}])
+        if rc != 0:
+            return rc
+    rc = p7_mod.run_p7_cli(
         ws, patch_register=args.patch_register, title=args.title or "",
         rationale=args.rationale or "", patch_status=args.patch_status,
         status_to=args.to or "", doc=args.doc, note=args.note or "")
+    if rc == 0:
+        # CP5 沉淀审：非阻塞（知识晋升是人工决定型命令，这里只提醒）
+        _gates.checkpoint_run(
+            ws, "CP5", register=[{
+                "id": "cp5.promote", "kind": "memo", "gate_type": "decision",
+                "phase": "P7", "checkpoint": "CP5", "blocking": False,
+                "question": ("知识晋升提醒：temp/maps 映射草稿、"
+                             "failures.md 候选区、pitfalls 手写——"
+                             "用 p2-promote / 人工晋升沉淀跨驱动知识。"),
+                "context_files": ["temp/maps/INDEX.json"],
+                "answer_form": [{"field": "note", "type": "text",
+                                 "required": False}]}],
+            blocking=False)
+    return rc
 
 
 def _parse_device_ids(raw: str | None) -> list[str] | None:
@@ -504,7 +583,15 @@ def cmd_p1(args) -> int:
     if not driver_root.is_dir():
         print(f"[porter] linux_driver 路径无效: {driver_root}")
         return 2
-    for step in (p1s.run_strategy, p1a.run_divide, p1r.run_resolve):
+    from porter.loop import gates as _gates
+    _gates.process_answered_gates(ws)
+    rc = p1s.run_strategy(ws, driver_root)
+    if rc != 0:
+        return rc
+    rc = _gates.strategy_checkpoint(ws)  # CP1：直通路径也必须过审（修 H5）
+    if rc != 0:
+        return rc
+    for step in (p1a.run_divide, p1r.run_resolve):
         rc = step(ws, driver_root)   # resolve 第三参 strategy_path 缺省 None，兼容
         if rc != 0:
             return rc
@@ -513,11 +600,98 @@ def cmd_p1(args) -> int:
     return 0
 
 
+def cmd_gate(args) -> int:
+    """关口 CLI（S6 便利层；协议本体 = 账本 + answers.md，纯文件也可用）。"""
+    from porter.loop import gates as gates_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+    ledger = gates_mod.GateLedger(ws).load()
+
+    if args.gate_cmd == "list":
+        rows = []
+        for g in ledger.gates:
+            if args.status == "open" and g.get("status") not in ("open",
+                                                                 "invalid"):
+                continue
+            if args.status == "debt" and not (
+                    g.get("status") == "applied"
+                    and g.get("answered_by") in ("agent", "policy")):
+                continue
+            rows.append(g)
+        if not rows:
+            print(f"[porter] gate: 无 {args.status} 关口")
+            return 0
+        print(f"{'ID':<44} {'状态':<9} {'车道':<11} 类型/应答者")
+        for g in sorted(rows, key=lambda x: (x.get("status") or "",
+                                             x["id"])):
+            print(f"{g['id']:<44} {g.get('status', '?'):<9} "
+                  f"{g.get('lane', '?'):<11} {g.get('kind', '?')}"
+                  f"/{g.get('answered_by') or '—'}")
+        print(f"\n{gates_mod.summary_line(ws)}；作答：answers.md `## @<ID>`"
+              "（表单见 human_questions.md）")
+        return 0
+
+    if args.gate_cmd == "show":
+        g = ledger.find(args.gate_id)
+        if g is None:
+            print(f"[porter] gate: 关口不存在: {args.gate_id}")
+            return 2
+        print(json.dumps(g, ensure_ascii=False, indent=2))
+        return 0
+
+    if args.gate_cmd == "answer":
+        g = ledger.find(args.gate_id)
+        if g is None:
+            print(f"[porter] gate: 关口不存在: {args.gate_id}")
+            return 2
+        if not args.set:
+            print("[porter] gate: 需要至少一个 --set field=value")
+            return 2
+        lines = [f"## @{args.gate_id}"]
+        for kv in args.set:
+            field, _, val = kv.partition("=")
+            lines.append(f"{field.strip()}: {val.strip()}")
+        with (ws / "answers.md").open("a", encoding="utf-8") as f:
+            f.write("\n" + "\n".join(lines) + "\n")
+        print(f"[porter] gate: 答案已写入 answers.md（{args.gate_id}）")
+        applied, invalid = gates_mod.process_answered_gates(ws, ledger)
+        if invalid:
+            print(f"[porter] gate: ⚠️ 校验失败 {invalid} 条——错误见 "
+                  "human_questions.md 渲染面")
+            gates_mod.render_human_questions(ws, ledger)
+            return 1
+        if applied:
+            g2 = ledger.find(args.gate_id)
+            print(f"[porter] gate: ✔ 已应用（{g2.get('resolution', '')}"
+                  f"[:200]）" if g2 else "已应用")
+        return 0
+
+    if args.gate_cmd == "review":
+        cp = args.cp or "REVIEW"
+        p = gates_mod.checkpoint_digest(ws, cp, ledger)
+        print(f"[porter] gate: 批审材料 → {p}")
+        gates_mod.render_human_questions(ws, ledger)
+        print("[porter] gate: 逐条否决：answers.md `## @<债项ID>` "
+              "verdict: veto；批量放行：`## @cp.debt.<n>` verdict: approve")
+        return 0
+    return 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="porter",
         description="driver_migration_tool — Linux→任意目标OS 驱动迁移工具")
     sub = ap.add_subparsers(dest="phase", required=True)
+    # 路由配置护栏（S4）：启动即校验，坏配置警告但不阻塞（回落内置默认）
+    try:
+        from porter.loop import routing as _routing
+        _warns = _routing.validate_routing(_routing.load_routing())
+        for _w in _warns:
+            print(f"[porter] ⚠️ routing 配置: {_w}")
+    except Exception:
+        pass
 
     p0 = sub.add_parser("p0", help="P0：开发环境门禁（输入解析→类别→探测→脚手架→门禁）")
     p0.add_argument("--linux-driver", required=True)
@@ -630,7 +804,28 @@ def main(argv=None) -> int:
     p6cmd.add_argument("--defect-diagnose", default=None, metavar="ID",
                        help="缺陷诊断（§15 挂载③/D1 步）：triage→处置→"
                             "有界诊断→升级报告，全程 defects history 落账")
+    p6cmd.add_argument("--defect-fix", default=None, metavar="ID",
+                       help="缺陷修复（S5）：升级报告→agent 有界修码→build+boot 验证→"
+                            "四字段自动闭账→CP4 批审")
+    p6cmd.add_argument("--draft-l4", action="store_true",
+                       help="L4 判据草案生成（deferred/__P6__+P3 e2e → agent 起草；"
+                            "人审入口 = --finalize-l4 / CP3）")
     p6cmd.set_defaults(func=cmd_p6)
+
+    gatecmd = sub.add_parser("gate", help="关口 CLI（list/show/answer/review——人工介入便利层）")
+    gatecmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    gatecmd.add_argument("gate_cmd", choices=["list", "show", "answer", "review"],
+                         help="list=清单 / show=详情 / answer=作答 / review=批审材料")
+    gatecmd.add_argument("gate_id", nargs="?", default=None,
+                         help="（show/answer）关口 id")
+    gatecmd.add_argument("--status", default="open",
+                         choices=["open", "debt", "all"],
+                         help="（list）过滤：open 待答 / debt 决策债 / all")
+    gatecmd.add_argument("--set", action="append", default=None, metavar="F=V",
+                         help="（answer）字段赋值，可多次（如 --set verdict=approve）")
+    gatecmd.add_argument("--cp", default=None,
+                         help="（review）检查点名（digest 文件名，缺省 REVIEW）")
+    gatecmd.set_defaults(func=cmd_gate)
 
     p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")
     p7cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")

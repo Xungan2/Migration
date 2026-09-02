@@ -22,17 +22,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
 
 from ..common import agent
 from ..env import probe as probe_mod
-from . import probes as probe_lib
+from . import gates, probes as probe_lib
 
 AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
 MAX_LINES_PER_SLICE = 900         # 单迁移调用输入上限（32K 教训）
+SAME_SIG_REPEAT = 2               # 同签名失败连发阈值（零进展 → panic）
 
 
 def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
@@ -124,9 +126,14 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
             boot_ok = False
             log = ""
             if b["ok"]:
-                boot_ok, log = probe_lib.boot_and_log(
+                boot_ok, log, log_state = probe_lib.boot_and_log(
                     ws, "P4", target_os, proj,
                     f"P4_{module}_fill_boot_{api}")
+                if log_state == "missing":
+                    # 抢占（H9 重构）：判定输入不存在，infra 关口已登记
+                    print(f"[porter] P4: fill {api} 验证中止（boot 日志"
+                          "不可得）——exit 3")
+                    return 3
             names = [p["name"] for p in probe_lib.load_registry(reg_path)
                      .get("probes", []) if p["status"] == "active"]
             verdicts = probe_lib.judge(log, [n for n in names]) if log else {}
@@ -258,7 +265,9 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
     mig = json.loads(mig_path.read_text(encoding="utf-8")) \
         if mig_path.exists() else {"slices": []}
     done_keys = {(s["file"], s["start"], s["end"]) for s in mig["slices"]}
+    sig_counts: dict[str, int] = mig.setdefault("sig_counts", {})
     failures: list[dict] = []
+    hard_stop = False              # blocked / 同签名连发 → 立即 panic（H13）
 
     for f, start, end in slices:
         key = (f.name, start, end)
@@ -303,9 +312,29 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
             parsed = agent.extract_json(out) if rc == 0 else None
             if parsed and parsed.get("status") == "blocked":
                 blocked = True
+                hard_stop = True
                 print(f"[porter] P4: 切片 {f.name}:{start}-{end} 被agent报"
                       f" blocked：{str(parsed.get('notes', ''))[:200]}"
-                      "——停车（映射问题走人工）")
+                      "——立即停车（映射问题走人工，不烧 attempts）")
+                gates.panic(ws, {
+                    "id": f"p4.blocked.{module}.{f.name}-{start}",
+                    "kind": "decision", "gate_type": "decision",
+                    "phase": "P4", "module": module,
+                    "question": (
+                        f"切片 {f.name}:{start}-{end} 迁移中 agent 报映射"
+                        "不可用——P2/P3 的前提可能错了。请重新裁定该 API "
+                        "的映射与处置（改映射/换思路/加平台补丁）。"),
+                    "context_files": [f"P4/{module}/logs/",
+                                      "P2/mapping.md"],
+                    "answer_form": [
+                        {"field": "instruction", "type": "text",
+                         "required": True,
+                         "hint": "新的处置指令（将回写 gap_decisions 与 "
+                                 "mapping notes）"},
+                        {"field": "rationale", "type": "text",
+                         "required": True}],
+                    "applies_to": {"modules": [module]},
+                })
                 break
             if parsed and parsed.get("status") == "done":
                 b = probe_mod.probe_build(ws / "P4", target_os, runner,
@@ -333,6 +362,35 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                         log_path.read_text(encoding="utf-8",
                                            errors="replace").splitlines()
                         [-40:])
+                # 同签名零进展检测：编译错误尾 40 行哈希相同连发 →
+                # agent 在打转，提前 panic（不再烧满 MAX_TRIES）
+                sig = hashlib.sha1(
+                    err_tail.encode("utf-8")).hexdigest()[:12] \
+                    if err_tail.strip() else ""
+                if sig:
+                    sig_counts[sig] = sig_counts.get(sig, 0) + 1
+                    if sig_counts[sig] >= SAME_SIG_REPEAT:
+                        hard_stop = True
+                        print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                              f"同签名失败连发 {sig_counts[sig]} 次"
+                              "（零进展）——panic")
+                        gates.panic(ws, {
+                            "id": f"p4.slice_sig.{module}.{f.name}-{start}",
+                            "kind": "retry", "gate_type": "failure",
+                            "phase": "P4", "module": module, "step": "p4",
+                            "question": (
+                                f"切片 {f.name}:{start}-{end} 编译失败呈"
+                                "同签名连发（agent 修不动同一错误）——"
+                                "错误超出该切片的自动修复能力。日志尾"
+                                f"40 行见 {log_path}。"),
+                            "context_files": [str(log_path)],
+                            "answer_form": [
+                                {"field": "note", "type": "text",
+                                 "required": False,
+                                 "hint": "诊断笔记（人工定位的根因与修复）"}],
+                            "applies_to": {"modules": [module]},
+                        })
+                        break
                 err_info = ("\n\n---\n\n## 上一次构建失败（修复后重做本片）\n"
                             f"```\n{err_tail}\n```")
             else:
@@ -348,27 +406,32 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
             break
         if not ok:
             failures.append({"file": f.name, "start": start, "end": end})
-            print(f"[porter] P4: 切片 {f.name}:{start}-{end} {MAX_TRIES} 次"
-                  "仍失败——停止本模块后续切片")
+            print(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                  f"{MAX_TRIES} 次仍失败——停止本模块后续切片")
             break
-    return (0 if not failures else 1), mig["slices"]
+    # hard_stop（blocked / 同签名连发）→ rc 3：立即停车不烧 attempts（H13）
+    rc_out = 3 if hard_stop else (0 if not failures else 1)
+    return rc_out, mig["slices"]
 
 
 # ---------- 步骤 3：轮末快速冒烟（防毒化闸门） ----------
 
 def _quick_smoke(ws: Path, target_os: Path, module: str, proj: dict,
-                 runner: dict) -> bool:
+                 runner: dict) -> bool | str:
     """compile + boot 双信号快速冒烟：保证每轮结束留下可启动树。
 
     仅判 build/boot 可用性（~10s 启动闸门）；判据级验收归 P5(M)。
+    返回 True/False；"infra" = 日志不可得（调用方 rc 3，不烧 attempts）。
     """
     b = probe_mod.probe_build(ws / "P4", target_os, runner,
                               label=f"P4_{module}_smoke_build")
     if not b["ok"]:
         print(f"[porter] P4: 轮末快速冒烟 FAIL（build）：{b['detail']}")
         return False
-    boot_ok, _log = probe_lib.boot_and_log(ws, "P4", target_os, proj,
-                                           f"P4_{module}_smoke_boot")
+    boot_ok, _log, log_state = probe_lib.boot_and_log(
+        ws, "P4", target_os, proj, f"P4_{module}_smoke_boot")
+    if log_state == "missing":
+        return "infra"            # 抢占：infra 关口已登记
     if not boot_ok:
         print("[porter] P4: 轮末快速冒烟 FAIL（boot 双信号）")
         return False
@@ -379,6 +442,11 @@ def _quick_smoke(ws: Path, target_os: Path, module: str, proj: dict,
 # ---------- 主入口 ----------
 
 def run_p4(ws: Path, module: str, order: list[str]) -> int:
+    try:                                # 观测扩全（H12）：P4 相位埋桩
+        from . import events as _ev
+        _ev.bind(ws, "p4")
+    except Exception:
+        pass
     ctx = _ctx(ws, module)
     if ctx is None:
         return 2
@@ -397,6 +465,9 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
         return rc        # 切片失败已在 migration.json 留痕；attempts 由
         # run.py 统一 bump 并判界
 
-    if not _quick_smoke(ws, target_os, module, proj, runner):
+    smoke = _quick_smoke(ws, target_os, module, proj, runner)
+    if smoke == "infra":
+        return 3                 # infra 关口停车（不烧 attempts）
+    if not smoke:
         return 1        # 冒烟失败：attempts 由 run.py 统一 bump 并判界
     return 0

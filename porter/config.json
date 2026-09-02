@@ -1,7 +1,40 @@
 {
+  "self_diagnosis": {
+    "enabled": false,
+    "_notes": "§15 失败自诊（triage 分诊 + diagnose 诊断）总开关。false = bypass：p5/p6 不自动分诊（失败走 attempts→panic），--defect-diagnose/--defect-fix 休眠。events.py 观测不受此开关控制（保留）。重设计后翻 true 重启用；PORTER_SELF_DIAGNOSIS=1 可临时强制开"
+  },
   "review_gates": {
     "l4_criteria_finalization": "human",
     "diagnosis_escalation": "agent",
-    "b_class_autofix": "agent"
+    "b_class_autofix": "agent",
+    "strategy_review": "human",
+    "_notes": "diagnosis_escalation/b_class_autofix 两键属 §15 判断机器——self_diagnosis.enabled=false 时路径不可达、自然失效；保留供重启用"
+  },
+  "routing": {
+    "default": ["rules", "agent", "human"],
+    "gates": {
+      "p0.t5.env_gate": ["human"],
+      "p0.category": ["human"],
+      "p1.resolve.cycles": ["agent", "human"],
+      "p3.gap": ["rules", "agent", "human"],
+      "p4.blocked": ["agent", "human"],
+      "loop.attempts": ["human"],
+      "p5.deferred": ["agent", "human"],
+      "p6.l4.finalize": ["human"],
+      "cp1.strategy": ["human"],
+      "cp5.promote": ["human"]
+    },
+    "allow_agent_on_human_gates": false,
+    "_notes": "register-fill/功能丢失型 gap 的必人硬路由在 p3 分类代码层实现（转 human 策略），不走配置键"
+  },
+  "checkpoints": {
+    "CP2_enabled": false,
+    "first_module_review": true,
+    "decision_debt_limit": 30
+  },
+  "policy_file": "policy.md",
+  "panic": {
+    "same_signature_repeat": 2,
+    "cluster_threshold": 3
   }
 }

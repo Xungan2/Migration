@@ -57,7 +57,12 @@ def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict] | None:
 # ---------- 人工答案 ----------
 
 def _apply_answers(ws: Path, module: str, p3m: Path) -> int:
-    """消费 answers.md 中本模块 human-gap 的答案（写回映射 + 决策）。"""
+    """消费人工-gap 答案（写回映射 + 决策）。
+
+    双协议：先走 gates 账本（`## @p3.gap.<module>.<api>` 表单答案，
+    process_answered_gates 已在 loop 入口消费并经 applier 改正本），
+    再走 legacy 自由文本（`## <linux_api>` 节）。仍有未答 human → 3。
+    """
     dec_path = p3m / "reports" / "gap_decisions.json"
     if not dec_path.exists():
         return 0
@@ -69,8 +74,6 @@ def _apply_answers(ws: Path, module: str, p3m: Path) -> int:
     from .state import consume_answers
     keys = [d["linux_api"] for d in human]
     taken = consume_answers(ws, keys)
-    if not taken:
-        return 3
     mapping = _load_mapping(ws / "P2")
     index = {e["linux_api"]: e for e in mapping["entries"]}
     n = 0
@@ -90,9 +93,14 @@ def _apply_answers(ws: Path, module: str, p3m: Path) -> int:
     _save(mapping, ws / "P2")
     dec_path.write_text(json.dumps(dec, ensure_ascii=False, indent=2),
                         encoding="utf-8")
-    print(f"[porter] P3: 人工答案写回 {n} 条（{module}）")
-    return 0 if all(d.get("strategy") != "human"
-                    for d in dec["decisions"]) else 3
+    if n:
+        print(f"[porter] P3: 人工答案写回 {n} 条（{module}）")
+    remaining = [d["linux_api"] for d in dec["decisions"]
+                 if d.get("strategy") == "human"]
+    if remaining:
+        _panic_gap_gates(ws, module, remaining)
+        return 3
+    return 0
 
 
 # ---------- 步骤 3：增量映射 ----------
@@ -329,10 +337,15 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
                 "registered": datetime.now().isoformat(timespec="seconds")})
         pp_path.write_text(json.dumps(pp, ensure_ascii=False, indent=2),
                            encoding="utf-8")
+    # #7 例外硬路由：register-fill 动平台代码（风险外溢）→ 转 human 关口
+    # （平台补丁候选照登 P7 素材；人经 gap 关口表单确认最终处置）
+    for d in rf:
+        d["strategy"] = "human"
+        if not str(d.get("instruction", "")).strip():
+            d["instruction"] = "agent 初判 register-fill（动平台）——待人确认"
     human = [d["linux_api"] for d in decisions if d["strategy"] == "human"]
     if human:
-        _write_human_questions(ws, module, [d for d in decisions
-                                            if d["strategy"] == "human"])
+        _panic_gap_gates(ws, module, human)
         print(f"[porter] P3: {module} 有 {len(human)} 条 gap 需人工决策"
               "——exit 3")
         return 3
@@ -344,17 +357,28 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
     return 0
 
 
-def _write_human_questions(ws: Path, module: str, decisions: list[dict]):
-    path = ws / "human_questions.md"
-    lines = ["# loop 人工关口（exit 3）", "",
-             f"- 模块：{module}；时间："
-             f"{datetime.now():%Y-%m-%d %H:%M}", "",
-             "## 待决 gap（把答案写入 answers.md 的 `## <linux_api>` 节后"
-             "重跑 loop）", ""]
-    for d in decisions:
-        lines += [f"### {d['linux_api']}", "",
-                  f"- instruction/理由：{d.get('instruction', '')}", ""]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+def _panic_gap_gates(ws: Path, module: str, apis: list[str]) -> None:
+    """human-gap 逐条登记 panic 关口（表单：strategy/instruction/rationale）。"""
+    from . import gates
+    for api in apis:
+        gates.panic(ws, {
+            "id": f"p3.gap.{module}.{api}", "kind": "decision",
+            "gate_type": "decision", "phase": "P3", "module": module,
+            "subject": api, "target": "gap",
+            "question": (f"Linux API `{api}`（模块 {module}）在目标 OS 无"
+                         "对应物且 agent 分类低置信。请裁定处置方式。"),
+            "context_files": [f"P3/{module}/reports/gap_decisions.json",
+                              "P2/mapping.md"],
+            "answer_form": [
+                {"field": "strategy", "type": "enum",
+                 "options": ["bypass", "fill", "register-fill"],
+                 "required": True},
+                {"field": "instruction", "type": "text", "required": True,
+                 "hint": "给 P4 的处置指令（如：丢弃 per-CPU 统计）"},
+                {"field": "rationale", "type": "text", "required": True,
+                 "hint": "理由（留档供批审与知识沉淀）"}],
+            "applies_to": {"modules": [module]},
+        })
 
 
 # ---------- 步骤 5：判据草案 ----------
@@ -467,6 +491,11 @@ def _reload_surface(p3m: Path) -> dict:
 # ---------- 主入口 ----------
 
 def run_p3(ws: Path, module: str, order: list[str]) -> int:
+    try:                                # 观测扩全（H12）：P3 相位埋桩
+        from . import events as _ev
+        _ev.bind(ws, "p3")
+    except Exception:
+        pass
     ctx = _ctx(ws, module)
     if ctx is None:
         return 2

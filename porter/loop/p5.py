@@ -31,6 +31,7 @@ from ..common import agent
 from ..env import probe as probe_mod
 from . import criteria as crit_mod
 from . import events
+from . import gates
 from . import ut_verify
 
 # "归全局系统验收"哨兵：新写 __P6__（旧编号期的 P5/__P5__ 兼容读取，
@@ -280,18 +281,6 @@ def _register_mech_none(ws: Path, module: str, c: dict) -> None:
     _save_deferred(ws, d)
 
 
-def _write_deferred_questions(ws: Path, module: str, uncleared: list[str]):
-    path = ws / "human_questions.md"
-    lines = ["# loop 人工关口（exit 3）", "",
-             f"- 模块：{module}；时间："
-             f"{datetime.now():%Y-%m-%d %H:%M}",
-             f"- deferred 无法清偿（消费者均已 done 仍 FAIL）："
-             f"{', '.join(uncleared)}", "",
-             "处理：核查 deferred.json 中对应条目 history，修正判据或"
-             "代码后在 answers.md 写 `## retry {module}` 重跑。", ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 # ---------- 步骤 1-5：验收编排 ----------
 
 _P5_RERUN_MAX = 2        # infra/判据修正后的有界重跑（§15 挂载①，内部消化）
@@ -313,8 +302,12 @@ def _criterion_map(ws: Path, module: str, order: list[str]) -> dict:
 
 def _judge_core(ws: Path, module: str, order: list[str], target_os: Path,
                 proj: dict, runner: dict, crit: dict
-                ) -> tuple[list[dict], str, str]:
-    """L1/L2/L0/L3 判定核心（无 deferred 副作用——可安全重跑）。"""
+                ) -> tuple[list[dict], str, str, str]:
+    """L1/L2/L0/L3 判定核心（无 deferred 副作用——可安全重跑）。
+
+    返回 (results, log, ut_out, log_state)；log_state=missing 时调用方
+    应中止（infra 关口已由 boot_and_log 登记，判定未对日志类判据进行）。
+    """
     from . import probes as probe_lib     # 延迟导入避免环
     results: list[dict] = []
 
@@ -325,10 +318,15 @@ def _judge_core(ws: Path, module: str, order: list[str], target_os: Path,
     b = probe_mod.probe_build(ws / "P5", target_os, runner,
                               label=f"P5_{module}_acc_build")
     rec(f"{module}.compile", "L1", b["ok"], b["detail"])
-    boot_ok, log = probe_lib.boot_and_log(ws, "P5", target_os, proj,
-                                          f"P5_{module}_acc_boot")
+    boot_ok, log, log_state = probe_lib.boot_and_log(ws, "P5", target_os,
+                                                     proj,
+                                                     f"P5_{module}_acc_boot")
     rec(f"{module}.boot", "L2", boot_ok, "boot 双信号" +
         ("PASS" if boot_ok else "FAIL"))
+    if log_state == "missing":
+        rec(f"{module}.infra_log", "infra", None,
+            "判定中止：boot 日志不可得（infra 关口待答）")
+        return results, "", "", "missing"
     ut_out = ""
     ut_mech_none = (runner.get("unit_test") or {}).get("mechanism") == "none"
     if not ut_mech_none and (runner.get("unit_test") or {}).get("cmd"):
@@ -376,7 +374,7 @@ def _judge_core(ws: Path, module: str, order: list[str], target_os: Path,
                                                       success_pattern)
                 rec(c["id"], "L0", ok, ("" if m == module else
                                         f"（累积回归 {m}）") + detail)
-    return results, log, ut_out
+    return results, log, ut_out, log_state
 
 
 def _triage_failures(ws: Path, module: str, target_os: Path, proj: dict,
@@ -433,12 +431,28 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
 
     triage_section: list[dict] = []
     for attempt in range(_P5_RERUN_MAX + 1):
-        results, log, ut_out = _judge_core(ws, module, order, target_os,
-                                           proj, runner, crit)
+        results, log, ut_out, log_state = _judge_core(ws, module, order,
+                                                      target_os, proj,
+                                                      runner, crit)
         hard_fail = [r for r in results if r["ok"] is False]
+        if log_state == "missing":
+            # 抢占（H9 重构）：判定输入不存在 → 本轮不判任何日志类判据，
+            # infra 关口已登记；写报告后 rc 3（run.py 的 open_blocking
+            # 复查衔接：人答关口后续跑，不烧 attempts）
+            report = {"module": module,
+                      "time": datetime.now().isoformat(),
+                      "results": results, "pass": False,
+                      "infra": "boot_no_log",
+                      "deferred_uncleared": [], "triage": []}
+            acceptance_path(ws, module).write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            print(f"[porter] P5: {module} 判定中止（boot 日志不可得，"
+                  "infra 关口待答）——exit 3")
+            return 3
         if not hard_fail or attempt >= _P5_RERUN_MAX:
             break
-        # ---- 失败即快照（任何重跑之前）+ 分诊（§15 挂载①）----
+        # ---- 失败即快照（任何重跑之前；events 观测，bypass 不受控） ----
         snap = events.take_failure_snapshot(
             ws, "p5", module,
             f"{len(hard_fail)} 判据 FAIL："
@@ -446,6 +460,10 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
             runner=runner, target_os=target_os,
             extra_files=[(p3_reports / "criteria.json",
                           "criteria.json")])
+        if not gates.self_diagnosis_enabled():
+            # §15 bypass（用户决策）：无自动分诊 → 不重跑，失败走
+            # attempts → panic（带快照）停给人
+            break
         triage_section = _triage_failures(ws, module, target_os, proj,
                                           runner, results, log, ut_out,
                                           snap, crit_map, cfg)
@@ -487,7 +505,29 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
     if not report["pass"]:
         return 1
     if rc_def == 3:
-        _write_deferred_questions(ws, module, uncleared)
+        from . import gates as gates_mod
+        for eid in uncleared:
+            gates_mod.panic(ws, {
+                "id": f"p5.deferred.{module}.{eid}", "kind": "decision",
+                "gate_type": "failure", "phase": "P5", "module": module,
+                "subject": eid, "target": "deferred",
+                "question": (
+                    f"deferred 判据 {eid} 无法清偿（消费者均已 done 仍 "
+                    "FAIL）。两种可能：判据本身写错（如日志级别不可达、"
+                    "正则错）或跨模块集成真坏。选 fix-criterion 给新正则"
+                    "（工具同步改 deferred 副本+criteria 正本）；选 "
+                    "fix-code 修代码后 retry。核查 deferred.json 该条目 "
+                    "history 可见历次失败详情。"),
+                "context_files": ["deferred.json",
+                                  f"P3/{module}/reports/criteria.json"],
+                "answer_form": [
+                    {"field": "verdict", "type": "enum",
+                     "options": ["fix-criterion", "fix-code"],
+                     "required": True},
+                    {"field": "new_expr", "type": "text", "required": False,
+                     "hint": "verdict=fix-criterion 时必填：新判据正则"}],
+                "applies_to": {"modules": [module]},
+            })
         return 3
     return 0
 

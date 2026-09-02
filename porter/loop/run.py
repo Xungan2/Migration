@@ -13,20 +13,44 @@
 否则拒绝（rc 2）。绕行只推进该模块走完剩余相位即 exit 0，不回落指针
 循环（指针仍指向泊车模块）。
 
-重跑即恢复：人工把答案写入 answers.md（`## <linux_api>` 或
-`## retry <module>[-p3|-p4|-p5]`）后再次运行 loop。
+重跑即恢复（resume = 幂等重入）：人工把答案写入 answers.md 后再次运行
+loop。新协议：`## @loop.attempts.<module>-<step>` 节 + note 字段（照
+human_questions.md 表单）；旧键 `## retry <module>[-pN]` 兼容仍可用。
+所有 exit-3 统一走 gates.panic()（§15 快照 + 账本 + 渲染）。
 """
 
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
-from . import p3, p4, p5
+from . import gates, p3, p4, p5
 from .state import MAX_ATTEMPTS, LoopState, parse_answers
 
 _PHASE_STEPS = ("p3", "p4", "p5")
+# 墙钟预算（panic 信号：单模块全相位推进超此秒数 = 疑似死循环/空转）
+MODULE_BUDGET_SEC = 3600
+
+
+def _attempts_panic(ws: Path, module: str, step: str, attempts: int) -> int:
+    """attempts 烧穿 → 统一 panic 关口（retry 类：note 可选诊断笔记）。"""
+    return gates.panic(ws, {
+        "id": f"loop.attempts.{module}-{step}", "kind": "retry",
+        "gate_type": "failure", "phase": f"P{step[1]}", "module": module,
+        "step": step,
+        "question": (f"{step.upper()}({module}) 失败 {attempts} 次（超界）。"
+                     "同一自动策略连续失败 = 系统性问题，请查看对应阶段 "
+                     "reports/logs 与 gates 账本 history 诊断真因；"
+                     "修复后作答将清零 attempts 并把诊断笔记带给下一轮。"),
+        "context_files": [f"P{step[1]}/{module}/reports/migration.json",
+                          f"P5/{module}/reports/acceptance.json"],
+        "answer_form": [
+            {"field": "note", "type": "text", "required": False,
+             "hint": "诊断笔记（修了什么/绕过了什么；进下一轮 prompt 并留档）"}],
+        "applies_to": {"modules": [module]},
+    })
 
 
 def _handle_retry_answers(ws: Path, state: LoopState, module: str) -> None:
@@ -73,8 +97,8 @@ def _bump_and_maybe_park(ws: Path, state: LoopState, module: str, step: str,
     if step == "p4":
         _reset_slice_progress(ws, module)
     if rc == 2 or n >= MAX_ATTEMPTS:
-        _write_attempts_questions(ws, module, step, n)
-        return True, (3 if n >= MAX_ATTEMPTS else 1)
+        return True, (_attempts_panic(ws, module, step, n)
+                      if n >= MAX_ATTEMPTS else 1)
     return False, 0
 
 
@@ -93,14 +117,32 @@ def _advance_module(ws: Path, state: LoopState, module: str,
     其他=终止退出码。"""
     phase = state.phase_of(module)
     _handle_retry_answers(ws, state, module)
+    t0 = time.monotonic()
     while phase != "done":
+        # panic 信号：墙钟预算超限（疑似 agent 空转/死循环）
+        if time.monotonic() - t0 > MODULE_BUDGET_SEC:
+            return gates.panic(ws, {
+                "id": f"loop.budget.{module}", "kind": "retry",
+                "gate_type": "failure", "phase": "loop", "module": module,
+                "step": phase if phase in _PHASE_STEPS else None,
+                "question": (f"模块 {module} 相位推进超墙钟预算 "
+                             f"{MODULE_BUDGET_SEC}s（当前相位 {phase}）——"
+                             "疑似 agent 空转或死循环，请查 events.jsonl "
+                             "尾部与各相位 logs。"),
+                "context_files": ["events.jsonl"],
+                "answer_form": [
+                    {"field": "note", "type": "text", "required": False,
+                     "hint": "诊断笔记（超时原因与处置）"}],
+                "applies_to": {"modules": [module]},
+            })
         if phase in ("pending", "p3"):
             if state.attempts(module, "p3") >= MAX_ATTEMPTS:
-                _write_attempts_questions(ws, module, "p3", MAX_ATTEMPTS)
-                return 3
+                return _attempts_panic(ws, module, "p3", MAX_ATTEMPTS)
             state.set_phase(module, "p3")
             rc = p3.run_p3(ws, module, order)
             if rc == 3:
+                if not gates.GateLedger(ws).load().open_blocking():
+                    return None           # 路由层已消化（决策债）——幂等重进
                 return 3
             if rc != 0:
                 stop, code = _bump_and_maybe_park(ws, state, module,
@@ -112,10 +154,11 @@ def _advance_module(ws: Path, state: LoopState, module: str,
             phase = "p4"
         if phase == "p4":
             if state.attempts(module, "p4") >= MAX_ATTEMPTS:
-                _write_attempts_questions(ws, module, "p4", MAX_ATTEMPTS)
-                return 3
+                return _attempts_panic(ws, module, "p4", MAX_ATTEMPTS)
             rc = p4.run_p4(ws, module, order)
             if rc == 3:
+                if not gates.GateLedger(ws).load().open_blocking():
+                    return None           # blocked 被路由层消化——幂等重进
                 return 3
             if rc != 0:
                 stop, code = _bump_and_maybe_park(ws, state, module,
@@ -127,10 +170,11 @@ def _advance_module(ws: Path, state: LoopState, module: str,
             phase = "p5"
         if phase == "p5":
             if state.attempts(module, "p5") >= MAX_ATTEMPTS:
-                _write_attempts_questions(ws, module, "p5", MAX_ATTEMPTS)
-                return 3
+                return _attempts_panic(ws, module, "p5", MAX_ATTEMPTS)
             rc = p5.run_p5(ws, module, order)
             if rc == 3:
+                if not gates.GateLedger(ws).load().open_blocking():
+                    return None           # deferred 被路由层消化——幂等重进
                 return 3
             if rc != 0:
                 stop, code = _bump_and_maybe_park(ws, state, module,
@@ -143,6 +187,60 @@ def _advance_module(ws: Path, state: LoopState, module: str,
     return 0
 
 
+def _settle_debt_checkpoint(ws: Path) -> None:
+    """债检查点结算：cp.debt.* 已批审 → 批量结清当前决策债。
+
+    - approve：pending 决策债全部 resolved（批量批审）；逐条否决留给
+      `## @<gate_id>` verdict: veto（先于本检查点作答即可）。
+    - reject：关口重开（保持阻塞——人须逐条处理或改为 approve）。
+    """
+    ledger = gates.GateLedger(ws).load()
+    acted = False
+    for g in ledger.gates:
+        if not g["id"].startswith("cp.debt."):
+            continue
+        if g.get("status") != "applied":
+            continue
+        verdict = (g.get("answer") or {}).get("verdict", "").lower()
+        if verdict == "approve":
+            for d in list(ledger.pending_review()):
+                if not d["id"].startswith("cp.debt."):
+                    gates.resolve_applied(ledger, d["id"],
+                                          "债检查点批量批审")
+            gates.resolve_applied(ledger, g["id"], "债检查点完成")
+            acted = True
+        elif verdict == "reject":
+            g["status"] = "open"          # 重开：债务仍须处置
+            g["history"].append({"time": datetime.now().isoformat(
+                timespec="seconds"), "event": "reopened",
+                "detail": "reject——请逐条 veto/approve 后重新 approve"})
+            acted = True
+    if acted:
+        ledger.save()
+
+
+def _debt_checkpoint(ws: Path, state: LoopState) -> int:
+    """债限额软停：收窄计数（skip/measure/low）≥ 限额 → 批审检查点。"""
+    from . import routing as _routing
+    ledger = gates.GateLedger(ws).load()
+    n = _routing.debt_count(ledger)
+    if n < _routing.debt_limit(ws):
+        return 0
+    seq = sum(1 for g in ledger.gates if g["id"].startswith("cp.debt."))
+    return gates.checkpoint_run(ws, "CP-DEBT", register=[{
+        "id": f"cp.debt.{seq}", "kind": "approval", "gate_type": "decision",
+        "phase": "loop", "checkpoint": "CP-DEBT",
+        "question": (f"决策债达限额（{n} ≥ {_routing.debt_limit(ws)}，"
+                     "收窄计数：跳过决策/量尺修改/低置信）。digest 列出全部"
+                     "债项——逐条否决用 `## @<债项id>` verdict: veto；"
+                     "整体放行 approve（批量结清）。"),
+        "context_files": ["checkpoints/CP-DEBT_digest.md"],
+        "answer_form": [
+            {"field": "verdict", "type": "enum",
+             "options": ["approve", "reject"], "required": True},
+            {"field": "note", "type": "text", "required": False}]}])
+
+
 def run_loop(ws: Path, module: str | None = None,
              max_modules: int | None = None) -> int:
     state = LoopState(ws)
@@ -152,6 +250,9 @@ def run_loop(ws: Path, module: str | None = None,
     if not proj_path.exists():
         print(f"[porter] loop: 缺少 {proj_path}")
         return 2
+    # 消费 answers.md 的 `## @<gate_id>` 节（新协议：校验→记账→应用）
+    gates.process_answered_gates(ws)
+    _settle_debt_checkpoint(ws)
     order = state.order
 
     # 指定模块须在序内
@@ -205,23 +306,44 @@ def run_loop(ws: Path, module: str | None = None,
         n_done += 1
         print(f"[porter] loop: ✔ {target} 完成"
               f"（{len(state.done_set())}/{len(order)}）")
+        # 债限额软停（收窄计数；夜间自治 = limit 默认 30）
+        rc = _debt_checkpoint(ws, state)
+        if rc != 0:
+            _write_loop_report(ws, state)
+            return rc
+        # FM 首模块检查点（默认开：用最小沉没成本抓系统性问题，
+        # resolved 后永不再停）
+        if n_done == 1 and gates.first_module_review_enabled():
+            fm = gates.GateLedger(ws).load().find(f"cp.fm.{target}")
+            if fm is None or fm.get("status") in ("open", "invalid"):
+                rc = gates.checkpoint_run(ws, "FM", register=[{
+                    "id": f"cp.fm.{target}", "kind": "approval",
+                    "gate_type": "decision", "phase": "loop",
+                    "checkpoint": "FM", "module": target,
+                    "question": (
+                        f"首模块 {target} 已走完 P3→P4→P5。digest 汇集其"
+                        "决策债/判据/代码量/attempts——回答一个问题："
+                        "这套模式可以放心复制给剩余模块吗？"),
+                    "context_files": [
+                        f"P3/{target}/reports/gap_decisions.json",
+                        f"P5/{target}/reports/acceptance.json"],
+                    "answer_form": [
+                        {"field": "verdict", "type": "enum",
+                         "options": ["approve", "veto"], "required": True},
+                        {"field": "note", "type": "text", "required": False,
+                         "hint": "调整要求（如改 policy 规则/映射）"}],
+                    "applies_to": {"modules": [target]}}])
+                if rc != 0:
+                    _write_loop_report(ws, state)
+                    return rc
         target = state.pointer()
     _write_loop_report(ws, state)
+    if state.pointer() is None:
+        # CP3 指针：L4 草案生成 + 定稿审（p6.l4.finalize 关口即 CP3 载体）
+        print("[porter] loop: 全部模块完成——CP3 入口：`p6 --draft-l4`"
+              "（草案生成）→ `p6 --finalize-l4`（人审定稿）")
+        gates.checkpoint_digest(ws, "CP3")
     return 0
-
-
-def _write_attempts_questions(ws: Path, module: str, step: str,
-                              attempts: int) -> None:
-    path = ws / "human_questions.md"
-    lines = ["# loop 人工关口（exit 3）", "",
-             f"- 模块：{module}（{step}）；时间："
-             f"{datetime.now():%Y-%m-%d %H:%M}",
-             f"- 原因：{step} 失败 {attempts} 次（超界）", "",
-             "处理：查看对应阶段 reports/logs 定位问题，修复后在 "
-             "answers.md 写：", "",
-             f"    ## retry {module}-{step}", "",
-             "然后重跑 loop（attempts 清零、断点续跑）。", ]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_loop_report(ws: Path, state: LoopState) -> None:
