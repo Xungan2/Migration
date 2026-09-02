@@ -104,6 +104,15 @@ def _save_runner_ut(ws: Path, runner: dict, ut: dict) -> None:
                                                indent=2), encoding="utf-8")
 
 
+def _refresh_runbook(ws: Path) -> None:
+    """runbook 域收成（P5 回填后——固定知识定点产出）。失败仅警告。"""
+    try:
+        from ..bootstrap import runbook as _rb
+        _rb.draft_runbook(ws)
+    except Exception as e:
+        print(f"[porter] P5: ⚠️ runbook 草稿刷新失败（不影响主流程）：{e}")
+
+
 def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
                       runner: dict) -> dict:
     """unit_test 节获取 + 第二道烟测（真跑驱动级命令机器复核）。
@@ -122,6 +131,7 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
                                             "unit_test_smoke_backfill")
         ut["verified"] = ok
         _save_runner_ut(ws, runner, ut)
+        _refresh_runbook(ws)
         if ok:
             print("[porter] P5: unit_test 烟测 PASS（verified:true）")
         else:
@@ -171,6 +181,7 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
     ut["reviewed"] = False
     ut["discovered_by"] = "porter/loop backfill"
     _save_runner_ut(ws, runner, ut)
+    _refresh_runbook(ws)
     print(f"[porter] P5: unit_test 节回填 mechanism={ut.get('mechanism')}"
           f" verified={ut.get('verified')}（reviewed:false）")
     if not ut.get("verified"):

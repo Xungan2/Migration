@@ -27,9 +27,9 @@ knowledge/
 knowledge/temp/
 ├── maps/<驱动>@<目标>.md/.json      # P2/P3 映射表草稿（幂等覆盖）
 ├── splits/strategies/<驱动>.md     # P1 策略样例草稿
-├── gaps/<api>.md                   # （后续切片）gap 处置草稿
-├── runbook/                        # （后续切片）手册草稿
-└── candidates/                     # （后续切片）随机知识候选暂存
+├── gaps/<驱动>@<目标>/<api>.md     # gap 处置决策 + fill 成败草稿
+├── runbook/<目标OS>/<主题>.md      # 目标 OS 操作手册草稿
+└── candidates/                     # （随机知识候选暂存——探查钩子接入）
 ```
 
 ## 约定

@@ -303,6 +303,7 @@ def _apply_gap(ws: Path, gate: dict, answer: dict) -> str:
     api = gate.get("subject") or gate.get("id", "").rsplit(".", 1)[-1]
     strategy = (answer.get("strategy") or "bypass").strip()
     instruction = (answer.get("instruction") or "").strip()
+    rationale = (answer.get("rationale") or "").strip()
     dec_path = (Path(ws) / "P3" / (module or "") / "reports" /
                 "gap_decisions.json")
     if not dec_path.exists():
@@ -314,11 +315,14 @@ def _apply_gap(ws: Path, gate: dict, answer: dict) -> str:
             d["strategy"] = strategy
             d["instruction"] = instruction
             d["answered"] = True
+            if rationale:
+                d["rationale"] = rationale      # 随草稿收成入 gaps 域
             hit = True
     if not hit:
         dec.setdefault("decisions", []).append(
             {"linux_api": api, "strategy": strategy,
-             "instruction": instruction, "answered": True})
+             "instruction": instruction, "answered": True,
+             **({"rationale": rationale} if rationale else {})})
     dec_path.write_text(json.dumps(dec, ensure_ascii=False, indent=2),
                         encoding="utf-8")
     # mapping notes 同步（尽力而为；文件缺失不致命）

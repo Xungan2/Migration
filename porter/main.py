@@ -190,6 +190,12 @@ def cmd_p0(args) -> int:
 
     # T5 门禁（FAIL = 环境坏 → panic 关口：agent 只备料，人修环境）
     if t5.run_gate(ws):
+        # runbook 域收成（T5 过后 runner 定型——固定知识定点产出）
+        try:
+            from porter.bootstrap import runbook as _rb
+            _rb.draft_runbook(ws)
+        except Exception as _e:
+            print(f"[porter] p0: ⚠️ runbook 草稿刷新失败（不影响主流程）：{_e}")
         # CP0 环境审：非阻塞 memo（runner 复核建议，复活死标志
         # meta.reviewed 的意图）+ digest——T3 阻塞问题已是 panic 关口
         from porter.loop import gates as _gates3

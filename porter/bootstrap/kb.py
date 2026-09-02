@@ -309,7 +309,9 @@ def promote_entries(domain: str, files: list[str] | None,
     dst.mkdir(parents=True, exist_ok=True)
     moved: list[str] = []
     for e in rows:
-        shutil.move(str(src / str(e["file"])), str(dst / str(e["file"])))
+        dst_f = dst / str(e["file"])
+        dst_f.parent.mkdir(parents=True, exist_ok=True)  # 嵌套命名空间（gaps/runbook）
+        shutil.move(str(src / str(e["file"])), str(dst_f))
         moved.append(str(e["file"]))
     mset = set(moved)
     save_index(src, [e for e in idx

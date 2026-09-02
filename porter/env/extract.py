@@ -68,13 +68,14 @@ def validate_runner(r: dict) -> list[str]:
 # ---------- prompt 组装 ----------
 
 def _prompt_r1(skill: str, materials: list[Path], target_os: Path,
-               categories: list[str]) -> str:
+               categories: list[str], catalog: str = "") -> str:
     mat_lines = "\n".join(f"  - {m.resolve()}" for m in materials) or "  （无——仅凭源码树）"
     return (f"{skill}\n\n---\n\n## 任务数据（首轮提取）\n\n"
             f"资料列表（自己去读，文件或目录均可）：\n{mat_lines}\n"
             f"目标 OS 源码树：`{target_os.resolve()}`（树内 README/构建文件/CI 配置同样是你可用的资料）\n"
-            f"设备类别标签：{categories or '未知'}\n\n"
-            f"按 SKILL 提取并只输出一个 JSON 块。")
+            f"设备类别标签：{categories or '未知'}\n"
+            + (f"\n{catalog}\n" if catalog else "")
+            + "\n按 SKILL 提取并只输出一个 JSON 块。")
 
 
 def _prompt_fix(skill: str, round_no: int, prev_output: dict,
@@ -220,9 +221,16 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
         return 1
 
     # ---- R1..R3：自动循环 ----
+    # runbook 目录注入（起点假设——环境会漂移，命令/特征仍须本轮实测复核）
+    try:
+        from ..bootstrap import kb as _kb
+        runbook_cat = _kb.catalog_block(_kb.kb_dir_for(ws), ["runbook"])
+    except Exception:
+        runbook_cat = ""
     for round_no in range(1, MAX_AUTO_ROUNDS + 1):
         if round_no == 1:
-            prompt = _prompt_r1(skill, materials, target_os, categories)
+            prompt = _prompt_r1(skill, materials, target_os, categories,
+                                runbook_cat)
         else:
             prompt = _prompt_fix(skill, round_no, rounds_out[-1],
                                 rounds_probes[-1], prev_defects)

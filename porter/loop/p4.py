@@ -74,6 +74,8 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
         return 0
     driver = Path(proj["linux_driver"]).name
     skill = agent.load_skill("P4-gap-fill")
+    from ..bootstrap import kb as _kb
+    kb_dir = _kb.kb_dir_for(ws)
     pp_path = ws / "platform_patches.json"
     pp = json.loads(pp_path.read_text(encoding="utf-8")) \
         if pp_path.exists() else {"patches": []}
@@ -89,6 +91,16 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
         print(f"[porter] P4: fill {api} …")
         lines = (f"- {api}：缺什么/绕过候选={d.get('instruction', '')[:200]}；"
                  f"P3 建议 evidence={d.get('evidence', '')}")
+        # gaps 域历史记录（文件名存在性；fill 曾失败者 agent 必读）
+        try:
+            from ..bootstrap import gaps as gaps_kb
+            prior = gaps_kb.prior_entry(kb_dir, api)
+            if prior is not None:
+                lines += (f"\n- ⚠ 历史记录：该 API 在先前迁移有 gap 处置/"
+                          f"fill 记录（{prior}）——动手前先读它，"
+                          f"历史 fill 失败原因必须正面回应而非重蹈")
+        except Exception:
+            pass
         prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
                   f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
                   f"- 驱动 crate：`{target_os / 'kernel' / 'core' / 'comps' / driver}`"

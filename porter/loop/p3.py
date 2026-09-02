@@ -210,7 +210,7 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
 
 def _prompt_gap_classify(skill: str, driver_root: Path, target_os: Path,
                          module: str, gaps: list[dict],
-                         locs: dict) -> str:
+                         locs: dict, catalog: str = "") -> str:
     lines = "\n".join(
         f"- {g['linux_api']}：target={g['target'][:120]}；notes="
         f"{g['notes'][:120]}；risk={g['risk']}；confidence={g['confidence']}；"
@@ -219,8 +219,10 @@ def _prompt_gap_classify(skill: str, driver_root: Path, target_os: Path,
     return (f"{skill}\n\n---\n\n## 背景数据\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
             f"- 模块：{module}\n\n## 本模块面 gap 条目\n{lines}\n"
-            f"\n## 任务（类型 B：gap 处置分类）\n逐条给出 strategy 与可执行"
-            f"指令，输出紧凑 JSON 块。")
+            + (f"\n{catalog}\n" if catalog else "")
+            + f"\n## 任务（类型 B：gap 处置分类）\n逐条给出 strategy 与可执行"
+            f"指令，输出紧凑 JSON 块（可附 kb_consulted 数组报告读过的"
+            f"知识条目）。")
 
 
 def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
@@ -262,8 +264,10 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
 
     skill = agent.load_skill("P3-module-map")
     locs = surface.get("usage_locations") or {}
+    kb_dir = kb.kb_dir_for(ws)
+    cat = kb.catalog_block(kb_dir, ["gaps"])
     base = _prompt_gap_classify(skill, Path(""), target_os, module, gaps,
-                                locs)
+                                locs, cat)
     decisions: list[dict] = []
     feedback = ""
     for attempt in range(1, MAX_TRIES + 1):
@@ -273,6 +277,9 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
             timeout_sec=AGENT_TIMEOUT_SEC)
         parsed = agent.extract_json(out) if rc == 0 else None
         if parsed and isinstance(parsed.get("decisions"), list):
+            cons = parsed.get("kb_consulted")
+            if isinstance(cons, list):
+                kb.record_consulted(kb_dir, "gaps", cons)
             decisions = []
             errs = []
             covered = set()
@@ -493,11 +500,16 @@ def _reload_surface(p3m: Path) -> dict:
 # ---------- 主入口 ----------
 
 def _refresh_drafts(ws: Path) -> None:
-    """刷新知识草稿（增量沉淀；不自动晋升）。失败仅警告。"""
+    """刷新知识草稿（maps + gaps；增量沉淀；不自动晋升）。失败仅警告。"""
     try:
         kn.draft_knowledge(ws)
     except Exception as e:
         print(f"[porter] P3: ⚠️ 知识草稿刷新失败（不影响主流程）：{e}")
+    try:
+        from ..bootstrap import gaps as gaps_kb
+        gaps_kb.draft_gaps(ws)
+    except Exception as e:
+        print(f"[porter] P3: ⚠️ gaps 草稿刷新失败（不影响主流程）：{e}")
 
 
 def run_p3(ws: Path, module: str, order: list[str]) -> int:
