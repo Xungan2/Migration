@@ -1,8 +1,8 @@
 # log 子系统（统一观测框架）
 
-> 状态：本轮（log 重建）落地核心框架 + 试点迁移；print 全量收编为
-> 已商定的后续工作（见 TODO 第 2 条残余项）。规范以本文为准，代码与
-> 本文冲突时以代码为准并回改本文。
+> 状态：核心框架 + print 全量收编 + 上下文接续 API 接入均已落地
+> （实现地图见 §10；真实 e2e 验证待下次实际迁移轮次顺带完成）。
+> 规范以本文为准，代码与本文冲突时以代码为准并回改本文。
 
 ## 1. 目标与原则
 
@@ -237,7 +237,7 @@ console 级别阈值：环境变量 `PORTER_LOG_LEVEL`（debug/info/warn/error�
 | gates（§3.9） | gate-* / policy-hit 事件族 + panic→快照 | 不变 |
 | knowledge（§3.9） | kb-candidate 事件 + CP5 健康报告（读域账本，不读流） | 不变 |
 | §15 重设计（TODO #3） | tail_events / query.events + evidence 的 events_tail + context_block | 预留（bypass 中） |
-| P4 重试 | context_block（收编 err_info 手工拼接） | API 就绪，调用点迁移属后续切片 |
+| P4 重试 | tail_block（err_info 构建）+ context_block | 已接入（tail_block；context_block 供跨 run 场景随用随取） |
 | TODO #6 kb_consulted 遥测 | query.events(kind_prefix="gate-auto-answered") 等 | 预留 |
 
 ## 10. 实现地图与测试
