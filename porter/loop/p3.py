@@ -24,13 +24,13 @@ from datetime import datetime
 from pathlib import Path
 
 from ..bootstrap import knowledge as kn
+from ..bootstrap import kb
 from ..bootstrap.mapping import (BATCH_SIZE, MAX_TRIES, _check_evidence,
                                  _load_mapping, _merge, _save,
                                  _validate_entries)
 from ..common import agent
 from ..env import probe as probe_mod
 from . import criteria as crit_mod
-from . import knowledge_consume
 from . import probes as probe_lib
 from . import surface as surface_mod
 
@@ -126,7 +126,7 @@ def _prompt_map_type_a(skill: str, driver_root: Path, target_os: Path,
 
 
 def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
-                          module: str, p3m: Path, proj: dict,
+                          module: str, p3m: Path,
                           surface: dict) -> list[str]:
     """真缺失符号的增量映射。返回失败域清单。
 
@@ -146,17 +146,15 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
     skill = agent.load_skill("P3-module-map")
     failed: list[str] = []
     locs = surface.get("usage_locations") or {}
+    # 知识库目录注入（统一检索面：INDEX + agent 自取；替代旧内容注入）
+    kb_dir = kb.kb_dir_for(ws)
+    cat = kb.catalog_block(kb_dir, ["maps"])
     for domain, syms in sorted(missing_by_domain.items()):
         for i in range(0, len(syms), BATCH_SIZE):
             batch = syms[i:i + BATCH_SIZE]
             dom_key = domain.replace("/", "_")
-            hints, _hit = knowledge_consume.collect_hints(
-                ws,
-                proj.get("driver_name") or Path(proj["linux_driver"]).name,
-                Path(proj["target_os"]).name, proj.get("category") or [],
-                [domain])
             base = _prompt_map_type_a(skill, driver_root, target_os, module,
-                                      domain, batch, locs, hints)
+                                      domain, batch, locs, cat)
             got: list[dict] = []
             feedback = ""
             for attempt in range(1, MAX_TRIES + 1):
@@ -167,8 +165,11 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
                     timeout_sec=AGENT_TIMEOUT_SEC)
                 parsed = agent.extract_json(out) if rc == 0 else None
                 if parsed and "entries" in parsed:
+                    cons = parsed.get("kb_consulted")
+                    if isinstance(cons, list):
+                        kb.record_consulted(kb_dir, "maps", cons)
                     got, errs = _validate_entries(parsed["entries"],
-                                                  target_os, domain)
+                                                   target_os, domain)
                     covered = {e["linux_api"] for e in got}
                     missing_now = [s for s in batch if s not in covered]
                     if got and not missing_now and not errs:
@@ -491,6 +492,14 @@ def _reload_surface(p3m: Path) -> dict:
 
 # ---------- 主入口 ----------
 
+def _refresh_drafts(ws: Path) -> None:
+    """刷新知识草稿（增量沉淀；不自动晋升）。失败仅警告。"""
+    try:
+        kn.draft_knowledge(ws)
+    except Exception as e:
+        print(f"[porter] P3: ⚠️ 知识草稿刷新失败（不影响主流程）：{e}")
+
+
 def run_p3(ws: Path, module: str, order: list[str]) -> int:
     try:                                # 观测扩全（H12）：P3 相位埋桩
         from . import events as _ev
@@ -507,26 +516,25 @@ def run_p3(ws: Path, module: str, order: list[str]) -> int:
         return rc
 
     failed_batches = _step_missing_mapping(ws, driver_root, target_os,
-                                           module, p3m, proj, surface)
+                                            module, p3m, surface)
 
     rc = _step_gap_decisions(ws, target_os, module, p3m, surface)
     if rc != 0:
+        _refresh_drafts(ws)     # H18：exit-3 路径也刷新（人工答案恰在此轮）
         return rc
 
     rc = _step_criteria(ws, module, p3m, surface)
     if rc != 0:
+        _refresh_drafts(ws)     # 同 H18：失败路径不丢增量
         return rc
 
     rc = _step_probes(ws, driver_root, target_os, module, p3m, proj,
                       surface, order)
     if rc != 0:
+        _refresh_drafts(ws)
         return rc
 
-    # 刷新知识草稿（增量沉淀；不自动晋升）
-    try:
-        kn.draft_knowledge(ws)
-    except Exception as e:
-        print(f"[porter] P3: ⚠️ 知识草稿刷新失败（不影响主流程）：{e}")
+    _refresh_drafts(ws)
 
     _write_report(ws, module, p3m, failed_batches)
     return 0 if not failed_batches else 1

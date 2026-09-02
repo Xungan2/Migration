@@ -32,30 +32,26 @@ knowledge/temp/maps/             # 草稿分区（p2-map 自动写入/刷新）
     <驱动>@<目标>.md/.json
 ```
 
-## INDEX.json 格式（两分区相同，裸数组）
+## INDEX.json 格式（两分区相同，薄目录：file/desc/hits）
 
 ```json
 [{
-  "entry_stem": "e1000@asterinas",
-  "entry_file": "e1000@asterinas.md",
-  "entry_json": "e1000@asterinas.json",
-  "driver_name": "e1000",
-  "target_os": "asterinas",
-  "target_os_commit": "<基线 commit（scope 校验用）>",
-  "category": ["net"],
-  "counts": {"direct": 54, "adapt": 311, "gap": 154, "not-migrated": 140},
-  "redesigns": 7,
-  "version": 1,
-  "hits": 0,
-  "updated": "..."
+  "file": "e1000@asterinas.md",
+  "desc": "e1000@asterinas 完整映射表（adapt 315，direct 55，gap 161，"
+          "not-migrated 319；换思路 7）——机器表 e1000@asterinas.json 同目录",
+  "hits": 0
 }]
 ```
 
+- `desc` 是给 agent 检索的一句话描述（条目按需自取的目录面）；
+- `hits` = 被 agent 报告实际阅读（kb_consulted）的次数；
+- 条目身份（驱动/目标）由文件名 stem `驱动@目标` 携带。
+
 ## 晋升语义（与 p1-promote 的差异）
 
-映射表是**活文档**（P3(M) 循环持续增量），故同名条目晋升 =
-**版本更新替换**（version+1、保留 hits）；不做 P1 式快照并存
-（否则 15 轮循环会堆积 15 个版本）。不同名 = 新增条目。
+映射表是**活文档**（P3(M) 循环持续增量），故同名条目晋升 = **替换**
+（hits 取两侧较高值）；不做 P1 式快照并存（否则 15 轮循环会堆积
+15 个版本）。不同名 = 新增条目。
 
 ## 消费规则（铁律，与映射 agent SKILL 同款）
 

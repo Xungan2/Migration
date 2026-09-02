@@ -154,6 +154,78 @@ class TestKbSkeleton(unittest.TestCase):
             kb.TEMP_DIR = old_temp
             shutil.rmtree(tmp)
 
+    def test_catalog(self):
+        from porter.bootstrap import kb
+        print("=== 目录注入（render_catalog / catalog_block）===")
+        old_root, old_base, old_temp = kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR
+        tmp = Path(tempfile.mkdtemp(prefix="kb_cat_"))
+        kb.KB_ROOT = tmp / "knowledge"
+        kb.BASE_DIR = kb.KB_ROOT / "base"
+        kb.TEMP_DIR = kb.KB_ROOT / "temp"
+        try:
+            kb_dir = kb.KB_ROOT / "corpus"
+            mdir = kb.domain_kb("maps", kb_dir)
+            mdir.mkdir(parents=True)
+            (mdir / "e1000@asterinas.md").write_text("x", encoding="utf-8")
+            kb.save_index(mdir, [{"file": "e1000@asterinas.md",
+                                  "desc": "e1000 完整映射表",
+                                  "hits": 3}])
+            tdir = kb.domain_temp("maps")
+            tdir.mkdir(parents=True)
+            (tdir / "foo@bar.md").write_text("y", encoding="utf-8")
+            kb.save_index(tdir, [{"file": "foo@bar.md",
+                                  "desc": "foo 草稿表", "hits": 0}])
+
+            out = kb.catalog_block(kb_dir, ["maps"])
+            ok("G1 已审+草稿两分区", "maps（已审）" in out
+               and "maps（草稿" in out and "未经人审" in out)
+            ok("G2 薄行渲染（desc + hits>0 附注）",
+               "e1000@asterinas.md —— e1000 完整映射表（hits 3）" in out
+               and "foo@bar.md —— foo 草稿表" in out
+               and "（hits 0）" not in out)
+            ok("G3 铁律含 kb_consulted", "kb_consulted" in out
+               and "重新核实" in out)
+
+            # 旧富格式行回退（pitfalls 形态：entry_file/title）
+            pdir = kb.domain_kb("pitfalls", kb_dir)
+            pdir.mkdir(parents=True)
+            (pdir / "ktest.md").write_text("z", encoding="utf-8")
+            kb.save_index(pdir, [{"id": "ktest", "title": "ktest 坑",
+                                  "entry_file": "ktest.md", "hits": 0}])
+            out = kb.catalog_block(kb_dir, ["pitfalls"])
+            ok("G4 旧富格式行回退", "ktest.md —— ktest 坑" in out)
+
+            # INDEX 缺失 → 文件名清单
+            (pdir / "INDEX.json").unlink()
+            out = kb.catalog_block(kb_dir, ["pitfalls"])
+            ok("G5 INDEX 缺失→文件清单", "- ktest.md" in out)
+
+            # 空域 → 不注入
+            ok("G6 空域→空串", kb.catalog_block(kb_dir, ["gaps"]) == "")
+            # kb_dir=None → 只剩草稿分区
+            out = kb.catalog_block(None, ["maps"])
+            ok("G7 无 kb_dir→仅草稿", "foo@bar.md" in out
+               and "e1000@asterinas.md" not in out
+               and out.count("###") == 1)
+            # include_temp=False → 仅已审
+            out = kb.catalog_block(kb_dir, ["maps"], include_temp=False)
+            ok("G8 关草稿→仅已审", "已审" in out and "草稿" not in out
+               and "foo@bar.md" not in out)
+
+            # record_consulted：只记已审分区
+            n = kb.record_consulted(kb_dir, "maps",
+                                    ["e1000@asterinas.md", "foo@bar.md"])
+            idx = kb.load_index(mdir)
+            tidx = kb.load_index(tdir)
+            ok("G9 只记已审命中", n == 1
+               and idx[0]["hits"] == 4 and tidx[0]["hits"] == 0)
+            ok("G10 None kb_dir → 0",
+               kb.record_consulted(None, "maps", ["x.md"]) == 0)
+        finally:
+            kb.KB_ROOT, kb.BASE_DIR, kb.TEMP_DIR = \
+                old_root, old_base, old_temp
+            shutil.rmtree(tmp)
+
     def test_select_kb(self):
         from porter.bootstrap import kb
         print("=== p0 --kb 选择（select_kb）===")

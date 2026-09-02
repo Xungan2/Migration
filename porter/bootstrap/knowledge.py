@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import shutil
-from datetime import datetime
 from pathlib import Path
 
 from . import kb
@@ -82,7 +81,7 @@ def _value_judgment(mapping: dict) -> tuple[dict, list[str]]:
 
 
 def draft_knowledge(ws: Path) -> int:
-    """草稿：工作区映射表 → knowledge/temp/maps（幂等覆盖）+ 报告价值判定节。"""
+    """草稿：工作区映射表 → knowledge/temp/maps（幂等覆盖）+ 薄 INDEX 行。"""
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     mapping_path = ws / "P2" / "mapping.json"
     md_path = ws / "P2" / "mapping.md"
@@ -103,20 +102,21 @@ def draft_knowledge(ws: Path) -> int:
                  if e.get("verdict") == v)
           for v in ("direct", "adapt", "gap", "not-migrated")}
     idx = kb.load_index(tdir) or []
-    entry = next((e for e in idx if e.get("entry_stem") == stem), None)
-    if entry is None:
-        entry = {"entry_stem": stem, "hits": 0}
-        idx.append(entry)
-    entry.update({
-        "entry_file": f"{stem}.md", "entry_json": f"{stem}.json",
-        "driver_name": driver, "target_os": target,
-        "target_os_commit": (proj.get("target_os_baseline") or {})
-        .get("baseline_commit"),
-        "category": proj.get("category") or [],
-        "counts": vc,
-        "redesigns": len(mapping.get("redesigns", [])),
-        "updated": datetime.now().isoformat(timespec="seconds"),
-    })
+    # 清同 stem 的旧行（含旧富格式 entry_file 行），保留其 hits
+    fname = f"{stem}.md"
+    old_hits = max([int(e.get("hits", 0) or 0)
+                    for e in idx if isinstance(e, dict)
+                    and (e.get("file") == fname or e.get("entry_file")
+                         == fname)] or [0])
+    idx = [e for e in idx if not (isinstance(e, dict)
+                                  and (e.get("file") == fname
+                                       or e.get("entry_file") == fname))]
+    desc = (f"{stem} 完整映射表（"
+            + "，".join(f"{k} {v}" for k, v in sorted(vc.items()))
+            + f"；换思路 {len(mapping.get('redesigns', []))}）"
+            f"——机器表 {stem}.json 同目录")
+    row = {"file": fname, "desc": desc, "hits": old_hits}
+    idx.append(row)
     kb.save_index(tdir, idx)
 
     _stats, lines = _value_judgment(mapping)
@@ -135,16 +135,21 @@ def draft_knowledge(ws: Path) -> int:
 
 def promote_map(driver: str, kb_dir: Path,
                 target: str | None = None) -> int:
-    """晋升：knowledge/temp/maps → <知识库目录>/maps。
+    """晋升：knowledge/temp/maps → <知识库目录>/maps（薄 INDEX 行）。
 
-    同名 = 版本更新替换（活文档）。kb_dir = 本次迁移的知识库目录
-    （p0 --kb 指定，main.py 从工作区 project.json 解析）。
+    条目文件名 = `<驱动>@<目标>.md`（stem 携带身份；同名 = 活文档替换，
+    hits 取两侧较高值）。kb_dir = 本次迁移的知识库目录。
     """
     tdir = kb.domain_temp("maps")
     tidx = kb.load_index(tdir) or []
-    cands = [e for e in tidx if isinstance(e, dict)
-             and e.get("driver_name") == driver
-             and (target is None or e.get("target_os") == target)]
+    rows = [e for e in tidx if isinstance(e, dict)
+            and (e.get("file") or e.get("entry_file"))]
+    cands = [e for e in rows
+             if str(e.get("file") or e.get("entry_file"))
+             .split("@", 1)[0] == driver
+             and (target is None
+                  or str(e.get("file") or e.get("entry_file"))
+                  == f"{driver}@{target}.md")]
     if not cands:
         print(f"[porter] p2-promote: knowledge/temp/maps 无匹配 "
               f"{driver}@{target or '*'} 草稿")
@@ -152,33 +157,36 @@ def promote_map(driver: str, kb_dir: Path,
     if len(cands) > 1:
         print(f"[porter] p2-promote: {len(cands)} 个匹配，请指定 --target：")
         for e in cands:
-            print(f"  - {e.get('entry_stem')}")
+            print(f"  - {e.get('file') or e.get('entry_file')}")
         return 1
     entry = cands[0]
-    stem = entry["entry_stem"]
-    src_md, src_json = tdir / f"{stem}.md", tdir / f"{stem}.json"
+    fname = str(entry.get("file") or entry.get("entry_file"))
+    stem = fname[:-3] if fname.endswith(".md") else fname
+    src_md, src_json = tdir / fname, tdir / f"{stem}.json"
     if not src_md.exists():
         print(f"[porter] p2-promote: 草稿缺失 {src_md}（temp INDEX 与磁盘不一致）")
         return 1
 
+    hits = int(entry.get("hits", 0) or 0)
+    desc = str(entry.get("desc")
+               or f"{stem} 完整映射表——机器表 {stem}.json 同目录")
     kdir = kb.domain_kb("maps", kb_dir)
     kidx = kb.load_index(kdir) or []
-    old = next((e for e in kidx if e.get("entry_stem") == stem), None)
-    version = (old.get("version", 1) + 1) if old else 1
-    hits = max(int((old or {}).get("hits", 0)),
-               int(entry.get("hits", 0)))
+    old_dst = next((e for e in kidx if isinstance(e, dict)
+                    and (e.get("file") == fname
+                         or e.get("entry_file") == fname)), None)
+    hits = max(hits, int((old_dst or {}).get("hits", 0) or 0))
     kdir.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src_md), kdir / f"{stem}.md")
+    shutil.move(str(src_md), kdir / fname)
     if src_json.exists():
         shutil.move(str(src_json), kdir / f"{stem}.json")
-    kb.save_index(tdir, [e for e in tidx if e is not entry])
-    if old is not None:
-        kidx = [e for e in kidx if e is not old]
-    entry["version"] = version
-    entry["hits"] = hits
-    entry["promoted"] = datetime.now().isoformat(timespec="seconds")
-    kidx.append(entry)
+    kb.save_index(tdir, [e for e in tidx if not (
+        isinstance(e, dict) and (e.get("file") == fname
+                                 or e.get("entry_file") == fname))])
+    kidx = [e for e in kidx if not (isinstance(e, dict)
+                                    and (e.get("file") == fname
+                                         or e.get("entry_file") == fname))]
+    kidx.append({"file": fname, "desc": desc, "hits": hits})
     kb.save_index(kdir, kidx)
-    print(f"[porter] p2-promote: {stem} 已晋升（version {version}，"
-          f"hits {hits}）→ {kdir}")
+    print(f"[porter] p2-promote: {stem} 已晋升 → {kdir}")
     return 0

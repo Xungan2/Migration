@@ -1,24 +1,7 @@
 [
   {
-    "entry_stem": "e1000@asterinas",
-    "hits": 0,
-    "entry_file": "e1000@asterinas.md",
-    "entry_json": "e1000@asterinas.json",
-    "driver_name": "e1000",
-    "target_os": "asterinas",
-    "target_os_commit": "36ae7fe1078842feb16c311fbbf22a527e9b0e28",
-    "category": [
-      "net"
-    ],
-    "counts": {
-      "direct": 55,
-      "adapt": 315,
-      "gap": 161,
-      "not-migrated": 319
-    },
-    "redesigns": 7,
-    "updated": "2026-08-31T15:11:57",
-    "version": 2,
-    "promoted": "2026-09-01T00:44:23"
+    "file": "e1000@asterinas.md",
+    "desc": "e1000@asterinas 完整映射表（adapt 315，direct 55，gap 161，not-migrated 319；换思路 7）——机器表 e1000@asterinas.json 同目录",
+    "hits": 0
   }
 ]

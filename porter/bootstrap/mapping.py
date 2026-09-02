@@ -20,6 +20,7 @@ from pathlib import Path
 
 from ..common import agent
 from . import extract_spine
+from . import kb
 
 BATCH_SIZE = 35          # 每批符号上限（32K 教训：小批次；输出帽已抬至 128K）
 MAX_TRIES = 3            # 每批：首发 + 带反馈重试 2 次
@@ -220,7 +221,7 @@ def _save(mapping: dict, p2: Path) -> None:
 
 def _prompt_map(skill: str, driver_root: Path, target_os: Path,
                 domain: str, syms: list[str], mods: list[str],
-                existing: list[str]) -> str:
+                existing: list[str], catalog: str = "") -> str:
     return (f"{skill}\n\n---\n\n## 背景数据\n"
             f"- 驱动：Linux 源码参考树 `{driver_root}`（仅语义参考）\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录，"
@@ -229,10 +230,12 @@ def _prompt_map(skill: str, driver_root: Path, target_os: Path,
             f"（被模块 {', '.join(mods)} include；未被直接 include 则为传递使用）\n"
             + (f"- 全局表已有条目（勿重复映射）：{', '.join(existing)}\n"
                if existing else "")
+            + (f"\n{catalog}\n" if catalog else "")
             + f"\n## 任务（类型 A：符号映射）\n映射以下 {len(syms)} 个符号"
             f"（均属 `{domain}` 域）：\n{', '.join(syms)}\n"
             f"逐符号核实后输出一个紧凑 JSON 块（entries 数组，"
-            f"每条 domain 填 `{domain.split(',')[0]}`）。")
+            f"每条 domain 填 `{domain.split(',')[0]}`；可附 "
+            f"kb_consulted 数组报告读过的知识条目）。")
 
 
 def _prompt_redesign(skill: str, driver_root: Path, target_os: Path) -> str:
@@ -275,6 +278,9 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     mapping = _load_mapping(p2)
     skill = agent.load_skill("P2-bootstrap-map")
     failed: list[str] = []
+    # 知识库目录注入（修 A3 不对称：P2a 与 P3 同一检索面）
+    kb_dir = kb.kb_dir_for(ws)
+    cat = kb.catalog_block(kb_dir, ["maps"])
     # 域归属权威映射（脚本事实）：条目 domain 一律以此覆盖，不信 agent 抄写
     # （合并批的 agent 抄写会错标，2026-08-29 质检实证 152 例）
     sym_dom = {s: d for d, v in spine["domains"].items()
@@ -293,12 +299,15 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         print(f"[porter] P2a: 映射批 {dom_key}——{len(todo)}/{len(syms)} 待映射")
         feedback = ""
         base = _prompt_map(skill, driver_root, target_os, dom_key, todo,
-                           mods, [s for s in syms if s in have][:10])
+                           mods, [s for s in syms if s in have][:10], cat)
         got: list[dict] = []
         for attempt in range(1, MAX_TRIES + 1):
             parsed = _call_agent(base + feedback, target_os,
                                  p2 / "logs" / f"P2A_{dom_key.replace('/', '_')}_R{attempt}")
             if parsed and "entries" in parsed:
+                cons = parsed.get("kb_consulted")
+                if isinstance(cons, list):
+                    kb.record_consulted(kb_dir, "maps", cons)
                 got, errs = _validate_entries(parsed["entries"], target_os,
                                               dom_key)
                 for e in got:       # 权威域覆盖（防合并批错标）

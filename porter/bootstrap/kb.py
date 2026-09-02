@@ -75,6 +75,96 @@ def domain_base(domain: str) -> Path:
     return BASE_DIR / DOMAINS[domain]["subdir"]
 
 
+# ---------- 消费面：目录注入 + kb_consulted 记账 ----------
+
+IRON_RULE = ("使用规则：以上为知识条目目录（INDEX）。命中相关条目后自行读取"
+             "全文；条目是历次迁移的历史主张——evidence 的 file:line 在树"
+             "演进后可能失效，必须在当前源码树/环境中重新核实后才可采用，"
+             "禁止照抄未核实结论。可在输出 JSON 中附 kb_consulted 字段"
+             "（数组：本次实际读过的条目文件名）。")
+
+
+def _row_file(e: dict) -> str:
+    return str(e.get("file") or e.get("entry_file") or "?").strip()
+
+
+def _row_desc(e: dict) -> str:
+    return str(e.get("desc") or e.get("title") or "").strip()
+
+
+def _has_entries(d: Path) -> bool:
+    if not d.is_dir():
+        return False
+    return any(f.name not in ("README.md", "INDEX.json")
+               for f in d.iterdir())
+
+
+def render_catalog(parts: list[tuple[str, Path]]) -> str:
+    """渲染知识目录注入块（parts = [(标签, 目录), ...]，调用方已筛非空）。
+
+    行格式：- <文件> —— <一句话描述>（hits N>0 时附）。INDEX 缺失/损坏
+    → 该分区退化为文件名清单（排除 README/INDEX）。返回空串 = 无可注入。
+    """
+    sections: list[str] = []
+    for label, d in parts:
+        idx = load_index(d) if d.is_dir() else None
+        if idx is not None:
+            lines = []
+            for e in idx:
+                if not isinstance(e, dict):
+                    continue
+                hits = int(e.get("hits", 0) or 0)
+                suffix = f"（hits {hits}）" if hits > 0 else ""
+                lines.append(f"- {_row_file(e)} —— {_row_desc(e)}{suffix}")
+        else:
+            lines = [f"- {f.name}"
+                     for f in sorted(d.glob("*.md"))
+                     if f.name not in ("README.md",)]
+            if not lines:
+                continue
+        sections.append(f"### {label}\n目录: {d.resolve()}\n"
+                        + "\n".join(lines))
+    if not sections:
+        return ""
+    return ("## 知识库条目目录（按需自取）\n\n"
+            + "\n\n".join(sections) + "\n\n" + IRON_RULE)
+
+
+def catalog_block(kb_dir: Path | None, domains: list[str],
+                  include_temp: bool = True) -> str:
+    """调用点注入块：各域的已审分区（知识库目录）+ 草稿分区（temp）。
+
+    已审在前、草稿在后（冲突以已审为准）；目录为空不注入。
+    """
+    parts: list[tuple[str, Path]] = []
+    if kb_dir is not None:
+        for dom in domains:
+            d = domain_kb(dom, kb_dir)
+            if _has_entries(d):
+                parts.append((f"{dom}（已审）", d))
+    if include_temp:
+        for dom in domains:
+            d = domain_temp(dom)
+            if _has_entries(d):
+                parts.append((f"{dom}（草稿，未经人审，冲突以已审为准）", d))
+    return render_catalog(parts)
+
+
+def record_consulted(kb_dir: Path | None, domain: str,
+                     files: list) -> int:
+    """kb_consulted 回报 → 已审分区 INDEX hits+1（temp 草稿不计数）。"""
+    if kb_dir is None or not files:
+        return 0
+    d = domain_kb(domain, kb_dir)
+    idx = load_index(d)
+    if not idx:
+        return 0
+    n = bump_hits(idx, [str(f) for f in files])
+    if n:
+        save_index(d, idx)
+    return n
+
+
 # ---------- 知识库目录解析 ----------
 
 def kb_dir_of(proj: dict) -> Path | None:
