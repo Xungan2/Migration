@@ -386,7 +386,7 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         "",
         "人工关口（§10 定案 6，增量沉淀）：审阅 `mapping.md`；有价值即",
         f"可 `p2-promote --driver <名> --target <目标>` 晋升（P2 末为首个",
-        "沉淀点，此后每轮循环末可再次晋升；草稿已自动入 temp/maps/）。",
+        "沉淀点，此后每轮循环末可再次晋升；草稿已自动入 knowledge/temp/maps/）。",
     ]
     (p2 / "reports" / "mapping_report.md").write_text(
         "\n".join(rpt) + "\n", encoding="utf-8")

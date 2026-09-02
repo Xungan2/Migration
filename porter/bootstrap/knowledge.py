@@ -9,6 +9,9 @@
 - 草稿节奏（增量沉淀，§10 定案 6 修订）：P2 末自动写草稿；此后每轮
   P3(M) 末 run_map 重跑时刷新（幂等覆盖）；人工随时 p2-promote 晋升
 
+目录模型（kb.py）：草稿入 knowledge/temp/maps/；晋升目标是**本次迁移
+的知识库目录**（project.json["kb_dir"]，由 p0 --kb 指定）下的 maps/。
+
 消费铁律（沉淀规范与 agent SKILL 同款）：条目是"经源码核实的主张"，
 消费时必须重核实——"核实后抄入、不跨目标复用未验证结论"。
 """
@@ -20,9 +23,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-TOOL_ROOT = Path(__file__).resolve().parent.parent.parent
-TEMP_DIR = TOOL_ROOT / "temp" / "maps"
-KNOWLEDGE_DIR = TOOL_ROOT / "knowledge" / "maps"
+from . import kb
 
 # 域三级分类（价值判定用；启发式清单，未列出的域 = 驱动特异）
 OS_GENERIC_DOMAINS = {
@@ -40,17 +41,6 @@ NET_CATEGORY_DOMAINS = {
     "linux/tcp.h", "linux/ip.h", "linux/ipv6.h", "linux/in.h",
     "net/ip6_checksum.h",
 }
-
-
-def _load_index(d: Path) -> list:
-    p = d / "INDEX.json"
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
-
-
-def _save_index(d: Path, idx: list) -> None:
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "INDEX.json").write_text(
-        json.dumps(idx, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _bucket_of(domain: str) -> str:
@@ -92,7 +82,7 @@ def _value_judgment(mapping: dict) -> tuple[dict, list[str]]:
 
 
 def draft_knowledge(ws: Path) -> int:
-    """草稿：工作区映射表 → temp/maps（幂等覆盖）+ 报告价值判定节。"""
+    """草稿：工作区映射表 → knowledge/temp/maps（幂等覆盖）+ 报告价值判定节。"""
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     mapping_path = ws / "P2" / "mapping.json"
     md_path = ws / "P2" / "mapping.md"
@@ -104,14 +94,15 @@ def draft_knowledge(ws: Path) -> int:
     stem = f"{driver}@{target}"
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
 
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(md_path, TEMP_DIR / f"{stem}.md")
-    shutil.copyfile(mapping_path, TEMP_DIR / f"{stem}.json")
+    tdir = kb.domain_temp("maps")
+    tdir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(md_path, tdir / f"{stem}.md")
+    shutil.copyfile(mapping_path, tdir / f"{stem}.json")
 
     vc = {v: sum(1 for e in mapping.get("entries", [])
                  if e.get("verdict") == v)
           for v in ("direct", "adapt", "gap", "not-migrated")}
-    idx = _load_index(TEMP_DIR)
+    idx = kb.load_index(tdir) or []
     entry = next((e for e in idx if e.get("entry_stem") == stem), None)
     if entry is None:
         entry = {"entry_stem": stem, "hits": 0}
@@ -126,7 +117,7 @@ def draft_knowledge(ws: Path) -> int:
         "redesigns": len(mapping.get("redesigns", [])),
         "updated": datetime.now().isoformat(timespec="seconds"),
     })
-    _save_index(TEMP_DIR, idx)
+    kb.save_index(tdir, idx)
 
     _stats, lines = _value_judgment(mapping)
     rpt = ws / "P2" / "reports" / "mapping_report.md"
@@ -135,20 +126,28 @@ def draft_knowledge(ws: Path) -> int:
         if "## 沉淀价值判定" not in text:
             rpt.write_text(text.rstrip() + "\n\n" + "\n".join(lines) + "\n",
                            encoding="utf-8")
-    print(f"[porter] P2 知识: 草稿已刷新 temp/maps/{stem}.md/.json"
+    print(f"[porter] P2 知识: 草稿已刷新 knowledge/temp/maps/{stem}.md/.json"
           f"（{len(mapping.get('entries', []))} 条）；"
-          f"人工审阅后可 `p2-promote --driver {driver} --target {target}`")
+          f"人工审阅后可 `p2-promote --output-dir <ws> "
+          f"--driver {driver} --target {target}`")
     return 0
 
 
-def promote_map(driver: str, target: str | None = None) -> int:
-    """晋升：temp/maps → knowledge/maps。同名 = 版本更新替换（活文档）。"""
-    tidx = _load_index(TEMP_DIR)
+def promote_map(driver: str, kb_dir: Path,
+                target: str | None = None) -> int:
+    """晋升：knowledge/temp/maps → <知识库目录>/maps。
+
+    同名 = 版本更新替换（活文档）。kb_dir = 本次迁移的知识库目录
+    （p0 --kb 指定，main.py 从工作区 project.json 解析）。
+    """
+    tdir = kb.domain_temp("maps")
+    tidx = kb.load_index(tdir) or []
     cands = [e for e in tidx if isinstance(e, dict)
              and e.get("driver_name") == driver
              and (target is None or e.get("target_os") == target)]
     if not cands:
-        print(f"[porter] p2-promote: temp/maps 无匹配 {driver}@{target or '*'} 草稿")
+        print(f"[porter] p2-promote: knowledge/temp/maps 无匹配 "
+              f"{driver}@{target or '*'} 草稿")
         return 1
     if len(cands) > 1:
         print(f"[porter] p2-promote: {len(cands)} 个匹配，请指定 --target：")
@@ -157,27 +156,29 @@ def promote_map(driver: str, target: str | None = None) -> int:
         return 1
     entry = cands[0]
     stem = entry["entry_stem"]
-    src_md, src_json = TEMP_DIR / f"{stem}.md", TEMP_DIR / f"{stem}.json"
+    src_md, src_json = tdir / f"{stem}.md", tdir / f"{stem}.json"
     if not src_md.exists():
         print(f"[porter] p2-promote: 草稿缺失 {src_md}（temp INDEX 与磁盘不一致）")
         return 1
 
-    kidx = _load_index(KNOWLEDGE_DIR)
+    kdir = kb.domain_kb("maps", kb_dir)
+    kidx = kb.load_index(kdir) or []
     old = next((e for e in kidx if e.get("entry_stem") == stem), None)
     version = (old.get("version", 1) + 1) if old else 1
-    hits = (old or {}).get("hits", 0)
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src_md), KNOWLEDGE_DIR / f"{stem}.md")
+    hits = max(int((old or {}).get("hits", 0)),
+               int(entry.get("hits", 0)))
+    kdir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src_md), kdir / f"{stem}.md")
     if src_json.exists():
-        shutil.move(str(src_json), KNOWLEDGE_DIR / f"{stem}.json")
-    _save_index(TEMP_DIR, [e for e in tidx if e is not entry])
+        shutil.move(str(src_json), kdir / f"{stem}.json")
+    kb.save_index(tdir, [e for e in tidx if e is not entry])
     if old is not None:
         kidx = [e for e in kidx if e is not old]
     entry["version"] = version
     entry["hits"] = hits
     entry["promoted"] = datetime.now().isoformat(timespec="seconds")
     kidx.append(entry)
-    _save_index(KNOWLEDGE_DIR, kidx)
+    kb.save_index(kdir, kidx)
     print(f"[porter] p2-promote: {stem} 已晋升（version {version}，"
-          f"hits {hits}）→ knowledge/maps/")
+          f"hits {hits}）→ {kdir}")
     return 0

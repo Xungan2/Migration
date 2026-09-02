@@ -9,8 +9,9 @@
 - `<驱动名>@<目标OS名>.json` —— `mapping.json` 原样（机器消费侧：
   域过滤/结构化检索；条目 9 字段 + domain）
 
-由 `p2-map` 产出映射时自动复制为草稿进入 `temp/maps/`；开发者在
-P2 末（首个沉淀点）或循环中任意时点决定是否晋升沉淀。此后每轮
+由 `p2-map` 产出映射时自动复制为草稿进入 `knowledge/temp/maps/`；
+开发者在 P2 末（首个沉淀点）或循环中任意时点决定是否晋升沉淀
+（目标 = 本次迁移的知识库目录，p0 --kb 指定）。此后每轮
 P3(M) 增量映射后草稿自动刷新（幂等覆盖）。
 
 ## 条目文件命名
@@ -22,11 +23,11 @@ P3(M) 增量映射后草稿自动刷新（幂等覆盖）。
 ## 目录结构
 
 ```
-knowledge/maps/                 # 沉淀分区（已晋升，人工审阅过）
-    INDEX.json                  #   目录：裸数组
-    README.md                   #   本文件（不注入）
+knowledge/<name>/maps/           # 沉淀分区（已晋升，人工审阅过；本域
+    INDEX.json                   #   实例 = knowledge/asterinas/maps/）
+    README.md                    #   本文件（不注入）
     <驱动>@<目标>.md/.json      #   条目（双文件）
-temp/maps/                      # 草稿分区（p2-map 自动写入/刷新）
+knowledge/temp/maps/             # 草稿分区（p2-map 自动写入/刷新）
     INDEX.json
     <驱动>@<目标>.md/.json
 ```

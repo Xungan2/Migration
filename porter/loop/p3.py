@@ -12,7 +12,7 @@
   6. 探针             risk∈{med,high} ∪ low-confidence → 生成住骨架 →
                       build+boot 双信号判定 → FAIL 有界改判 → 仍败降级 gap
                       （并入步骤 4 的决策路径重分类）
-  7. 收尾             刷新 temp/maps 草稿 + P3/<M>/reports/report.md
+  7. 收尾             刷新 knowledge/temp/maps 草稿 + P3/<M>/reports/report.md
 
 返回：0 成功 / 1 失败 / 2 前置缺失 / 3 需人工（gap 队列）。
 """
@@ -151,6 +151,7 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
             batch = syms[i:i + BATCH_SIZE]
             dom_key = domain.replace("/", "_")
             hints, _hit = knowledge_consume.collect_hints(
+                ws,
                 proj.get("driver_name") or Path(proj["linux_driver"]).name,
                 Path(proj["target_os"]).name, proj.get("category") or [],
                 [domain])

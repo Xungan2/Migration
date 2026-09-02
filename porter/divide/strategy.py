@@ -15,14 +15,16 @@ agent 产出自由 Markdown 分析，落盘后**每次都由开发人员审阅**
 （覆盖 diff / 依赖无环 / 粒度护栏）。
 
 样例库（本模块是唯一管理点；规范见
-knowledge/splits/strategies/README.md）：
-- 两分区：knowledge/splits/strategies（已沉淀）与
-  temp/splits/strategies（草稿）；条目 = 分区内除 README.md 外的 *.md
-  （每条 = 某工作区 strategy.md 输出产物原样）
+knowledge/base/splits/strategies/README.md）：
+- 三分区：knowledge/base/splits/strategies（工具随附，任意目标 OS
+  可用）、<本次知识库目录>/splits/strategies（已沉淀，p0 --kb 指定）、
+  knowledge/temp/splits/strategies（草稿）；条目 = 分区内除 README.md
+  外的 *.md（每条 = 某工作区 strategy.md 输出产物原样）
 - INDEX.json（裸数组）为条目目录，注入 strategy prompt
-- run_strategy 产出 strategy.md → 自动草稿入 temp（价值判定：与沉淀
+- run_strategy 产出 strategy.md → 自动草稿入 temp（价值判定：与已沉淀
   分区完全一致者不写）→ 写工作区报告 reports/P1-knowledge.md
-- 晋升（沉淀）：p1-promote 命令，P1 完成后由开发者自行决定执行
+- 晋升（沉淀）：p1-promote 命令（temp → 本次知识库目录），P1 完成后
+  由开发者自行决定执行
 """
 
 from __future__ import annotations
@@ -32,17 +34,25 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from ..bootstrap import kb
 from ..common import agent
 
 # ---------- 样例库 ----------
 
-SAMPLE_PARTITIONS = [
-    ("已沉淀样例", agent.TOOL_ROOT / "knowledge" / "splits" / "strategies"),
-    ("草稿样例（未经人审，与已沉淀冲突时以已沉淀为准）",
-     agent.TOOL_ROOT / "temp" / "splits" / "strategies"),
-]
-KNOWLEDGE_DIR = SAMPLE_PARTITIONS[0][1]
-TEMP_DIR = SAMPLE_PARTITIONS[1][1]
+def sample_partitions(kb_dir: Path | None) -> list[tuple[str, Path]]:
+    """样例库分区表（标签, 目录）。已沉淀 = base ∪ 知识库目录。"""
+    parts: list[tuple[str, Path]] = [
+        ("工具随附样例（base，任意目标 OS 可用）",
+         kb.domain_base("splits")),
+    ]
+    if kb_dir is not None:
+        parts.append(("已沉淀样例（本次知识库目录）",
+                      kb.domain_kb("splits", kb_dir)))
+    parts.append(("草稿样例（未经人审，与已沉淀冲突时以已沉淀为准）",
+                  kb.domain_temp("splits")))
+    return parts
+
+
 _EMPTY_NOTE = "（样例库当前为空——没有可参考的样例）"
 
 
@@ -55,27 +65,35 @@ def _list_entries(d: Path) -> list[Path]:
 
 def _load_index(d: Path) -> list | None:
     """解析 INDEX.json（裸数组）；缺失/损坏返回 None。"""
-    p = d / "INDEX.json"
-    if not p.exists():
-        return None
-    try:
-        data = json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    return data if isinstance(data, list) else None
+    return kb.load_index(d)
 
 
 def _save_index(d: Path, entries: list) -> None:
-    d.mkdir(parents=True, exist_ok=True)
-    (d / "INDEX.json").write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8")
+    kb.save_index(d, entries)
 
 
-def _build_samples_injection() -> str:
+def _curated_partitions(kb_dir: Path | None) -> list[Path]:
+    """已沉淀分区目录（base + 知识库目录）。"""
+    return [d for _label, d in sample_partitions(kb_dir)
+            if "草稿" not in _label]
+
+
+def _merged_curated_index(kb_dir: Path | None) -> list:
+    idx: list = []
+    for d in _curated_partitions(kb_dir):
+        part = _load_index(d)
+        if part is None:
+            if (d / "INDEX.json").exists():
+                print(f"[porter] P1S: ⚠️ {d / 'INDEX.json'} 损坏，按空库判定")
+            continue
+        idx.extend(part)
+    return idx
+
+
+def _build_samples_injection(ws: Path) -> str:
     """样例库注入块：导读 + 各非空分区的目录路径与 INDEX 内容。"""
     sections = []
-    for label, d in SAMPLE_PARTITIONS:
+    for label, d in sample_partitions(kb.kb_dir_for(ws)):
         entries = _list_entries(d)
         idx = _load_index(d)
         if not entries:
@@ -158,35 +176,32 @@ def _draft_to_temp(ws: Path, proj: dict, driver_root: Path,
     res = {"driver": driver, "linux_dir": proj.get("linux_driver", ""),
            "linux_files": files, "entry_file": None}
 
-    kidx = _load_index(KNOWLEDGE_DIR)
-    if kidx is None:
-        if (KNOWLEDGE_DIR / "INDEX.json").exists():
-            print("[porter] P1S: ⚠️ 沉淀分区 INDEX.json 损坏，按空库判定")
-        kidx = []
+    kidx = _merged_curated_index(kb.kb_dir_of(proj))
     kind, matched = _classify_sample(driver, set(files), kidx)
     if kind == "exact":
         res.update(status="未写入",
-                   value=f"沉淀分区已有完全一致样例（{matched}），不重复草稿")
+                   value=f"已沉淀分区已有完全一致样例（{matched}），不重复草稿")
         return res
 
-    tidx = _load_index(TEMP_DIR) or []
-    name = _resolve_dest_name(TEMP_DIR, tidx, driver, set(files))
+    tdir = kb.domain_temp("splits")
+    tidx = _load_index(tdir) or []
+    name = _resolve_dest_name(tdir, tidx, driver, set(files))
     if name is None:
         res.update(status="未写入",
                    value="temp 已有完全一致草稿（同名+同文件集），未重复加入")
         return res
 
-    TEMP_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(strategy_path, TEMP_DIR / name)
+    tdir.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(strategy_path, tdir / name)
     tidx.append({"entry_file": name, "driver_name": driver,
                  "linux_dir": res["linux_dir"], "linux_files": files,
                  "hits": 0})
-    _save_index(TEMP_DIR, tidx)
+    _save_index(tdir, tidx)
     if kind == "related":
-        value = (f"新而有价值：沉淀分区有相关样例（{matched}），"
+        value = (f"新而有价值：已沉淀分区有相关样例（{matched}），"
                  f"但文件构成不同")
     else:
-        value = "新而有价值：沉淀分区无相关样例（全新）"
+        value = "新而有价值：已沉淀分区无相关样例（全新）"
     if name != f"{driver}.md":
         value += f"；temp 已有同名草稿（构成不同），改名 {name} 保留"
     res.update(status="已写入 temp", entry_file=name, value=value)
@@ -223,23 +238,24 @@ def _write_knowledge_report(ws: Path, proj: dict, res: dict) -> Path:
         "## 沉淀", "",
         "沉淀不自动。**P1 整体完成后**由开发者决定是否晋升 temp 中的草稿：",
         "",
-        f"    python3 porter/main.py p1-promote "
+        f"    python3 porter/main.py p1-promote --output-dir <工作区> "
         f"--driver {res.get('entry_file') or res['driver']}",
         "",
-        "规范详见 `knowledge/splits/strategies/README.md`。",
+        "规范详见 `knowledge/base/splits/strategies/README.md`。",
     ]
     rpt.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return rpt
 
 
-def promote_sample(driver: str) -> int:
-    """p1-promote：样例草稿晋升 temp → knowledge。返回 0=成功。
+def promote_sample(driver: str, kb_dir: Path) -> int:
+    """p1-promote：样例草稿晋升 temp → 本次知识库目录。返回 0=成功。
 
     --driver 可给驱动名或条目文件名；按驱动名命中多条（同名不同构成）
-    时列候选要求指定条目文件名。沉淀分区同名碰撞：同文件集=真重复→
-    拒绝；构成不同→改名并入（保留）。
+    时列候选要求指定条目文件名。目标分区同名碰撞：同文件集=真重复→
+    拒绝；构成不同→改名并入（保留）。与 base 完全一致也拒绝（工具已随附）。
     """
-    tidx = _load_index(TEMP_DIR) or []
+    tdir = kb.domain_temp("splits")
+    tidx = _load_index(tdir) or []
     arg = driver[:-3] if driver.endswith(".md") else driver
     matches = [e for e in tidx if isinstance(e, dict) and
                (e.get("driver_name") == arg
@@ -256,27 +272,33 @@ def promote_sample(driver: str) -> int:
         return 1
     entry = matches[0]
 
-    src = TEMP_DIR / entry.get("entry_file", "")
+    src = tdir / entry.get("entry_file", "")
     if not src.exists():
         print(f"[porter] p1-promote: 草稿文件缺失 {src}"
               f"（temp INDEX 与磁盘不一致）")
         return 1
-    kidx = _load_index(KNOWLEDGE_DIR) or []
-    name = _resolve_dest_name(KNOWLEDGE_DIR, kidx,
-                              entry.get("driver_name", arg),
-                              set(entry.get("linux_files") or []))
+    kdir = kb.domain_kb("splits", kb_dir)
+    # 真重复判定含 base（工具已随附的构成不再入库）
+    merged = _merged_curated_index(kb_dir)
+    kind, _matched = _classify_sample(entry.get("driver_name", arg),
+                                      set(entry.get("linux_files") or []),
+                                      merged)
+    kidx = _load_index(kdir) or []
+    name = None if kind == "exact" else _resolve_dest_name(
+        kdir, kidx, entry.get("driver_name", arg),
+        set(entry.get("linux_files") or []))
     if name is None:
-        print(f"[porter] p1-promote: 沉淀分区已有完全一致样例"
+        print(f"[porter] p1-promote: 已沉淀分区已有完全一致样例"
               f"（同名+同文件集），拒绝重复晋升")
         return 1
-    KNOWLEDGE_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.move(str(src), str(KNOWLEDGE_DIR / name))
-    _save_index(TEMP_DIR, [e for e in tidx if e is not entry])
+    kdir.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(kdir / name))
+    _save_index(tdir, [e for e in tidx if e is not entry])
     entry["entry_file"] = name
     kidx.append(entry)
-    _save_index(KNOWLEDGE_DIR, kidx)
+    _save_index(kdir, kidx)
     print(f"[porter] p1-promote: {entry.get('driver_name')} 已晋升"
-          f"（{src.name} → knowledge/{name}）")
+          f"（{src.name} → {kdir / name}）")
     return 0
 
 
@@ -302,7 +324,7 @@ def _task_data(ws: Path, proj: dict, driver_root: Path) -> str:
         lines.append("- 资料路径（迁移环境事实来源，自己去读）：")
         lines += [f"  - {m}" for m in mats]
     lines += ["", "## 拆分样例库（参考思路，不可照搬）", "",
-              _build_samples_injection()]
+              _build_samples_injection(ws)]
     return "\n".join(lines)
 
 

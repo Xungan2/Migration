@@ -4,7 +4,8 @@
 
 样例 = 一次迁移工作区产出的 `strategy.md` **原样**（不改写、不摘要）。
 由 `run_strategy` 在产出 strategy.md 时自动复制为草稿进入
-`temp/splits/strategies/`；开发者在 P1 整体完成后决定是否晋升沉淀。
+`knowledge/temp/splits/strategies/`；开发者在 P1 整体完成后决定是否
+晋升沉淀。
 
 ## 条目文件命名
 
@@ -14,11 +15,12 @@
 ## 目录结构
 
 ```
-knowledge/splits/strategies/     # 沉淀分区（已晋升，人工审阅过）
-    INDEX.json                   #   目录：裸数组，随 strategy prompt 注入
-    README.md                    #   本文件（不注入）
-    <驱动名>.md                  #   样例
-temp/splits/strategies/          # 草稿分区（run_strategy 自动写入）
+knowledge/base/splits/strategies/  # 工具随附分区（本目录，任意目标OS可用）
+knowledge/<name>/splits/strategies/  # 已晋升分区（本次知识库目录）
+    INDEX.json                      #   目录：裸数组，随 strategy prompt 注入
+    README.md                       #   本文件（不注入；仅 base 侧维护）
+    <驱动名>.md                     #   样例
+knowledge/temp/splits/strategies/   # 草稿分区（run_strategy 自动写入）
     INDEX.json
     <驱动名>.md
 ```
@@ -48,13 +50,13 @@ temp/splits/strategies/          # 草稿分区（run_strategy 自动写入）
 
 ## 价值判定判据（run_strategy 自动执行，写入工作区报告）
 
-新草稿与 **沉淀分区** INDEX 条目逐条对比：
+新草稿与 **已沉淀分区**（base ∪ 本次知识库目录）INDEX 条目逐条对比：
 
 | 判定 | 条件 | 处理 |
 |---|---|---|
 | 完全一致 | `driver_name` 相同 且 `linux_files` 集合相同 | 不写 temp，报告记"已存在" |
 | 相关但非完全一致 | `driver_name` 相同，文件集不同 | 写 temp，报告记"有价值（构成不同）" |
-| 无相关 | 沉淀分区无同名驱动 | 写 temp，报告记"有价值（全新）" |
+| 无相关 | 已沉淀分区无同名驱动 | 写 temp，报告记"有价值（全新）" |
 
 不比对文件内容（同名同文件清单但内容不同的情形会被判完全一致；
 现阶段接受该局限）。
@@ -78,10 +80,12 @@ temp/splits/strategies/          # 草稿分区（run_strategy 自动写入）
 4. 决定沉淀 → 执行：
 
    ```
-   python3 porter/main.py p1-promote --driver <驱动名或条目文件名>
+   python3 porter/main.py p1-promote --output-dir <工作区> \
+       --driver <驱动名或条目文件名>
    ```
 
-   命令将文件与 INDEX 条目从 temp 分区搬入沉淀分区（不双存；
-   沉淀分区已有同名同文件集时拒绝，同名不同构成时改名并入）
+   命令将文件与 INDEX 条目从 temp 分区搬入**本次知识库目录**的
+   splits/strategies/（不双存；与 base 完全一致或已沉淀同名同文件集
+   时拒绝，同名不同构成时改名并入）
 
 5. 样例被后续策略命中借鉴后，人审时更新沉淀分区对应条目 `hits`

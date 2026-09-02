@@ -207,9 +207,31 @@ def cmd_p1_divide(args) -> int:
     return p1a.run_divide(ws, driver_root)
 
 
+def _kb_dir_for_promote(ws_raw) -> "Path | None":
+    """promote 类命令的知识库目录解析：工作区 project.json → kb_dir。
+
+    缺 project.json / 未记录 kb_dir → 打印指引返回 None（调用方 rc 1）。
+    """
+    from porter.bootstrap import kb as _kb
+    ws = Path(ws_raw).resolve() if ws_raw else None
+    if ws is None or not (ws / "project.json").exists():
+        print("[porter] 需 --output-dir 指向迁移工作区（解析知识库目录）")
+        return None
+    kb_dir = _kb.kb_dir_for(ws)
+    if kb_dir is None:
+        print(f"[porter] 工作区 {ws} 未记录知识库目录（kb_dir）——"
+              "新工作区请用 p0 --kb 显式指定；旧工作区请补 "
+              '"kb_dir": "<knowledge/ 下的目录名>" 到 project.json')
+        return None
+    return kb_dir
+
+
 def cmd_p1_promote(args) -> int:
-    """样例草稿晋升（沉淀）：temp/splits/strategies → knowledge/...。"""
-    return p1s.promote_sample(args.driver)
+    """样例草稿晋升（沉淀）：temp/splits → 本次知识库目录。"""
+    kb_dir = _kb_dir_for_promote(args.output_dir)
+    if kb_dir is None:
+        return 1
+    return p1s.promote_sample(args.driver, kb_dir)
 
 
 def _p2_context(args):
@@ -229,9 +251,12 @@ def _p2_context(args):
 
 
 def cmd_p2_promote(args) -> int:
-    """P2 映射知识晋升：temp/maps → knowledge/maps（同名=版本更新替换）。"""
+    """P2 映射知识晋升：temp/maps → 知识库目录/maps（同名=版本更新替换）。"""
     from porter.bootstrap import knowledge as kn
-    return kn.promote_map(args.driver, target=args.target)
+    kb_dir = _kb_dir_for_promote(args.output_dir)
+    if kb_dir is None:
+        return 1
+    return kn.promote_map(args.driver, kb_dir, target=args.target)
 
 
 def _loop_module(args):
@@ -421,10 +446,10 @@ def cmd_p7(args) -> int:
             ws, "CP5", register=[{
                 "id": "cp5.promote", "kind": "memo", "gate_type": "decision",
                 "phase": "P7", "checkpoint": "CP5", "blocking": False,
-                "question": ("知识晋升提醒：temp/maps 映射草稿、"
+                "question": ("知识晋升提醒：knowledge/temp/maps 映射草稿、"
                              "failures.md 候选区、pitfalls 手写——"
                              "用 p2-promote / 人工晋升沉淀跨驱动知识。"),
-                "context_files": ["temp/maps/INDEX.json"],
+                "context_files": ["knowledge/temp/maps/INDEX.json"],
                 "answer_form": [{"field": "note", "type": "text",
                                  "required": False}]}],
             blocking=False)
@@ -560,10 +585,11 @@ def _write_p1_final_report(ws: Path) -> Path:
         "## 沉淀决策（人工）", "",
         "若认为本次策略有沉淀价值，执行：",
         "",
-        "    python3 porter/main.py p1-promote --driver <条目文件名或驱动名>",
+        "    python3 porter/main.py p1-promote --output-dir <工作区> "
+        "--driver <条目文件名或驱动名>",
         "",
-        "语义：temp → knowledge；真重复拒绝、构成不同自动改名并入、",
-        "同名多条目歧义时列候选要求指定条目文件名。",
+        "语义：temp → 本次知识库目录（project.json.kb_dir）；真重复拒绝、",
+        "构成不同自动改名并入、同名多条目歧义时列候选要求指定条目文件名。",
     ]
     rpt = p1 / "reports" / "report.md"
     rpt.parent.mkdir(parents=True, exist_ok=True)
@@ -723,7 +749,8 @@ def main(argv=None) -> int:
     p1d.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0）")
     p1d.set_defaults(func=cmd_p1_divide)
 
-    p1p = sub.add_parser("p1-promote", help="样例草稿晋升：temp → knowledge（沉淀，P1 完成后人工决定执行）")
+    p1p = sub.add_parser("p1-promote", help="样例草稿晋升：temp → 本次知识库目录（沉淀，P1 完成后人工决定执行）")
+    p1p.add_argument("--output-dir", required=True, help="迁移工作区根目录（解析本次知识库目录 kb_dir）")
     p1p.add_argument("--driver", required=True, help="要晋升的驱动名或条目文件名（同名多条目时须给条目文件名）")
     p1p.set_defaults(func=cmd_p1_promote)
 
@@ -752,7 +779,8 @@ def main(argv=None) -> int:
                       help="本次最多生成批数（≤5 条/批；缺省全量）")
     p2pr.set_defaults(func=cmd_p2_probes)
 
-    p2p = sub.add_parser("p2-promote", help="映射知识晋升：temp/maps → knowledge/maps（P2 末/循环中人工决定执行）")
+    p2p = sub.add_parser("p2-promote", help="映射知识晋升：temp/maps → 知识库目录/maps（P2 末/循环中人工决定执行）")
+    p2p.add_argument("--output-dir", required=True, help="迁移工作区根目录（解析本次知识库目录 kb_dir）")
     p2p.add_argument("--driver", required=True, help="要晋升的驱动名")
     p2p.add_argument("--target", default=None, help="目标 OS 名（同名歧义时必须指定）")
     p2p.set_defaults(func=cmd_p2_promote)
