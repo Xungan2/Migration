@@ -38,18 +38,35 @@ def load_skill(name: str) -> str:
 
 
 def run_agent(prompt: str, workdir: Path, log_stem: str,
-              model: str | None = None, timeout_sec: int = 600) -> tuple[int, str]:
+              model: str | None = None, timeout_sec: int = 600,
+              task: dict | None = None) -> tuple[int, str]:
     """调用 opencode 非交互模式执行一次 agent 任务。
 
-    返回 (exit_code, stdout_text)。完整输出同时落盘 <log_stem>.log。
-    观测埋桩（§15 子系统 B）：events 绑定在场时前后写意图/结果事件。
+    返回 (exit_code, stdout_text)。完整输出落盘 <log_stem>.log；输入
+    原文归档 <log_stem>.prompt.md（与输出成对，docs/log.md 类 2）。
+    观测埋桩（log 子系统）：events 绑定在场时前后写意图/结果事件，
+    run_id = log_stem；task 传 {phase,module,step,attempt} 元数据
+    （v1.1 结构字段）。
     """
     model = model or os.environ.get("PORTER_MODEL", DEFAULT_MODEL)
     log_path = Path(f"{log_stem}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    try:                                    # 观测面永不打断主流程
-        from ..loop import events as _ev
-        _ev.note_agent_start(log_stem, prompt)
+    prompt_path = Path(f"{log_stem}.prompt.md")
+    try:                                    # 输入归档（观测面永不打断）
+        prompt_path.write_text(prompt, encoding="utf-8")
+    except OSError:
+        pass
+    stem = str(log_stem)
+    ref = {"log": str(log_path), "prompt": str(prompt_path)}
+    tmeta = {k: (task or {}).get(k) for k in
+             ("phase", "module", "step", "attempt")}
+    try:
+        from ..log import core as _log
+        _log.record("agent_start", intent=stem, cmd=prompt,
+                    summary=f"model={model}",
+                    console_msg=f"[porter] agent: {log_stem} "
+                                f"(model={model})",
+                    run_id=stem, ref=ref, **tmeta)
     except Exception:
         pass
     args = [
@@ -58,7 +75,6 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         "--dir", str(workdir),
         prompt,
     ]
-    print(f"[porter] agent: {log_stem} (model={model})")
     t0 = time.time()
     env = {**os.environ, "NO_COLOR": "1"}
     env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
@@ -77,12 +93,17 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         out = "opencode executable not found in PATH"
         rc = 127
     log_path.write_text(out, encoding="utf-8")
+    elapsed = time.time() - t0
     try:
-        from ..loop import events as _ev
-        _ev.note_agent_end(log_stem, rc, out)
+        from ..log import core as _log
+        _log.record("agent_end", intent=stem, rc=rc,
+                    summary=(out or "")[-300:].strip()
+                    .replace("\n", " ⏎ "),
+                    console_msg=f"[porter] agent: {log_stem} rc={rc} "
+                                f"{elapsed:.0f}s log={log_path}",
+                    run_id=stem, **tmeta)
     except Exception:
         pass
-    print(f"[porter] agent: {log_stem} rc={rc} {time.time()-t0:.0f}s log={log_path}")
     return rc, out
 
 

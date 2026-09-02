@@ -426,6 +426,11 @@ def _triage_failures(ws: Path, module: str, target_os: Path, proj: dict,
 
 def run_p5(ws: Path, module: str, order: list[str]) -> int:
     events.bind(ws, "p5")       # 观测地基（§15 挂载①）
+    try:
+        from ..log import core as _log
+        _log.phase_begin("p5", module=module, store_only=True)
+    except Exception:
+        pass
     ctx = _ctx(ws, module)
     if ctx is None:
         return 2
@@ -540,6 +545,11 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
                 "applies_to": {"modules": [module]},
             })
         return 3
+    try:
+        from ..log import core as _log
+        _log.phase_end("p5", module=module, rc=0, store_only=True)
+    except Exception:
+        pass
     return 0
 
 

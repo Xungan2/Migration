@@ -473,6 +473,8 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
     try:                                # 观测扩全（H12）：P4 相位埋桩
         from . import events as _ev
         _ev.bind(ws, "p4")
+        from ..log import core as _log
+        _log.phase_begin("p4", module=module, store_only=True)
     except Exception:
         pass
     ctx = _ctx(ws, module)
@@ -498,4 +500,9 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
         return 3                 # infra 关口停车（不烧 attempts）
     if not smoke:
         return 1        # 冒烟失败：attempts 由 run.py 统一 bump 并判界
+    try:
+        from ..log import core as _log
+        _log.phase_end("p4", module=module, rc=0, store_only=True)
+    except Exception:
+        pass
     return 0

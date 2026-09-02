@@ -26,6 +26,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from .. import log as _log
 from . import gates, p3, p4, p5
 from .state import MAX_ATTEMPTS, LoopState, parse_answers
 
@@ -74,7 +75,8 @@ def _handle_retry_answers(ws: Path, state: LoopState, module: str) -> None:
                 state.reset_attempts(module, step)
         else:
             state.reset_attempts(module, k.rsplit("-", 1)[-1])
-    print(f"[porter] loop: 人工重试指令已消费（{module} attempts 清零）")
+    _log.record("retry_reset", module=module, scope="loop",
+                summary=f"人工重试指令已消费（{module} attempts 清零）")
 
 
 def _reset_slice_progress(ws: Path, module: str) -> None:
@@ -92,8 +94,10 @@ def _bump_and_maybe_park(ws: Path, state: LoopState, module: str, step: str,
                          rc: int) -> tuple[bool, int]:
     """阶段失败统一处理：bump + 判界。返回 (是否终止, 退出码)。"""
     n = state.bump(module, step)
-    print(f"[porter] loop: {step.upper()}({module}) 失败 rc={rc}"
-          f"（attempts {n}/{MAX_ATTEMPTS}）")
+    _log.record("phase_fail", module=module, step=step, rc=rc, scope="loop",
+                level="warn",
+                summary=f"{step.upper()}({module}) 失败 rc={rc}"
+                        f"（attempts {n}/{MAX_ATTEMPTS}）")
     if step == "p4":
         _reset_slice_progress(ws, module)
     if rc == 2 or n >= MAX_ATTEMPTS:
@@ -248,7 +252,8 @@ def run_loop(ws: Path, module: str | None = None,
         return 2
     proj_path = ws / "project.json"
     if not proj_path.exists():
-        print(f"[porter] loop: 缺少 {proj_path}")
+        _log.record("loop_abort", level="error", scope="loop",
+                    summary=f"缺少 {proj_path}")
         return 2
     # 消费 answers.md 的 `## @<gate_id>` 节（新协议：校验→记账→应用）
     gates.process_answered_gates(ws)
@@ -257,7 +262,8 @@ def run_loop(ws: Path, module: str | None = None,
 
     # 指定模块须在序内
     if module and module not in order:
-        print(f"[porter] loop: 模块 {module} 不在 deps.json order 中")
+        _log.record("loop_abort", level="error", scope="loop",
+                    summary=f"模块 {module} 不在 deps.json order 中")
         return 2
 
     if module:
@@ -267,34 +273,43 @@ def run_loop(ws: Path, module: str | None = None,
             deps = _deps_of(ws, module)
             unmet = [d for d in deps if state.phase_of(d) != "done"]
             if unmet:
-                print(f"[porter] loop: 绕行拒绝——{module} 的依赖未全部"
-                      f" done（缺 {', '.join(unmet)}）")
+                _log.record("bypass_rejected", level="error", scope="loop",
+                            summary=f"绕行拒绝——{module} 的依赖未全部"
+                                    f" done（缺 {', '.join(unmet)}）")
                 return 2
-            print(f"[porter] loop: 绕行模式——只推进 {module}"
-                  f"（断点指针仍为 {pointer or '无'}）")
+            _log.record("bypass_mode", module=module, scope="loop",
+                        summary=f"绕行模式——只推进 {module}"
+                                f"（断点指针仍为 {pointer or '无'}）")
             rc = _advance_module(ws, state, module, order)
             if rc is None:
                 return 1              # 未烧穿但未完成（幂等重试入口）
             if rc == 0:
-                print(f"[porter] loop: ✔ {module} 绕行完成"
-                      f"（{len(state.done_set())}/{len(order)}）")
+                _log.record("module_done", module=module, scope="loop",
+                            summary=f"✔ {module} 绕行完成"
+                                    f"（{len(state.done_set())}/"
+                                    f"{len(order)}）")
                 parked = [m for m in order
                           if state.phase_of(m) != "done"]
                 if parked:
-                    print(f"[porter] loop: 泊车模块仍在卡点："
-                          f"{', '.join(parked)}（attempts 烧穿走 answers.md）")
+                    _log.record("parked_remaining", scope="loop",
+                                level="warn",
+                                summary=f"泊车模块仍在卡点："
+                                        f"{', '.join(parked)}"
+                                        "（attempts 烧穿走 answers.md）")
             return rc
 
     target = module or state.pointer()
     if target is None:
-        print("[porter] loop: 全部模块已完成")
+        _log.record("all_done", scope="loop",
+                    summary="全部模块已完成")
         _write_loop_report(ws, state)
         return 0
 
     n_done = 0
     while target is not None:
         if max_modules is not None and n_done >= max_modules:
-            print(f"[porter] loop: 达到 --max-modules {max_modules}——暂停")
+            _log.record("max_modules_reached", scope="loop",
+                        summary=f"达到 --max-modules {max_modules}——暂停")
             break
         rc = _advance_module(ws, state, target, order)
         if rc is None:
@@ -304,8 +319,9 @@ def run_loop(ws: Path, module: str | None = None,
             _write_loop_report(ws, state)
             return rc
         n_done += 1
-        print(f"[porter] loop: ✔ {target} 完成"
-              f"（{len(state.done_set())}/{len(order)}）")
+        _log.record("module_done", module=target, scope="loop",
+                    summary=f"✔ {target} 完成"
+                            f"（{len(state.done_set())}/{len(order)}）")
         # 债限额软停（收窄计数；夜间自治 = limit 默认 30）
         rc = _debt_checkpoint(ws, state)
         if rc != 0:
@@ -340,8 +356,9 @@ def run_loop(ws: Path, module: str | None = None,
     _write_loop_report(ws, state)
     if state.pointer() is None:
         # CP3 指针：L4 草案生成 + 定稿审（p6.l4.finalize 关口即 CP3 载体）
-        print("[porter] loop: 全部模块完成——CP3 入口：`p6 --draft-l4`"
-              "（草案生成）→ `p6 --finalize-l4`（人审定稿）")
+        _log.record("cp3_next", scope="loop",
+                    summary="全部模块完成——CP3 入口：`p6 --draft-l4`"
+                            "（草案生成）→ `p6 --finalize-l4`（人审定稿）")
         gates.checkpoint_digest(ws, "CP3")
     return 0
 
@@ -366,7 +383,9 @@ def _write_loop_report(ws: Path, state: LoopState) -> None:
                                                      exist_ok=True)
     (ws / "reports" / "loop_report.md").write_text(
         "\n".join(lines) + "\n", encoding="utf-8")
-    print(f"[porter] loop: 报告 → {ws / 'reports' / 'loop_report.md'}")
+    _log.record("report_written", scope="loop", ref={"report":
+               "reports/loop_report.md"},
+                summary=f"报告 → {ws / 'reports' / 'loop_report.md'}")
 
 
 def _deferred_summary(ws: Path) -> dict:

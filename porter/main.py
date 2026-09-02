@@ -227,6 +227,15 @@ def cmd_p0(args) -> int:
     })
 
 
+def _log_bind(ws: Path, mount: str) -> None:
+    """log 子系统入口 init（观测扩全：补齐无 bind 的子命令入口）。"""
+    try:
+        from porter import log as _log
+        _log.bind(ws, mount)
+    except Exception:
+        pass
+
+
 def cmd_p1_strategy(args) -> int:
     """P1 拆分策略选择（agent 产出策略分析 strategy.md → 人工审阅放行）。"""
     ws = Path(args.output_dir).resolve()
@@ -234,6 +243,7 @@ def cmd_p1_strategy(args) -> int:
     if not proj_path.exists():
         print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
+    _log_bind(ws, "p1")
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     driver_root = Path(proj["linux_driver"])
     if not driver_root.is_dir():
@@ -277,6 +287,7 @@ def cmd_p1_divide(args) -> int:
         rc = _gates.strategy_checkpoint(ws)
         if rc != 0:
             return rc
+    _log_bind(ws, "p1")
     return p1a.run_divide(ws, driver_root)
 
 
@@ -306,6 +317,7 @@ def cmd_kb(args) -> int:
     if ws is None or not (ws / "project.json").exists():
         print("[porter] kb: 需 --output-dir 指向迁移工作区")
         return 2
+    _log_bind(ws, "kb")
     acted = False
     if args.classify:
         acted = True
@@ -531,6 +543,7 @@ def cmd_p7(args) -> int:
     if not (ws / "project.json").exists():
         print(f"[porter] 工作区不存在：{ws}（先跑 p0）")
         return 2
+    _log_bind(ws, "p7")
     # CP4 验收审：缺陷自动闭账的决策债未清 → 停车批审（防证据链注水）
     from porter.loop import gates as _gates
     _gates.process_answered_gates(ws)
@@ -602,6 +615,7 @@ def cmd_p2_map(args) -> int:
     ws, driver_root, target_os = _p2_context(args)
     if driver_root is None:
         return 2
+    _log_bind(ws, "p2")
     return p2a.run_map(ws, driver_root, target_os)
 
 
@@ -611,6 +625,7 @@ def cmd_p2_skeleton(args) -> int:
     ws, _driver_root, target_os = _p2_context(args)
     if target_os is None:
         return 2
+    _log_bind(ws, "p2")
     return p2b.run_skeleton(ws, target_os,
                             device_ids=_parse_device_ids(args.device_ids))
 
@@ -621,6 +636,7 @@ def cmd_p2_probes(args) -> int:
     ws, _driver_root, target_os = _p2_context(args)
     if target_os is None:
         return 2
+    _log_bind(ws, "p2")
     return p2c.run_pregen(ws, target_os, max_batches=args.max_batches)
 
 
@@ -829,6 +845,95 @@ def cmd_gate(args) -> int:
     return 2
 
 
+def cmd_log(args) -> int:
+    """log CLI（观测查询面：tail/show/timeline/runs——docs/log.md §查询）。
+
+    全部为 events.jsonl 的派生读；debug / resume 定位 / agent 运行考古
+    的统一入口。
+    """
+    from porter import log as log_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "events.jsonl").exists():
+        print(f"[porter] log: 工作区无 events.jsonl（{ws}）——尚未记录")
+        return 1
+
+    if args.log_cmd == "tail":
+        evs = log_mod.query.events(ws, kind_prefix=args.kind,
+                                   subject=args.subject,
+                                   phase=args.phase, module=args.module,
+                                   limit=args.n)
+        if not evs:
+            print("[porter] log: 无匹配事件")
+            return 0
+        for e in evs:
+            bits = [str(e.get("time") or "?")[:19],
+                    str(e.get("kind") or "?"),
+                    str(e.get("phase") or e.get("mount") or "")]
+            if e.get("module"):
+                bits.append(str(e["module"]))
+            if e.get("subject"):
+                bits.append(str(e["subject"]))
+            bits.append(str(e.get("summary") or "")[:100])
+            print("  ".join(b for b in bits if b))
+        print(f"[porter] log: 共 {len(evs)} 条（events.jsonl）")
+        return 0
+
+    if args.log_cmd == "runs":
+        rs = log_mod.query.runs(ws, subject=args.subject,
+                                last_n=args.n)
+        if not rs:
+            print("[porter] log: 无 agent 运行记录")
+            return 0
+        for r in rs:
+            rc = "运行中" if r["rc"] is None else f"rc={r['rc']}"
+            dur = f"{r['duration_sec']:.0f}s" if r.get("duration_sec") \
+                is not None else "?"
+            print(f"{r['run_id']}\n    {rc} {dur} "
+                  f"{str(r.get('summary') or '')[:80]}")
+        print(f"[porter] log: 共 {len(rs)} 次 agent 运行（show <run_id> 看全文）")
+        return 0
+
+    if args.log_cmd == "show":
+        rs = log_mod.query.runs(ws, last_n=10 ** 6)
+        hit = next((r for r in rs if r["run_id"] == args.run_id), None) \
+            or next((r for r in rs if r["run_id"].endswith(args.run_id)),
+                    None)
+        if hit is None:
+            print(f"[porter] log: run 不存在: {args.run_id}（用 runs 列出）")
+            return 2
+        print(json.dumps({k: v for k, v in hit.items()}, ensure_ascii=False,
+                         indent=2))
+        log_p = ws / str(hit.get("log") or "")
+        if log_p.is_file():
+            print(f"\n----- {log_p} 尾 {args.n} 行 -----")
+            print("\n".join(log_p.read_text(
+                encoding="utf-8", errors="replace")
+                .splitlines()[-args.n:]))
+        if hit.get("prompt"):
+            pp = ws / str(hit["prompt"])
+            if pp.is_file():
+                print(f"\n----- 输入归档 {pp}（头 20 行）-----")
+                print("\n".join(pp.read_text(
+                    encoding="utf-8", errors="replace")
+                    .splitlines()[:20]))
+        return 0
+
+    if args.log_cmd == "timeline":
+        rows = log_mod.query.timeline(ws, module=args.module,
+                                      limit=args.n)
+        if not rows:
+            print("[porter] log: 无事件")
+            return 0
+        for t in rows:
+            print(f"{str(t['time'] or '?')[:19]}  "
+                  f"{str(t['kind'] or '?'):<16} "
+                  f"{str(t['phase'] or ''):<6} "
+                  f"{str(t['subject'] or ''):<24} "
+                  f"{str(t['summary'] or '')[:80]}")
+        return 0
+    return 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="porter",
@@ -1003,6 +1108,22 @@ def main(argv=None) -> int:
     gatecmd.add_argument("--cp", default=None,
                          help="（review）检查点名（digest 文件名，缺省 REVIEW）")
     gatecmd.set_defaults(func=cmd_gate)
+
+    logcmd = sub.add_parser("log", help="log 子系统查询面（tail/runs/show/timeline——debug 与 resume 定位）")
+    logcmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
+    logcmd.add_argument("log_cmd", choices=["tail", "runs", "show", "timeline"],
+                        help="tail=事件尾随 / runs=agent 运行登记 / "
+                             "show=运行详情+日志 / timeline=浓缩时间线")
+    logcmd.add_argument("run_id", nargs="?", default=None,
+                        help="（show）run id（runs 列出的 run_id，可用尾部匹配）")
+    logcmd.add_argument("--kind", default=None, help="（tail）kind 前缀过滤")
+    logcmd.add_argument("--subject", default=None, help="subject 前缀过滤")
+    logcmd.add_argument("--module", default=None, help="module 过滤")
+    logcmd.add_argument("--phase", default=None,
+                        help="（tail）相位过滤（p0..p7/loop/d1）")
+    logcmd.add_argument("-n", type=int, default=50,
+                        help="条数（tail/timeline 缺省 50；show 的日志尾行数）")
+    logcmd.set_defaults(func=cmd_log)
 
     p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")
     p7cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")

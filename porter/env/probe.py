@@ -26,12 +26,18 @@ def _base_env(target_os: Path, runner: dict, extra: dict | None = None) -> dict:
 
 def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
          log_path: Path) -> tuple[int, str]:
-    print(f"[porter] probe: {cmd[:110]}{'…' if len(cmd) > 110 else ''}")
-    try:                                    # 观测埋桩（§15 B）：绑定才写
-        from ..loop import events as _ev
-        _ev.note_cmd_start(cmd, log_path)
+    try:                                    # log 子系统（观测面永不打断）
+        from ..log import core as _log
     except Exception:
-        pass
+        _log = None
+    if _log is not None:
+        _log.record(
+            "cmd_start", cmd=cmd, summary=str(log_path),
+            console_msg=f"[porter] probe: "
+                        f"{cmd[:110]}{'…' if len(cmd) > 110 else ''}",
+            ref={"log": str(log_path)})
+    else:
+        print(f"[porter] probe: {cmd[:110]}{'…' if len(cmd) > 110 else ''}")
     t0 = time.time()
     try:
         proc = subprocess.run(["bash", "-c", cmd], cwd=str(cwd), env=env,
@@ -44,12 +50,16 @@ def _run(cmd: str, cwd: Path, env: dict, timeout_sec: int,
         rc = -1
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_path.write_text(out, encoding="utf-8", errors="replace")
-    try:
-        from ..loop import events as _ev
-        _ev.note_cmd_end(cmd, rc, out, time.time() - t0, log_path)
-    except Exception:
-        pass
-    print(f"[porter] probe: rc={rc} {time.time()-t0:.0f}s log={log_path.name}")
+    elapsed = time.time() - t0
+    if _log is not None:
+        _log.record(
+            "cmd_end", cmd=cmd, rc=rc,
+            summary=f"{elapsed:.0f}s log={log_path}",
+            console_msg=f"[porter] probe: rc={rc} {elapsed:.0f}s "
+                        f"log={log_path.name}",
+            extra_out_tail=(out or "")[-200:].strip())
+    else:
+        print(f"[porter] probe: rc={rc} {elapsed:.0f}s log={log_path.name}")
     return rc, out
 
 
@@ -71,16 +81,35 @@ def _resolve_log(target_os: Path, bo: dict) -> tuple[Path | None, str]:
 def probe_build(ws: Path, target_os: Path, runner: dict,
                 label: str = "build") -> dict:
     b = runner["build"]
+    log_path = ws / "logs" / f"{label}.log"
     rc, out = _run(b["cmd"], cwd=target_os,
                    env=_base_env(target_os, runner),
                    timeout_sec=int(b["timeout_full_sec"]),
-                   log_path=ws / "logs" / f"{label}.log")
+                   log_path=log_path)
     ok = rc == 0
     if ok and b.get("success_pattern"):
         ok = b["success_pattern"] in _strip_ansi(out)
+    try:                                    # judge 证据流（docs/log.md）
+        from ..log import core as _log
+        _log.judge(label, ok, detail=f"rc={rc}" + (
+            "" if not b.get("success_pattern")
+            else f" pattern={'hit' if ok else 'MISS'}"),
+            intent="build", log_ref=str(log_path),
+            phase=(store_mounted() or None))
+    except Exception:
+        pass
     return {"item": "build", "ok": ok,
             "detail": f"rc={rc}" + ("" if not b.get("success_pattern")
                                     else f" pattern={'hit' if ok else 'MISS'}")}
+
+
+def store_mounted() -> str | None:
+    """当前 log 绑定的挂载点（judge/phase 事件的 phase 戳来源）。"""
+    try:
+        from ..log import store as _st
+        return (_st.bound() or {}).get("mount")
+    except Exception:
+        return None
 
 
 def probe_boot(ws: Path, target_os: Path, runner: dict,
@@ -112,6 +141,17 @@ def probe_boot(ws: Path, target_os: Path, runner: dict,
     panic = bo["panic_pattern"].lower() in bo_log.lower()
     log_state = mode if bo_log else f"{mode}:missing_or_empty"
     ok = (rc == 0) and success and not panic
+    try:                                    # judge 证据流（boot 双信号）
+        from ..log import core as _log
+        _log.judge(label, ok,
+                   detail=f"rc={rc} success_pattern="
+                          f"{'hit' if success else 'MISS'} "
+                          f"panic={'yes' if panic else 'no'} "
+                          f"log={log_state}",
+                   intent="boot", log_ref=str(log_path),
+                   rc=rc, phase=(store_mounted() or None))
+    except Exception:
+        pass
     return {"item": label, "ok": ok,
             "detail": (f"rc={rc} success_pattern={'hit' if success else 'MISS'} "
                        f"panic={'yes' if panic else 'no'} log={log_state}"),
@@ -162,5 +202,15 @@ def probe_development(ws: Path, target_os: Path, runner: dict,
     (p0 / "reports" / "T3_development.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
-        print(f"[porter] T3: {r['item']:<18} {'PASS' if r['ok'] else 'FAIL'}  {r['detail']}")
+        try:
+            from ..log import core as _log
+            _log.record("t3_verdict", subject=r["item"], rc=0 if r["ok"]
+                        else 1, level="info" if r["ok"] else "error",
+                        console_msg=f"[porter] T3: {r['item']:<18} "
+                                    f"{'PASS' if r['ok'] else 'FAIL'}  "
+                                    f"{r['detail']}",
+                        ref={"report": "P0/reports/T3_development.json"})
+        except Exception:
+            print(f"[porter] T3: {r['item']:<18} "
+                  f"{'PASS' if r['ok'] else 'FAIL'}  {r['detail']}")
     return report

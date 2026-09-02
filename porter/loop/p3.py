@@ -500,6 +500,12 @@ def _step_probes(ws: Path, driver_root: Path, target_os: Path, module: str,
         after_downgrade=_after_downgrade)
     if rc != 0:
         return rc
+    if _step_probes.last_rc == 0:
+        try:
+            from ..log import core as _log
+            _log.phase_end("p3", module=module, rc=0, store_only=True)
+        except Exception:
+            pass
     return int(_step_probes.last_rc or 0)
 
 
@@ -527,6 +533,8 @@ def run_p3(ws: Path, module: str, order: list[str]) -> int:
     try:                                # 观测扩全（H12）：P3 相位埋桩
         from . import events as _ev
         _ev.bind(ws, "p3")
+        from ..log import core as _log
+        _log.phase_begin("p3", module=module, store_only=True)
     except Exception:
         pass
     ctx = _ctx(ws, module)
