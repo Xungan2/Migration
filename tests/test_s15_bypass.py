@@ -1,9 +1,12 @@
-"""§15 bypass 行为测试（A 项：self_diagnosis 总开关，默认关）。
+"""错误处理模块开关/守卫/挂载行为测试（§15 重设计后语义）。
 
 覆盖：
-A. self_diagnosis_enabled：config 缺省 false / PORTER_SELF_DIAGNOSIS=1 强制开
-B. diagnose_defect / fix_defect 入口守卫（bypass 下 rc 2 + 提示）
-C. p5 快速断路：bypass 下失败不分诊不重跑（triage 空、rc 1 走 attempts）
+A. self_diagnosis_enabled：config 缺省 true（直接生效）/
+   PORTER_SELF_DIAGNOSIS=1 强制开
+B. 熔断关（self_diagnosis.enabled=false）下 diagnose_defect /
+   fix_defect 入口守卫（rc 2 + 提示）
+C. 熔断关下 p5 快速断路：失败不求解 rc 1（走 attempts 旧人工路径）
+D. 开关开 + PORTER_NO_AGENT → 求解降级只出报告 → p5.unsolved 关口 rc 3
 """
 import json
 import os
@@ -11,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -40,10 +44,11 @@ class _SdEnv:
 class SwitchTest(unittest.TestCase):
     def test_a_switch(self):
         with _SdEnv():
-            ok("A1 config 缺省 = bypass（false）",
-               G.self_diagnosis_enabled() is False)
+            ok("A1 config 缺省 = true（重设计后直接生效）",
+               G.self_diagnosis_enabled() is True)
             os.environ["PORTER_SELF_DIAGNOSIS"] = "1"
-            ok("A2 env 强制开", G.self_diagnosis_enabled() is True)
+            ok("A2 env 强制开（冗余但保惯例）",
+               G.self_diagnosis_enabled() is True)
 
 
 class GuardTest(unittest.TestCase):
@@ -54,16 +59,59 @@ class GuardTest(unittest.TestCase):
         (self.ws / "project.json").write_text(
             json.dumps({"target_os": str(tmp)}), encoding="utf-8")
 
-    def test_b_guards(self):
-        with _SdEnv():
+    def test_b_guards_fuse_off(self):
+        with _SdEnv(), mock.patch.object(
+                G, "self_diagnosis_enabled", return_value=False):
             ok("B1 diagnose_defect rc 2",
                P6.diagnose_defect(self.ws, "SOME-ID") == 2)
-            ok("B2 fix_defect rc 2",
+            ok("B2 fix_defect（重定向）rc 2",
                P6.fix_defect(self.ws, "SOME-ID") == 2)
 
-    def test_c_p5_fast_break(self):
-        # 最小 p5 工作区：compile 恒败 + boot 自产日志（避免 missing 干扰）
-        tos = self.ws.parent / "tos"
+    def test_c_p5_fast_break_fuse_off(self):
+        ws = self._mk_p5_ws()
+        old_na = os.environ.pop("PORTER_NO_AGENT", None)
+        try:
+            with _SdEnv(), mock.patch.object(
+                    G, "self_diagnosis_enabled", return_value=False):
+                rc = P5.run_p5(ws, "modA", ["modA"])
+        finally:
+            if old_na is not None:
+                os.environ["PORTER_NO_AGENT"] = old_na
+        acc = json.loads((ws / "P5" / "modA" / "reports" /
+                          "acceptance.json").read_text(encoding="utf-8"))
+        ok("C1 熔断下 rc 1（走 attempts 旧人工路径）", rc == 1)
+        ok("C2 solve 节为空（无求解）", acc.get("solve") == [])
+        ok("C3 判定照常进行（compile/boot 结果在档）",
+           any(r["id"] == "modA.compile" and r["ok"] is False
+               for r in acc["results"]))
+
+    def test_d_p5_no_agent_report_gate(self):
+        # 开关开 + PORTER_NO_AGENT=1 → 求解降级为只出报告 → 关口 rc 3
+        ws = self._mk_p5_ws()
+        old_na = os.environ.pop("PORTER_NO_AGENT", None)
+        os.environ["PORTER_NO_AGENT"] = "1"
+        try:
+            with _SdEnv():
+                rc = P5.run_p5(ws, "modA", ["modA"])
+        finally:
+            os.environ.pop("PORTER_NO_AGENT", None)
+            if old_na is not None:
+                os.environ["PORTER_NO_AGENT"] = old_na
+        acc = json.loads((ws / "P5" / "modA" / "reports" /
+                          "acceptance.json").read_text(encoding="utf-8"))
+        ok("D1 no-agent → rc 3（关口）", rc == 3)
+        ok("D2 solve 节为空（零 agent 轮）", acc.get("solve") == [])
+        gates_doc = json.loads((ws / "gates.json").read_text(
+            encoding="utf-8"))
+        ok("D3 p5.unsolved 关口登记",
+           any(g["id"] == "p5.unsolved.modA"
+               and g["status"] in ("open", "invalid")
+               for g in gates_doc["gates"]))
+        ok("D4 升级报告在场",
+           any((ws / "escalations").glob("modA-*.json")))
+
+    def _mk_p5_ws(self) -> Path:
+        tos = self.ws.parent / "tos2"
         tos.mkdir(exist_ok=True)
         (self.ws / "project.json").write_text(json.dumps(
             {"target_os": str(tos), "linux_driver": "/drv",
@@ -79,15 +127,16 @@ class GuardTest(unittest.TestCase):
                               "example_args": {"net": "-device e1000"}},
             "unit_test": {"mechanism": "none"}}), encoding="utf-8")
         p3r = self.ws / "P3" / "modA" / "reports"
-        p3r.mkdir(parents=True)
+        p3r.mkdir(parents=True, exist_ok=True)
         (p3r / "criteria.json").write_text(json.dumps(
             {"criteria": [{"id": "modA.c1", "layer": "L3",
                            "kind": "log_pattern", "expr": "OK",
                            "deferred_by": None}]}), encoding="utf-8")
-        (self.ws / "P4" / "modA" / "reports").mkdir(parents=True)
+        (self.ws / "P4" / "modA" / "reports").mkdir(parents=True,
+                                                    exist_ok=True)
         (self.ws / "P4" / "modA" / "reports" / "migration.json") \
             .write_text("{}", encoding="utf-8")
-        (self.ws / "P1" / "modules").mkdir(parents=True)
+        (self.ws / "P1" / "modules").mkdir(parents=True, exist_ok=True)
         (self.ws / "P1" / "modules" / "deps.json").write_text(
             json.dumps({"order": ["modA"], "edges": {}}), encoding="utf-8")
         (self.ws / "loop_state.json").write_text(json.dumps(
@@ -96,20 +145,7 @@ class GuardTest(unittest.TestCase):
                                   "attempts": {"p3": 0, "p4": 0,
                                                "p5": 0}}}}),
             encoding="utf-8")
-        old_na = os.environ.pop("PORTER_NO_AGENT", None)
-        try:
-            with _SdEnv():
-                rc = P5.run_p5(self.ws, "modA", ["modA"])
-        finally:
-            if old_na is not None:
-                os.environ["PORTER_NO_AGENT"] = old_na
-        acc = json.loads((self.ws / "P5" / "modA" / "reports" /
-                          "acceptance.json").read_text(encoding="utf-8"))
-        ok("C1 bypass 下 rc 1（走 attempts，非分诊消化）", rc == 1)
-        ok("C2 triage 节为空（无自动分诊）", acc.get("triage") == [])
-        ok("C3 判定照常进行（compile/boot 结果在档）",
-           any(r["id"] == "modA.compile" and r["ok"] is False
-               for r in acc["results"]))
+        return self.ws
 
 
 if __name__ == "__main__":

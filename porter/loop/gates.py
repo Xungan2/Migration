@@ -653,16 +653,17 @@ def load_config() -> dict:
 
 
 def self_diagnosis_enabled() -> bool:
-    """§15 失败自诊总开关（triage+diagnose 的判断机器；events 观测不受控）。
+    """错误处理模块总开关兼熔断（solve 循环的判断机器；events 观测不受控）。
 
-    config self_diagnosis.enabled，缺省 false = bypass（用户决策：该块
-    未做明白，先整体旁路，后续重设计后翻转重启用）。PORTER_SELF_DIAGNOSIS=1
-    强制开（存量 §15 测试用，惯例同 PORTER_NO_AGENT）。
+    config self_diagnosis.enabled，缺省 true（§15 重设计 2026-09-03 后
+    直接生效；false = 熔断回退旧人工路径：p5 失败 rc 1 → attempts→panic、
+    --defect-diagnose rc 2）。PORTER_SELF_DIAGNOSIS=1 强制开（测试惯例，
+    同 PORTER_NO_AGENT）。
     """
     if os.environ.get("PORTER_SELF_DIAGNOSIS"):
         return True
     return bool((load_config().get("self_diagnosis") or {})
-                .get("enabled", False))
+                .get("enabled", True))
 
 
 def _cp_config() -> dict:

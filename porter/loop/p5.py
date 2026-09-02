@@ -295,7 +295,8 @@ def _register_mech_none(ws: Path, module: str, c: dict) -> None:
 
 # ---------- 步骤 1-5：验收编排 ----------
 
-_P5_RERUN_MAX = 2        # infra/判据修正后的有界重跑（§15 挂载①，内部消化）
+# （§15 重设计 2026-09-03：p5 重跑圈退役——求解循环 errorloop 自带
+#   轮管理（≤3 轮 + 同签名早退）；attempts 在本挂载点随 rc 3 关口退役）
 
 
 def _criterion_map(ws: Path, module: str, order: list[str]) -> dict:
@@ -389,40 +390,82 @@ def _judge_core(ws: Path, module: str, order: list[str], target_os: Path,
     return results, log, ut_out, log_state
 
 
-def _triage_failures(ws: Path, module: str, target_os: Path, proj: dict,
-                     runner: dict, results: list[dict], log: str,
-                     ut_out: str, snapshot: Path | None, crit_map: dict,
-                     cfg: dict | None) -> list[dict]:
-    """逐失败判据分诊 + 处置执行（§15 挂载①）。返回 verdict 列表。"""
-    from . import diagnose, triage as triage_mod
-    from ..env.probe import _strip_ansi
-    gate_ok = diagnose.gate_mode("b_class_autofix", cfg) == "agent"
-    verdicts = []
+def _fail_detail(results: list[dict], crit_map: dict) -> str:
+    lines = []
     for r in [x for x in results if x["ok"] is False]:
         c = crit_map.get(r["id"]) or {}
-        kind = c.get("kind")
-        if not kind:      # 基线判据（<M>.compile/.boot）不在 criteria.json
-            kind = "compile" if r["id"].endswith(".compile") else (
-                "boot" if r["id"].endswith(".boot") else None)
-        evidence = {
-            "source": "p5", "subject": r["id"], "module": c.get("module",
-                                                                 module),
-            "kind": kind, "layer": r["layer"],
-            "expr": c.get("expr"), "detail": r["detail"],
-            "boot_log": _strip_ansi(log)[-4000:],
-            "boot_log_raw": log[-4000:], "ut_out": ut_out[-4000:],
-            "events_tail": events.read_events(ws)[-60:],
-            "criterion": c, "runner": runner,
-            "snapshot": snapshot.name if snapshot else None,
-            "_workdir": target_os}
-        v = triage_mod.run_triage(ws, evidence)
-        app = triage_mod.apply_verdict(ws, evidence, v, gate_ok=gate_ok)
-        v["applied"] = app["applied"]
-        verdicts.append(v)
-        print(f"[porter] P5: 分诊 {r['id']} → {v['circuit']}/"
-              f"{v['action']}" + (f"（{'; '.join(app['applied'])[:120]}）"
-                                  if app["applied"] else ""))
-    return verdicts
+        lines.append(f"- {r['id']}（kind={c.get('kind')} "
+                     f"expr={c.get('expr')}）：{r['detail']}")
+    return "\n".join(lines)[:2000]
+
+
+def _solve_failures(ws: Path, module: str, order: list[str],
+                    target_os: Path, proj: dict, runner: dict, crit: dict,
+                    results: list[dict], log: str, ut_out: str,
+                    snapshot: Path | None, crit_map: dict,
+                    cfg: dict | None):
+    """模块级求解循环（错误处理挂载①）。
+
+    全体 FAIL 判据为一个失败集（subject=module）；verify = 重新执行
+    _judge_core（build+boot+ut 全量重判——同旧重跑圈成本口径）。
+    熔断（self_diagnosis off）返回 (None, 原判定)——挂载点走旧 rc 1
+    语义（attempts→panic 的人工路径保留为熔断回退面）。
+    """
+    from . import errorloop as EL
+    from ..env.probe import _strip_ansi
+    if not gates.self_diagnosis_enabled():
+        return None, (results, log, ut_out, "")
+    state = {"results": results, "log": log, "ut_out": ut_out,
+             "log_state": ""}
+
+    def verify():
+        res2, log2, ut2, ls2 = _judge_core(ws, module, order, target_os,
+                                           proj, runner, crit)
+        state.update(results=res2, log=log2, ut_out=ut2, log_state=ls2)
+        if ls2 == "missing":
+            return False, {"detail": "boot 日志不可得（infra 关口）——"
+                                    "求解中止，判定输入缺失"}
+        hard2 = [r for r in res2 if r["ok"] is False]
+        if not hard2:
+            return True, None
+        return False, {"detail": _fail_detail(res2, crit_map),
+                       "boot_log": _strip_ansi(state["log"])[-4000:],
+                       "ut_out": state["ut_out"][-4000:]}
+
+    failure = {
+        "source": "p5", "subject": module, "module": module,
+        "kind": "criteria-set",
+        "detail": _fail_detail(results, crit_map),
+        "boot_log": _strip_ansi(log)[-4000:], "boot_log_raw": log[-4000:],
+        "ut_out": ut_out[-4000:], "runner": runner,
+        "snapshot": snapshot.name if snapshot else None,
+        "_workdir": target_os}
+    outcome = EL.run_solve_loop(ws, failure, verify, cfg=cfg)
+    return outcome, (state["results"], state["log"], state["ut_out"],
+                     state["log_state"])
+
+
+def _unsolved_gate(ws: Path, module: str, outcome: dict) -> int:
+    """求解未解决 → 关口（retry 语义；升级报告与验收报告作 context）。"""
+    from . import gates as gates_mod
+    ctx = [f"P5/{module}/reports/acceptance.json"]
+    if outcome.get("report_path"):
+        ctx.append(outcome["report_path"])
+    return gates_mod.panic(ws, {
+        "id": f"p5.unsolved.{module}", "kind": "retry",
+        "gate_type": "failure", "phase": "P5", "module": module,
+        "subject": module,
+        "question": (
+            f"P5({module}) 求解循环未解决（终态 {outcome.get('status')}，"
+            f"{len(outcome.get('rounds') or [])} 轮）。升级报告/快照/轮次"
+            "总结在手（context_files）；人工修复后作答（retry 语义，"
+            "重进 P5），或按报告处置（如平台泊车已登记则确认接受）。"),
+        "context_files": ctx,
+        "answer_form": [
+            {"field": "note", "type": "text", "required": False,
+             "hint": "诊断笔记（根因与修复，带给下一轮）"}],
+        "applies_to": {"modules": [module]},
+    })
 
 
 def run_p5(ws: Path, module: str, order: list[str]) -> int:
@@ -446,30 +489,29 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
         encoding="utf-8"))
     crit_map = _criterion_map(ws, module, order)
 
-    triage_section: list[dict] = []
-    for attempt in range(_P5_RERUN_MAX + 1):
-        results, log, ut_out, log_state = _judge_core(ws, module, order,
-                                                      target_os, proj,
-                                                      runner, crit)
-        hard_fail = [r for r in results if r["ok"] is False]
-        if log_state == "missing":
-            # 抢占（H9 重构）：判定输入不存在 → 本轮不判任何日志类判据，
-            # infra 关口已登记；写报告后 rc 3（run.py 的 open_blocking
-            # 复查衔接：人答关口后续跑，不烧 attempts）
-            report = {"module": module,
-                      "time": datetime.now().isoformat(),
-                      "results": results, "pass": False,
-                      "infra": "boot_no_log",
-                      "deferred_uncleared": [], "triage": []}
-            acceptance_path(ws, module).write_text(
-                json.dumps(report, ensure_ascii=False, indent=2),
-                encoding="utf-8")
-            _log.console_line(f"[porter] P5: {module} 判定中止（boot 日志不可得，"
-                  "infra 关口待答）——exit 3")
-            return 3
-        if not hard_fail or attempt >= _P5_RERUN_MAX:
-            break
-        # ---- 失败即快照（任何重跑之前；events 观测，bypass 不受控） ----
+    results, log, ut_out, log_state = _judge_core(ws, module, order,
+                                                  target_os, proj,
+                                                  runner, crit)
+    if log_state == "missing":
+        # 抢占（H9 重构）：判定输入不存在 → 本轮不判任何日志类判据，
+        # infra 关口已登记；写报告后 rc 3（run.py 的 open_blocking
+        # 复查衔接：人答关口后续跑）
+        report = {"module": module,
+                  "time": datetime.now().isoformat(),
+                  "results": results, "pass": False,
+                  "infra": "boot_no_log",
+                  "deferred_uncleared": [], "solve": []}
+        acceptance_path(ws, module).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+        _log.console_line(f"[porter] P5: {module} 判定中止（boot 日志不可得，"
+              "infra 关口待答）——exit 3")
+        return 3
+
+    solve_outcome: dict | None = None
+    hard_fail = [r for r in results if r["ok"] is False]
+    if hard_fail:
+        # ---- 失败即快照（任何求解之前；events 观测不受熔断控制） ----
         snap = events.take_failure_snapshot(
             ws, "p5", module,
             f"{len(hard_fail)} 判据 FAIL："
@@ -477,20 +519,23 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
             runner=runner, target_os=target_os,
             extra_files=[(p3_reports / "criteria.json",
                           "criteria.json")])
-        if not gates.self_diagnosis_enabled():
-            # §15 bypass（用户决策）：无自动分诊 → 不重跑，失败走
-            # attempts → panic（带快照）停给人
-            break
-        triage_section = _triage_failures(ws, module, target_os, proj,
-                                          runner, results, log, ut_out,
-                                          snap, crit_map, cfg)
-        circuits = {v["circuit"] for v in triage_section}
-        fixed = any(v.get("applied") for v in triage_section)
-        rerun_worthy = (circuits <= {"infra", "unknown"}) or fixed
-        if not rerun_worthy:
-            break
-        _log.console_line(f"[porter] P5: infra/修正后重跑 {attempt + 1}/"
-              f"{_P5_RERUN_MAX}（不计 attempts）")
+        solve_outcome, (results, log, ut_out, log_state) = _solve_failures(
+            ws, module, order, target_os, proj, runner, crit, results,
+            log, ut_out, snap, crit_map, cfg)
+        if solve_outcome is not None and log_state == "missing":
+            # 求解复跑中日志面丢失 → 同抢占语义
+            report = {"module": module,
+                      "time": datetime.now().isoformat(),
+                      "results": results, "pass": False,
+                      "infra": "boot_no_log",
+                      "deferred_uncleared": [],
+                      "solve": solve_outcome.get("rounds") or []}
+            acceptance_path(ws, module).write_text(
+                json.dumps(report, ensure_ascii=False, indent=2),
+                encoding="utf-8")
+            _log.console_line(f"[porter] P5: {module} 求解复跑后日志不可得"
+                  "（infra 关口待答）——exit 3")
+            return 3
 
     # L4 e2e / deferred 登记（一次性，重跑圈外）
     _register_deferred(ws, module, crit)
@@ -510,7 +555,7 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
               "results": results,
               "pass": not hard_fail,
               "deferred_uncleared": uncleared,
-              "triage": triage_section}
+              "solve": (solve_outcome or {}).get("rounds") or []}
     acceptance_path(ws, module).write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     for r in results:
@@ -520,7 +565,11 @@ def run_p5(ws: Path, module: str, order: list[str]) -> int:
     _write_report(ws, module, p5m, report)
     _log.console_line(f"[porter] P5: {module} 验收 {'PASS' if report['pass'] else 'FAIL'}")
     if not report["pass"]:
-        return 1
+        if solve_outcome is not None:
+            # 求解循环在场且未解决（含 parked/rehung——泊车/改挂已登记，
+            # 停人定夺）→ 关口；attempts 在此挂载点退役（rc 3 不烧）
+            return _unsolved_gate(ws, module, solve_outcome)
+        return 1        # 熔断 bypass：走 attempts→panic 人工路径
     if rc_def == 3:
         from . import gates as gates_mod
         for eid in uncleared:
@@ -570,13 +619,14 @@ def _write_report(ws: Path, module: str, p5m: Path, report: dict) -> None:
                                        else "FAIL")
         lines.append(f"| {r['id']} | {r['layer']} | {mark} "
                      f"| {r['detail']} |")
-    tri = report.get("triage") or []
+    tri = report.get("solve") or []
     if tri:
-        lines += ["", "## 分诊（§15 挂载①）", "",
-                  "| 判据 | 回路 | 动作 | 规则 | 处置 |", "|---|---|---|---|---|"]
+        lines += ["", "## 求解循环（错误处理挂载①）", "",
+                  "| 轮 | 动作 | 归责 | 复验 | 处置 |", "|---|---|---|---|---|"]
         for v in tri:
-            lines.append(f"| {v.get('subject')} | {v.get('circuit')} "
-                         f"| {v.get('action')} | {v.get('rule_id')} "
+            lines.append(f"| R{v.get('round')} | {v.get('action')} "
+                         f"| {v.get('circuit')} "
+                         f"| {'PASS' if v.get('verified') else '—'} "
                          f"| {'; '.join(v.get('applied') or [])[:160]} |")
     (p5m / "reports" / "report.md").write_text(
         "\n".join(ln for ln in lines if ln is not None) + "\n",

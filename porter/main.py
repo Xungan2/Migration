@@ -555,7 +555,8 @@ def cmd_p7(args) -> int:
         rc = _gates.checkpoint_run(ws, "CP4", register=[{
             "id": "cp4.defect_review", "kind": "approval",
             "gate_type": "failure", "phase": "P6", "checkpoint": "CP4",
-            "question": (f"{len(fix_debt)} 条 --defect-fix 自动闭账待批审"
+            "question": (f"{len(fix_debt)} 条求解循环（--defect-diagnose）"
+                         "自动闭账待批审"
                          "（四字段+build/boot 证据）——逐条核对后放行；"
                          "否决单条用 `## @p6.defect.fix.<ID>` "
                          "verdict: veto。"),

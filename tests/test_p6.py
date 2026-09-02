@@ -367,13 +367,17 @@ class TestExecute(unittest.TestCase):
             rc = P6.run_p6(ws, execute_flag=True, l4=True)
         finally:
             _restore_exec(saved)
-        ok("rc=1", rc == 1)
+        ok("rc=3（PORTER_NO_AGENT 下求解降级 → p6.unsolved 关口）",
+           rc == 3)
         h = json.loads((ws / "P6" / "reports" / "health.json")
                        .read_text(encoding="utf-8"))
         v = h["verdict"]
         ok("hello-log FAIL", "modA.hello-log" in v["failing"])
         ok("哨兵未清偿计入", "modA.sentinel-log" in v["deferred_uncleared"])
         ok("非全绿", not v["all_green_except_parked"])
+        ok("solve 零轮 + 关口在场", h.get("solve") == [] and any(
+            g["id"] == "p6.unsolved" for g in json.loads(
+                (ws / "gates.json").read_text(encoding="utf-8"))["gates"]))
         shutil.rmtree(ws.parent)
 
     def test_execute_requires_finalized_l4(self):

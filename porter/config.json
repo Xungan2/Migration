@@ -1,14 +1,12 @@
 {
   "self_diagnosis": {
-    "enabled": false,
-    "_notes": "§15 失败自诊（triage 分诊 + diagnose 诊断）总开关。false = bypass：p5/p6 不自动分诊（失败走 attempts→panic），--defect-diagnose/--defect-fix 休眠。events.py 观测不受此开关控制（保留）。重设计后翻 true 重启用；PORTER_SELF_DIAGNOSIS=1 可临时强制开"
+    "enabled": true,
+    "_notes": "§15 重设计（2026-09-03）后为错误处理模块求解循环的总开关兼熔断。true（缺省）= p5/p6/d1 失败走求解循环（≤3 轮 agent + 双信号复验 + 同签名早退），耗尽 → 升级报告 + unsolved 关口（attempts 在挂载点退役）。false = 熔断回退旧人工路径（p5 失败 rc 1 → attempts→panic；--defect-diagnose rc 2）。PORTER_SELF_DIAGNOSIS=1 可强制开（测试惯例）"
   },
   "review_gates": {
     "l4_criteria_finalization": "human",
-    "diagnosis_escalation": "agent",
-    "b_class_autofix": "agent",
     "strategy_review": "human",
-    "_notes": "diagnosis_escalation/b_class_autofix 两键属 §15 判断机器——self_diagnosis.enabled=false 时路径不可达、自然失效；保留供重启用"
+    "_notes": "diagnosis_escalation / b_class_autofix 两键已随 §15 重设计退役（2026-09-03）：criteria 修正撤人工闸改为决策债+阶段末 CP 审计；耗尽终态必停 unsolved 关口，无需模式选择"
   },
   "routing": {
     "default": ["rules", "agent", "human"],

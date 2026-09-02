@@ -169,39 +169,45 @@ class FixDefectTest(unittest.TestCase):
 
     def test_d_prereq(self):
         os.environ["PORTER_NO_AGENT"] = "1"
-        ok("D1 无 agent rc 2", P6.fix_defect(self.ws, "RX-PATH") == 2)
+        ok("D1 无 agent rc 2（diagnose）",
+           P6.diagnose_defect(self.ws, "RX-PATH") == 2)
+        ok("D1b --defect-fix 重定向同语义",
+           P6.fix_defect(self.ws, "RX-PATH") == 2)
         os.environ.pop("PORTER_NO_AGENT", None)
         bad = _mk_ws()
         (bad / "defects.json").write_text(json.dumps({"defects": [
             {"id": "NODIAG", "title": "x", "status": "open",
              "history": []}]}), encoding="utf-8")
-        ok("D2 未诊断（无升级报告）rc 2",
-           P6.fix_defect(bad, "NODIAG") == 2)
+        ok("D2 缺陷不存在 rc 2",
+           P6.diagnose_defect(bad, "GHOST") == 2)
 
     def test_e_happy(self):
-        fix_json = {"status": "done",
-                    "root_cause": "描述符环形缓冲映射错误（remaining#1）",
-                    "fix_summary": "改 dma 映射长度计算",
-                    "files": ["kernel/core/comps/e1000/src/rx.rs"]}
+        # d1 求解循环 happy：fix-code verdict + 双信号复验通过 → 闭账 + CP4 债
+        from porter.loop import errorloop as EL
+        verdict = {"status": "done", "circuit": "migration",
+                   "action": "fix-code",
+                   "evidence": [{"file": "kernel/core/comps/e1000/src/"
+                                         "rx.rs", "line": 12,
+                                 "quote": "描述符环形缓冲映射错误"}],
+                   "summary": "描述符环形缓冲映射错误（改 dma 映射长度计算）",
+                   "confidence": 0.9}
         from porter.env import probe as ENV_PROBE
-        from porter.loop import probes as PROBES
-        with mock.patch.object(AGENT, "run_agent",
-                               return_value=(0, "json")), \
-             mock.patch.object(AGENT, "extract_json",
-                               return_value=fix_json), \
-             mock.patch.object(AGENT, "load_skill", return_value="SKILL"), \
+        with mock.patch.object(EL.agent, "run_agent",
+                               return_value=(0, "```json\n"
+                                             + json.dumps(verdict)
+                                             + "\n```")), \
              mock.patch.object(ENV_PROBE, "probe_build",
                                return_value={"item": "build", "ok": True,
                                              "detail": "rc=0"}), \
-             mock.patch.object(PROBES, "boot_and_log",
-                               return_value=(True, "boot log ...", "file")):
-            rc = P6.fix_defect(self.ws, "RX-PATH")
+             mock.patch.object(P6, "_boot_and_log",
+                               return_value=(True, "raw", "boot log ok",
+                                             "file")):
+            rc = P6.diagnose_defect(self.ws, "RX-PATH")
         ok("E1 happy rc 0", rc == 0)
         d = json.loads((self.ws / "defects.json").read_text(
             encoding="utf-8"))["defects"][0]
         ok("E2 四字段闭账", d["status"] == "fixed"
-           and d["root_cause"].startswith("描述符")
-           and d["fix"].startswith("改 dma")
+           and "描述符" in d["root_cause"]
            and "build+boot PASS" in d["regression_evidence"])
         ok("E3 history 落账 fixed-auto",
            any(h.get("event") == "fixed-auto" for h in d["history"]))
