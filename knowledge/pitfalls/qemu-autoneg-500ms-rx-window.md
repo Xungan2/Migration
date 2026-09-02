@@ -18,6 +18,6 @@ LU=0 → **一切入站帧被弃**（连 can_receive 都不过）。
 2. 协议级正解 = **有界重试**（ARP ≤5 次 × 400ms 间隔——Linux 栈同理）；
    不要在驱动里写一次性发送 + 长轮询的单笔语义。
 
-**证据**：`docs/references/qemu-10.2.1-hw-net-e1000x_common.c`
+**证据**：`refs/qemu-10.2.1-hw-net-e1000x_common.c`
 （restart_autoneg 的 timer_mod 500ms；rx_ready 的 LU 门）+ P6 ARP
 重试爆发实验（首笔丢、重试 4/4 通）。

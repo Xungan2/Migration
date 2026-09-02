@@ -19,7 +19,7 @@ migration/platform 的失败证据包。规则分诊已到头——你做**有�
 
 ### 2. QEMU 源码为准（设备行为争议，P6 方法论）
 
-设备行为争议**一律以 `docs/references/` 的 QEMU 源码副本（v10.2.1）
+设备行为争议**一律以 `refs/` 的 QEMU 源码副本（v10.2.1）
 为准**，禁止凭印象断言。已定谳结论（可直接引用）：
 
 - **QEMU 不实现 RCTL.LBM_MAC**（hw/net/e1000.c 无 LBM 处理，TX 恒

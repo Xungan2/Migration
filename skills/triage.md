@@ -44,7 +44,7 @@
 
 - **重跑前先快照**（ porter 已自动做，你不得删除快照或 events）。
 - 每个结论必须挂证据：日志原文摘录（≤3 行）或源码 file:line。
-- 设备行为争议一律以 `docs/references/` 的 QEMU 源码副本（v10.2.1）
+- 设备行为争议一律以 `refs/` 的 QEMU 源码副本（v10.2.1）
   为准，禁止凭印象断言 QEMU 行为。
 - 判 criteria 回路：**强制** Linux C 源码或 QEMU 源码的 file:line
   证据（update_itr 模式——防顺嘴改判据）。

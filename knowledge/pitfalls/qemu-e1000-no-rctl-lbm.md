@@ -26,7 +26,7 @@ netdev，filter-dump 抓不到）。设置 `RCTL.LBM_MAC` 后自发自收 = TX �
 （os_rx_irq::probe_receive / os_stats::probe_loopback_traffic，
 rx_bytes=0）而独立 TX 探针成功；换 SLIRP 真流量后 ARP 往返
 rx_packets≥1、GPRC/GPTC 与软计数一致。QEMU 源码副本：
-`driver_migration_tool/docs/references/qemu-10.2.1-hw-net-e1000.c`。
+`driver_migration_tool/refs/qemu-10.2.1-hw-net-e1000.c`。
 
 **连带坑**：QEMU q35 双网卡环境默认 virtio-net 占 `52:54:00:12:34:56`，
 显式 e1000 得顺序号 `:57`——探针若硬编码 `:56` 做 MAC 过滤断言会假失败。
