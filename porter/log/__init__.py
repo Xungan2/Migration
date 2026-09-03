@@ -1,4 +1,4 @@
-"""porter.log — 对外唯一进口（稳定 API 面；规范见 docs/log.md）。
+"""porter.log — 对外唯一进口（稳定 API 面；规范见 docs/sub-systems/log.md）。
 
 写：record（双 sink）/ console_only / event（仅 store）/
     ctx（上下文戳）/ phase_begin / phase_end / judge

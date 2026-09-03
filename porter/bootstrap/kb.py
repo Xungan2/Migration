@@ -1,15 +1,18 @@
 """kb.py — 知识库骨架：目录模型 + 域注册表 + 薄 INDEX + 通用晋升。
 
-目录模型（三区，均在工具仓 knowledge/ 下）：
-  knowledge/base/    工具随附的一般知识（任意目标 OS 可用；git 跟踪）
-  knowledge/temp/    草稿区（骨架 README 跟踪，内容全部 gitignore）——
-                     agent 可写的未审分区；与已审内容冲突时以后者为准
-  knowledge/<name>/  一次迁移（或用户自维语料）的知识库目录——p0 时由
-                     用户显式新建（copy base 或空）或指定既有目录；
-                     project.json["kb_dir"] 记录其名字
+目录模型（2026-09 起 vcs 统一管理版——知识库随工作区 git 入库）：
+  knowledge/base/     工具随附的一般知识（任意目标 OS 可用；git 跟踪）
+  knowledge/<name>/   全局知识库（跨迁移复用素材；p0 --kb use 的种子源，
+                      sync_to_global 回写目标）
+  <ws>/knowledge/     本次迁移的知识库目录（p0 时由 base 复制或全局库
+                      种子化；project.json["kb_dir"] 记录其名字）
+  <ws>/knowledge/temp/  草稿区（随工作区 git 入库——每步知识产出可追溯）
 
-  本次迁移的知识库 = knowledge/temp/ ∪ knowledge/<name>/
-  信任分层 = 物理分区：temp 未审；<name>/ 与 base/ 已审。
+  本次迁移的知识库 = <ws>/knowledge/temp/ ∪ <ws>/knowledge/（非 knowledge
+  域条目）∪ knowledge/base/（注入面只读）。
+  信任分层 = 物理分区：temp 未审；其余已审。
+  旧布局（全局 knowledge/<name> 直用）向后兼容：工作区无 knowledge/
+  子目录时回落旧行为。
 
 域注册表（"分类 = 子目录"的落地）。加一个域 = 此表登记一行 +
 skills/kb-guide.md 补一节 + 调用点对照表补一行——单点改动：
@@ -69,8 +72,10 @@ DOMAINS: dict[str, dict] = {
 }
 
 
-def domain_temp(domain: str) -> Path:
-    return TEMP_DIR / DOMAINS[domain]["subdir"]
+def domain_temp(domain: str, ws: Path | None = None,
+                kb_dir: Path | None = None) -> Path:
+    """域草稿分区目录。ws/kb_dir 二选一（都缺省 = 旧全局布局）。"""
+    return temp_root(ws=ws, kb_dir=kb_dir) / DOMAINS[domain]["subdir"]
 
 
 def domain_kb(domain: str, kb_dir: Path) -> Path:
@@ -79,6 +84,73 @@ def domain_kb(domain: str, kb_dir: Path) -> Path:
 
 def domain_base(domain: str) -> Path:
     return BASE_DIR / DOMAINS[domain]["subdir"]
+
+
+# ---------- 工作区知识库布局（<ws>/knowledge/） ----------
+
+def kb_ws_dir(ws: Path) -> Path | None:
+    """工作区知识库根（<ws>/knowledge；不存在 → None=旧布局/无 kb）。"""
+    d = Path(ws) / "knowledge"
+    return d if d.is_dir() else None
+
+
+def temp_root(ws: Path | None = None, kb_dir: Path | None = None) -> Path:
+    """temp 草稿区根。
+
+    新布局（kb 在工作区）：kb_dir 是 <ws>/knowledge（父目录有
+    project.json）→ <kb_dir>/temp；否则 ws 下有 knowledge/ →
+    <ws>/knowledge/temp。旧布局/都缺省 → 全局 TEMP_DIR（运行时取模块
+    属性，tests 可打桩）。
+    """
+    if kb_dir is not None and (Path(kb_dir).parent / "project.json").is_file():
+        return Path(kb_dir) / "temp"
+    if ws is not None:
+        d = kb_ws_dir(ws)
+        if d is not None:
+            return d / "temp"
+    return TEMP_DIR
+
+
+def validate_kb_arg(mode: str, name: str) -> str | None:
+    """--kb 参数校验；返回错误消息（None=合法）。"""
+    if mode not in ("new", "use"):
+        return f"非法模式 {mode!r}（须 new|use）"
+    if not _KB_NAME_RE.match(name or "") or name in _KB_RESERVED:
+        return f"非法目录名 {name!r}（单段名，不得为 base/temp）"
+    return None
+
+
+def sync_to_global(ws: Path, name: str | None = None) -> bool:
+    """工作区知识库 → 全局 knowledge/<name>（跨迁移复用素材）。
+
+    排除 temp/（草稿）与 .hits.json（遥测旁车）。best-effort；用于
+    p1/p2/kb promote 后让下次迁移 `--kb use <name>` 能看到沉淀。
+    """
+    d = kb_ws_dir(ws)
+    if d is None:
+        return False
+    if not name:
+        try:
+            proj = json.loads((Path(ws) / "project.json").read_text(
+                encoding="utf-8"))
+            name = proj.get("kb_dir")
+        except (OSError, json.JSONDecodeError):
+            name = None
+    if not name or not _KB_NAME_RE.match(name or "") or name in _KB_RESERVED:
+        return False
+    dst = KB_ROOT / name
+    try:
+        dst.mkdir(parents=True, exist_ok=True)
+        for src in d.iterdir():
+            if src.name in ("temp", HITS_SIDECAR):
+                continue
+            if src.is_dir():
+                shutil.copytree(src, dst / src.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst / src.name)
+        return True
+    except OSError:
+        return False
 
 
 # ---------- 消费面：目录注入 + kb_consulted 记账 ----------
@@ -145,13 +217,16 @@ def render_catalog(parts: list[tuple[str, Path]],
 
 def catalog_block(kb_dir: Path | None, domains: list[str],
                   include_temp: bool = True,
-                  with_rule: bool = True) -> str:
+                  with_rule: bool = True,
+                  temp_base: Path | None = None) -> str:
     """调用点注入块：各域的已审分区（知识库目录）+ 草稿分区（temp）。
 
     已审在前、草稿在后（冲突以已审为准）；目录为空不注入。
     已审分区的 hits 显示 = INDEX 行（晋升时折叠）+ 旁车 .hits.json
-    （运行时回报，未折叠）的合并值。
+    （运行时回报，未折叠）的合并值。temp_base 缺省用全局 TEMP_DIR
+    （运行时取模块属性，tests 可打桩）。
     """
+    tb = temp_base if temp_base is not None else TEMP_DIR
     parts: list[tuple[str, Path]] = []
     extra: dict[Path, dict[str, int]] | None = None
     if kb_dir is not None:
@@ -170,7 +245,7 @@ def catalog_block(kb_dir: Path | None, domains: list[str],
                         extra[d] = m
     if include_temp:
         for dom in domains:
-            d = domain_temp(dom)
+            d = tb / DOMAINS[dom]["subdir"]
             if _has_entries(d):
                 parts.append((f"{dom}（草稿，未经人审，冲突以已审为准）", d))
     return render_catalog(parts, with_rule=with_rule, extra_hits=extra)
@@ -191,7 +266,8 @@ def kb_face(ws: Path, domains: list[str], include_temp: bool = True) -> str:
     无任何可注入条目 → ""（调用方省略知识面；规则 0 不空转）。
     """
     cat = catalog_block(kb_dir_for(ws), domains,
-                        include_temp=include_temp, with_rule=False)
+                        include_temp=include_temp, with_rule=False,
+                        temp_base=temp_root(ws=ws))
     if not cat:
         return ""
     guide = load_guide()
@@ -235,7 +311,15 @@ def kb_dir_of(proj: dict) -> Path | None:
 
 
 def kb_dir_for(ws: Path) -> Path | None:
-    """工作区 → 本次知识库目录（读 project.json；缺失/损坏 → None）。"""
+    """工作区 → 本次知识库目录。
+
+    新布局优先：<ws>/knowledge/ 存在即用（vcs 统一管理版）；
+    否则回落旧布局（project.json 的 kb_dir 相对 KB_ROOT 解析）。
+    project.json 缺失/损坏 → None。
+    """
+    d = kb_ws_dir(ws)
+    if d is not None:
+        return d
     try:
         proj = json.loads((Path(ws) / "project.json").read_text(
             encoding="utf-8"))
@@ -260,21 +344,51 @@ def _gitignore_kb(name: str) -> bool:
 
 
 def select_kb(mode: str, name: str, empty: bool = False,
-              git_ignore: bool = False) -> Path | None:
+              git_ignore: bool = False,
+              ws: Path | None = None) -> Path | None:
     """p0 --kb 参数处理。返回知识库目录；非法输入打印原因返回 None。
 
-    mode=new：新建 knowledge/<name>/（已存在 → 拒绝，提示改用 use）；
-      empty=False 复制 base 内容（缺省），True 建空目录。
-      git_ignore=True 时追加 .gitignore（缺省 track，不动 git）。
-    mode=use：指定既有 knowledge/<name>/。
+    工作区模式（ws 给出，vcs 统一管理版）：
+      mode=new：新建 <ws>/knowledge/（已存在 → 拒绝）；empty=False
+        复制 base 内容，True 建空目录。git 策略不适用（随工作区 git
+        统一入库），git_ignore 忽略。
+      mode=use：复制全局 knowledge/<name>/ → <ws>/knowledge/（种子化；
+        沉淀回全局用 sync_to_global）。
+    旧模式（ws 缺省，向后兼容）：
+      mode=new：新建 knowledge/<name>/（已存在 → 拒绝，提示改用 use）；
+        empty=False 复制 base；git_ignore=True 追加 .gitignore。
+      mode=use：指定既有 knowledge/<name>/。
     """
-    if mode not in ("new", "use"):
-        _log.console_line(f"[porter] --kb: 非法模式 {mode!r}（须 new|use）")
+    err = validate_kb_arg(mode, name)
+    if err:
+        _log.console_line(f"[porter] --kb: {err}")
         return None
-    if not _KB_NAME_RE.match(name or "") or name in _KB_RESERVED:
-        _log.console_line(f"[porter] --kb: 非法目录名 {name!r}（单段名，不得为 "
-              "base/temp）")
-        return None
+    if ws is not None:
+        d = Path(ws) / "knowledge"
+        if d.exists():
+            _log.console_line(f"[porter] --kb: {d} 已存在——工作区知识库"
+                  "只建一次（复用 project.json 记录；删除该目录方可重建）")
+            return None
+        if mode == "new":
+            if empty:
+                d.mkdir(parents=True)
+                _log.console_line(f"[porter] --kb: 已新建空知识库目录 {d}")
+            else:
+                if not BASE_DIR.is_dir():
+                    _log.console_line(f"[porter] --kb: base 分区缺失"
+                          f"（{BASE_DIR}）——无法复制，请检查工具仓")
+                    return None
+                shutil.copytree(BASE_DIR, d)
+                _log.console_line(f"[porter] --kb: 已新建知识库目录 {d}"
+                      "（复制 base）")
+            return d
+        src = KB_ROOT / name
+        if not src.is_dir():
+            _log.console_line(f"[porter] --kb: 全局知识库目录不存在 {src}")
+            return None
+        shutil.copytree(src, d)
+        _log.console_line(f"[porter] --kb: 已从全局库种子化 {src} → {d}")
+        return d
     d = KB_ROOT / name
     if mode == "new":
         if d.exists():
@@ -405,7 +519,7 @@ def promote_entries(domain: str, files: list[str] | None,
     专用晋升逻辑直至迁移完成。files=None 搬全部分区条目；INDEX 未
     登记的散文件不搬。返回 (搬运数, 消息列表)。
     """
-    src, dst = domain_temp(domain), domain_kb(domain, kb_dir)
+    src, dst = domain_temp(domain, kb_dir=kb_dir), domain_kb(domain, kb_dir)
     idx = load_index(src) or []
     rows = [e for e in idx if isinstance(e, dict) and e.get("file")]
     if files is not None:

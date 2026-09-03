@@ -49,10 +49,10 @@ agent 在干活时能查到它们。核心机制三句话：
 | 术语 | 白话定义 | 为什么需要它 |
 |---|---|---|
 | **知识库（KB）** | 工具仓库 `knowledge/` 目录及其管理机制的总称 | 子系统边界：工作区里的报告/账本不算知识库 |
-| **三区** | knowledge/ 下的三种分区：base、temp、知识库目录 | 一切路径规则的出发点 |
+| **三区** | 知识的三种分区：base（工具随附）、temp（草稿）、知识库目录（本次迁移） | 一切路径规则的出发点 |
 | **base** | 工具随附的一般知识分区（`knowledge/base/`，git 跟踪），任意目标 OS 可用 | 区分"工具作者写的"与"迁移产生的" |
-| **temp（草稿区）** | 未审知识暂存区（`knowledge/temp/`，目录骨架跟踪、内容全部 gitignore） | agent 可写而不污染正式知识；跨迁移共享 |
-| **知识库目录（corpus）** | 一次迁移（或用户自维语料）的知识目录 `knowledge/<name>/`，p0 时由用户显式指定 | "本次迁移的知识库"的物理载体；可跨工作区复用 |
+| **temp（草稿区）** | 未审知识暂存区（`<ws>/knowledge/temp/`，随工作区 git 入库） | agent 可写而不污染正式知识 |
+| **知识库目录（corpus）** | 本次迁移的知识目录 `<ws>/knowledge/`，p0 时物化；全局 `knowledge/<name>/` 为跨迁移复用库（promote 后 sync_to_global 同步） | "本次迁移的知识库"的物理载体 |
 | **域（子目录）** | 知识的分类单位 = 知识库目录下的子目录（maps/gaps/runbook/splits/pitfalls） | 分类即存放位置即检索入口，三者合一 |
 | **固定知识** | 每次迁移必然产出的知识（四域各有定点收成） | 免探查、免分类——收成即入库草稿 |
 | **随机知识** | 偶发发现的知识（事件触发、有无不定） | 需要探查→审核→分类→沉淀流水线 |
@@ -78,37 +78,45 @@ agent 在干活时能查到它们。核心机制三句话：
 
 ### 3.1 目录模型
 
+> **2026-09 vcs 统一管理版**：知识库随工作区 git 入库。本次迁移的 kb
+> 目录与 temp 草稿区移入工作区（`<ws>/knowledge/`、
+> `<ws>/knowledge/temp/`），原全局位置只保留 base 与跨迁移复用库
+> `knowledge/<name>/`（promote 后 `sync_to_global` 自动同步）。
+> 旧布局（全局直用）向后兼容：工作区无 `knowledge/` 子目录时回落。
+
 ```
-knowledge/
-├── base/                    # 工具随附（git 跟踪；任意目标 OS 可用）
-│   └── splits/strategies/   #   目前唯一实例：拆分策略样例骨架
-├── temp/                    # 草稿区（README 骨架跟踪；内容全部 gitignore）
-│   ├── maps/  gaps/  runbook/  splits/strategies/   # 各域草稿
-│   └── candidates/          #   随机知识候选账
-├── <name>/                  # 知识库目录（p0 --kb 指定；git 策略新建时定）
-│   ├── maps/  gaps/  runbook/  splits/strategies/  pitfalls/
+knowledge/                          # 工具仓全局（跨迁移共享面）
+├── base/                           #   工具随附（git 跟踪；任意目标 OS 可用）
+│   └── splits/strategies/          #     目前唯一实例：拆分策略样例骨架
+└── <name>/                         #   跨迁移复用库（p0 --kb use 的种子源；
+                                    #   promote 后自动同步；人工可维护）
+
+<ws>/knowledge/                     # 本次迁移的知识库（随工作区 git 入库）
+├── maps/  gaps/  runbook/  splits/strategies/  pitfalls/  failures/
 │   └── INDEX.json（每域每分区一份）
-└── base/<域>/ + <name>/<域>/  # 各域含 failures/（失败签名，2026-09-03 归位）
+└── temp/                           #   草稿区（同样随工作区 git 入库——
+    ├── maps/  gaps/  runbook/  splits/strategies/   # 每步知识产出可追溯）
+    └── candidates/                 #     随机知识候选账
 ```
 
-**命名空间**：temp 跨迁移共享，条目一律按 `<驱动名>@<目标OS名>`
-隔离——maps/runbook 以文件名或子目录携带，gaps/runbook 为嵌套子目录
-（`gaps/<ns>/<api>.md`、`runbook/<目标OS>/<主题>.md`），pitfalls 晋升
-条目以文件名前缀 `[<ns>]` 描述携带。多工作区共用同一知识库目录为
-单写者假设（见第 5 章）。
+**命名空间**：条目一律按 `<驱动名>@<目标OS名>` 隔离——maps/runbook 以
+文件名或子目录携带，gaps/runbook 为嵌套子目录（`gaps/<ns>/<api>.md`、
+`runbook/<目标OS>/<主题>.md`），pitfalls 晋升条目以文件名前缀 `[<ns>]`
+描述携带。
 
 **p0 显式选择（必填）**：
 
 | 参数 | 语义 |
 |---|---|
-| `--kb new <名>` | 新建 `knowledge/<名>/`；缺省复制 base，`--kb-empty` 建空目录 |
-| `--kb-git track\|ignore` | 新建目录的 git 策略；ignore 时工具把 `knowledge/<名>/` 追加进 .gitignore（缺省 track） |
-| `--kb use <名>` | 指定既有目录 |
-| （缺省） | rc 2 + 打印选择指引（列既有目录）；已记录 kb_dir 的工作区复用记录值 |
+| `--kb new <名>` | 新建 `<ws>/knowledge/`；缺省复制 base，`--kb-empty` 建空目录 |
+| `--kb use <名>` | 从全局库 `knowledge/<名>/` 复制种子化 `<ws>/knowledge/` |
+| `--kb-git track\|ignore` | **已退役**（兼容保留）：知识库随工作区 git 统一入库，无独立 git 策略 |
+| （缺省） | rc 2 + 打印选择指引（列既有全局库）；已记录 kb_dir 的工作区复用记录值 |
 
 **名称校验**：单段名（`^[A-Za-z0-9][A-Za-z0-9._-]*$`），禁 base/temp。
 **记录**：project.json 的 `kb_dir` 字段存目录名，全工具经
-`kb.kb_dir_for(ws)` 解析。
+`kb.kb_dir_for(ws)` 解析（优先 `<ws>/knowledge/`；旧布局回落
+`kb_dir_of` 全局解析）。
 
 **回流 base**：本轮不设通道（TODO 第 8 条）；人工可直接编辑 base
 （它就是 git 跟踪的普通目录）。
@@ -283,7 +291,7 @@ CP5 检查点（p7 末，memo 非阻塞）生成**知识备审材料**
 | policy_hits.json | 路由 rules 层命中计数 | KB 健康报告 |
 | veto 聚类 | gates 账本 vetoed 条目 | KB 健康报告 |
 
-（规范见 docs/log.md；事件流经 porter/log 写入，域账本保持域所有。）
+（规范见 docs/sub-systems/log.md；事件流经 porter/log 写入，域账本保持域所有。）
 
 ### 3.10 与 gates 子系统的关系
 
@@ -389,7 +397,7 @@ porter p2-promote --output-dir <ws> --driver <名> [--target <名>]
    （TODO 第 5 条）；
 7. **失败签名已归位**（2026-09-03 §15 重设计）：failures 域为第六
    域（base=通用逻辑形态 + lineage=环境特定），消费方 = 错误处理模块
-   求解循环（errorloop，docs/error-handling.md）；候选回流走
+   求解循环（errorloop，docs/modules/error-handling.md）；候选回流走
    candidates 账（solve-loop / escalation 两钩子）；判据 auto_fixed
    修正史随决策债进 CP 审计面。
 

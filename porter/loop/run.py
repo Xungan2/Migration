@@ -296,6 +296,12 @@ def run_loop(ws: Path, module: str | None = None,
                                 summary=f"泊车模块仍在卡点："
                                         f"{', '.join(parked)}"
                                         "（attempts 烧穿走 answers.md）")
+                try:                    # vcs：循环内模块 done commit
+                    from ..common import vcs as _vcs
+                    _vcs.commit_workspace(
+                        ws, f"loop: module {module} done", phase="loop")
+                except Exception:
+                    pass
             return rc
 
     target = module or state.pointer()
@@ -322,6 +328,12 @@ def run_loop(ws: Path, module: str | None = None,
         _log.record("module_done", module=target, scope="loop",
                     summary=f"✔ {target} 完成"
                             f"（{len(state.done_set())}/{len(order)}）")
+        try:                            # vcs：循环内模块 done commit
+            from ..common import vcs as _vcs
+            _vcs.commit_workspace(ws, f"loop: module {target} done",
+                                  phase="loop")
+        except Exception:
+            pass
         # 债限额软停（收窄计数；夜间自治 = limit 默认 30）
         rc = _debt_checkpoint(ws, state)
         if rc != 0:

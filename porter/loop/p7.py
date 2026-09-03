@@ -228,6 +228,12 @@ def run_p7(ws: Path) -> int:
     defects = (_load(ws / "defects.json") or {"defects": []})["defects"]
     patches = load_patches(ws)
 
+    try:                                # vcs：commit 链（台账 → 逐 commit 文件）
+        from ..common import vcs as _vcs
+        chain = _vcs.commit_chain(ws)
+    except Exception:
+        chain = []
+
     report = {
         "time": datetime.now().isoformat(), "workspace": str(ws),
         "driver": driver, "target_os": str(target_os),
@@ -256,6 +262,7 @@ def run_p7(ws: Path) -> int:
             target_os,
             ((proj.get("target_os_baseline") or {}).get("baseline_commit")
              or ""), driver),
+        "commit_chain": chain,
     }
     rp = ws / "P7" / "reports"
     (rp / "final_report.json").write_text(
@@ -314,6 +321,16 @@ def _write_md(ws: Path, path: Path, r: dict) -> None:
     ]
     for f in b["files"]:
         lines.append(f"| {f['group']} | {f['path']} | {f['status']} |")
+    ch = r.get("commit_chain") or []
+    lines += ["", "## commit 链（vcs 台账）", "",
+              f"- 共 {len(ch)} 次 porter commit（逐次改了什么见下表；"
+              "工作区台账 vcs_commits.json）", "",
+              "| 相位 | repo | hash | 说明 | 文件数 |", "|---|---|---|---|---|"]
+    for e in ch:
+        lines.append(f"| {e.get('phase') or '—'} "
+                     f"| {Path(str(e.get('repo', ''))).name} "
+                     f"| {str(e.get('hash', ''))[:12]} "
+                     f"| {e.get('msg', '')[:80]} | {len(e.get('files') or [])} |")
     lines += ["", "## 结论与去向（人工撰写区）", "",
               "<!-- P7-4 人工撰写：完整度清单（已迁/未迁/不适用）、泊车条目"
               "与翻回条件、补丁台账处置、复用建议 -->", ""]

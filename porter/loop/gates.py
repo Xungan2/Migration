@@ -486,6 +486,13 @@ def process_answered_gates(ws: Path, ledger: GateLedger | None = None
             pass
     ledger.save()
     _remove_gate_sections(ws, consumed)
+    if applied:
+        try:                            # vcs：人工答案消费留痕（best-effort）
+            from ..common import vcs as _vcs
+            _vcs.commit_workspace(ws, f"answers: {applied} applied",
+                                  phase="gates")
+        except Exception:
+            pass
     return applied, invalid
 
 
@@ -582,6 +589,12 @@ def panic(ws: Path, spec: dict, evidence: dict | None = None) -> int:
     """
     ws = Path(ws)
     spec = {"lane": "panic", **spec}
+    try:                                # vcs：停车保存现场（best-effort）
+        from ..common import vcs as _vcs
+        _vcs.commit_workspace(ws, f"stop: {spec.get('id', '?')}",
+                              phase=str(spec.get("phase") or "loop").lower())
+    except Exception:
+        pass
     ledger = GateLedger(ws).load()
     gate = ledger.add(**spec)
     # 组件四：开给人之前按层链尝试自动应答（rules→agent；仅 decision 类，

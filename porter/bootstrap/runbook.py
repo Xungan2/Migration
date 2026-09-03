@@ -76,7 +76,7 @@ def draft_runbook(ws: Path) -> int:
     if not runner or not proj:
         return 1
     target = Path(proj["target_os"]).name
-    rdir = kb.domain_temp("runbook")
+    rdir = kb.domain_temp("runbook", ws=ws)
     ns_dir = rdir / target
     ns_dir.mkdir(parents=True, exist_ok=True)
 

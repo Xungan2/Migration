@@ -40,5 +40,16 @@
   "panic": {
     "same_signature_repeat": 2,
     "cluster_threshold": 3
+  },
+  "vcs": {
+    "enabled": true,
+    "identity": {
+      "name": "porter",
+      "email": "porter@local"
+    },
+    "target_os": {"enabled": true},
+    "workspace": {"enabled": true},
+    "export": {"format": "bundle"},
+    "_notes": "git 管理总开关。identity=git 身份兜底（容器常无全局 user.name/email，缺则 commit 失败）；target_os/workspace=分 repo 开关；export.format=跨机器可移植导出格式（bundle 保 commit hash）。分支与各仓 baseline 记在 <ws>/project.json['vcs']（工作区级）。PORTER_VCS=0/1 强制覆盖 enabled"
   }
 }

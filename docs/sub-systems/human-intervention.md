@@ -266,7 +266,7 @@ gate_type 分派**：
 
 | 层 | gate_type=decision | gate_type=failure |
 |---|---|---|
-| rules | policy.md（工作区自然语言常备规则，agent 解释、命中留痕 `policy_hits.json` + event） | —（失败类由错误处理模块求解循环前置消化，docs/error-handling.md） |
+| rules | policy.md（工作区自然语言常备规则，agent 解释、命中留痕 `policy_hits.json` + event） | —（失败类由错误处理模块求解循环前置消化，docs/modules/error-handling.md） |
 | agent | gate-answer skill + **知识库检索**（kb-guide 总纲 + 按关口类型确定性选域注入已审条目目录；答案可附 `kb_consulted` 记 hits；temp 草稿不参与自动应答） | —（求解循环含修复+验证，d1 挂载为人手按需入口） |
 | human | 人 | 人 |
 
@@ -303,13 +303,13 @@ human 且非全自动点），不阻塞（回落内置默认）。
 ### 3.9 观测协议
 
 **events.jsonl + 快照**（log 子系统 `porter/log/`，经 `loop/events.py`
-兼容门面；观测不受熔断控制、保留；规范见 docs/log.md）。
+兼容门面；观测不受熔断控制、保留；规范见 docs/sub-systems/log.md）。
 子系统写入的事件类型：`gate-auto-answered`（路由自动应答）、
 `policy-hit`（规则命中 + 遥测 policy_hits.json）、`gate-veto`、
 `gate-cluster`（聚类）、`boot-log-missing` / `boot-log-empty`
 （日志面三态）、`memo`、`gate-cluster`；错误处理模块的
 `errorloop_round/_end` / `escalation` / `snapshot` 族见
-docs/error-handling.md §6。
+docs/modules/error-handling.md §6。
 
 **§15 → 错误处理模块边界**（`self_diagnosis.enabled`，缺省 true——
 2026-09-03 重设计后直接生效）：p5/p6 失败与 d1 缺陷走求解循环
@@ -317,7 +317,7 @@ docs/error-handling.md §6。
 `p5.unsolved.<M>` / `p6.unsolved` / `d1.unsolved.<did>` 关口（attempts
 在求解挂载点退役）。熔断关（enabled=false）回退旧人工路径；
 `PORTER_NO_AGENT=1` = 降级档（只出报告+关口）。规范见
-docs/error-handling.md。
+docs/modules/error-handling.md。
 
 ### 3.10 关口 ID 命名规范与全目录
 
@@ -422,7 +422,7 @@ CLI 是便利层——协议本体是"账本 + answers.md"，纯文件操作完�
 | tests/test_s5_automation.py | draft-l4 / d1 求解闭账（D/E） |
 | tests/test_s15_bypass.py | 3.9（开关缺省开/熔断守卫/降级档） |
 | tests/test_loop_state.py | 3.5/3.7（烧穿→关口→retry 恢复全链） |
-| tests/test_mounts.py / test_replay.py / test_p6.py / test_errorloop.py / test_diagnose.py | 错误处理模块：挂载端到端 + 六案例回归基线 + 循环核心 + 报告面（docs/error-handling.md §8） |
+| tests/test_mounts.py / test_replay.py / test_p6.py / test_errorloop.py / test_diagnose.py | 错误处理模块：挂载端到端 + 六案例回归基线 + 循环核心 + 报告面（docs/modules/error-handling.md §8） |
 
 ---
 
@@ -435,7 +435,7 @@ CLI 是便利层——协议本体是"账本 + answers.md"，纯文件操作完�
 3. **错误处理债审计面**：criteria 修正债（`<source>.criteria-fix.*`）与
    求解闭账债（`p6.defect.fix.*`）均为非阻塞 checkpoint 条目——只进
    CP digest 批审，不即时打扰；量尺作弊的兜底 = 证据门槛前置 +
-   阶末审计（docs/error-handling.md §3）；
+   阶末审计（docs/modules/error-handling.md §3）；
 4. **CP2 默认关**：依据 = e2e 实证（无映射人审跑通）+ 下游机器验证
    兜底（探针/编译/判据会逮住错映射）+ 850 条人审成本高；
 5. **infra.boot_no_log 固定 id**：多处触发共用一个关口（re-asked 计数

@@ -37,17 +37,37 @@ def load_skill(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _bound_ws() -> "Path | None":
+    """log 子系统绑定的工作区（未绑定 → None；观测面永不打断）。"""
+    try:
+        from ..log import store as _store
+        b = _store.bound()
+        if b and b.get("ws"):
+            return Path(b["ws"])
+    except Exception:
+        pass
+    return None
+
+
 def run_agent(prompt: str, workdir: Path, log_stem: str,
               model: str | None = None, timeout_sec: int = 600,
               task: dict | None = None) -> tuple[int, str]:
     """调用 opencode 非交互模式执行一次 agent 任务。
 
     返回 (exit_code, stdout_text)。完整输出落盘 <log_stem>.log；输入
-    原文归档 <log_stem>.prompt.md（与输出成对，docs/log.md 类 2）。
+    原文归档 <log_stem>.prompt.md（与输出成对，docs/sub-systems/log.md 类 2）。
     观测埋桩（log 子系统）：events 绑定在场时前后写意图/结果事件，
     run_id = log_stem；task 传 {phase,module,step,attempt} 元数据
-    （v1.1 结构字段）。
+    （v1.1 结构字段）。vcs 隔离：调用前后各一个工作区 commit
+    （pre-agent/agent 成对），diff 即该次调用的 ws 侧产物。
     """
+    vws = _bound_ws()                    # vcs 隔离点的工作区（可能 None）
+    if vws is not None:
+        try:
+            from . import vcs as _vcs
+            _vcs.agent_pre(vws, str(log_stem))
+        except Exception:
+            pass
     model = model or os.environ.get("PORTER_MODEL", DEFAULT_MODEL)
     log_path = Path(f"{log_stem}.log")
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +122,12 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
                     console_msg=f"[porter] agent: {log_stem} rc={rc} "
                                 f"{elapsed:.0f}s log={log_path}",
                     run_id=stem, **tmeta)
+    except Exception:
+        pass
+    try:                                # vcs：agent 调用后的隔离点（best-effort）
+        if vws is not None:
+            from . import vcs as _vcs
+            _vcs.agent_post(vws, str(log_stem), rc)
     except Exception:
         pass
     return rc, out

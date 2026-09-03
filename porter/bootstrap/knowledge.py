@@ -94,7 +94,7 @@ def draft_knowledge(ws: Path) -> int:
     stem = f"{driver}@{target}"
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
 
-    tdir = kb.domain_temp("maps")
+    tdir = kb.domain_temp("maps", ws=ws)
     tdir.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(md_path, tdir / f"{stem}.md")
     shutil.copyfile(mapping_path, tdir / f"{stem}.json")
@@ -141,7 +141,7 @@ def promote_map(driver: str, kb_dir: Path,
     条目文件名 = `<驱动>@<目标>.md`（stem 携带身份；同名 = 活文档替换，
     hits 取两侧较高值）。kb_dir = 本次迁移的知识库目录。
     """
-    tdir = kb.domain_temp("maps")
+    tdir = kb.domain_temp("maps", kb_dir=kb_dir)
     tidx = kb.load_index(tdir) or []
     rows = [e for e in tidx if isinstance(e, dict)
             and (e.get("file") or e.get("entry_file"))]

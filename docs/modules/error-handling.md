@@ -85,7 +85,7 @@ defect），判定"这是谁的错"，并尝试解决或给出正确处置。它
 
 ## 5. 知识面（failures 域）
 
-- taxonomy 见 docs/knowledge.md §3.2（第六域，单点改动路径）；
+- taxonomy 见 docs/sub-systems/knowledge.md §3.2（第六域，单点改动路径）；
 - **按 lineage 归属**：通用逻辑形态（静默矛盾/空日志/ANSI 失配/
   复合分解/假缺陷/平台缺口形态等）在 `knowledge/base/failures/`；
   环境特定签名（docker 锁/osdk/QEMU 特征）在

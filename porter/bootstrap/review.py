@@ -127,7 +127,7 @@ def build_cp5_material(ws: Path) -> Path:
     lines += ["## temp 草稿清点（固定域收成）", ""]
     any_draft = False
     for dom in kb.DOMAINS:
-        idx = kb.load_index(kb.domain_temp(dom)) or []
+        idx = kb.load_index(kb.domain_temp(dom, ws=ws)) or []
         if idx:
             any_draft = True
             lines.append(f"- {dom}：{len(idx)} 条（"

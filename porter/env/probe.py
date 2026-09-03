@@ -81,7 +81,7 @@ def probe_build(ws: Path, target_os: Path, runner: dict,
     ok = rc == 0
     if ok and b.get("success_pattern"):
         ok = b["success_pattern"] in _strip_ansi(out)
-    try:                                    # judge 证据流（docs/log.md）
+    try:                                    # judge 证据流（docs/sub-systems/log.md）
         _log.judge(label, ok, detail=f"rc={rc}" + (
             "" if not b.get("success_pattern")
             else f" pattern={'hit' if ok else 'MISS'}"),

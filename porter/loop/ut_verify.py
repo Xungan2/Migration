@@ -46,7 +46,7 @@ def feedback_block(detail: str, out: str, tail_lines: int = 25) -> str:
     """给 agent 的失败反馈块（判定说明 + 观测输出尾部）。
 
     尾部切割经 log.query.tail_text（上下文接续的统一切口，
-    docs/log.md §6）；文案保持既有格式（byte 兼容）。
+    docs/sub-systems/log.md §6）；文案保持既有格式（byte 兼容）。
     """
     from ..log import query as _lq
     tail = _lq.tail_text(out, tail_lines)

@@ -118,6 +118,22 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
     if not _acceptance(ws, target_os):
         return 1
 
+    # vcs：P2 阶段末——目标树骨架+wiring commit、工作区 commit（best-effort）
+    try:
+        from ..common import vcs as _vcs
+        paths: list[str] = list(_vcs.TARGET_WIRING_FILES)
+        try:
+            _m = json.loads((ws / "P2" / "reports" / "skeleton_manifest.json")
+                            .read_text(encoding="utf-8"))
+            paths = list(_m.get("created") or []) + paths
+        except (OSError, json.JSONDecodeError):
+            pass
+        _vcs.commit_target(ws, "P2: skeleton + wiring", paths=paths,
+                           phase="P2")
+        _vcs.commit_workspace(ws, "P2: done", phase="P2")
+    except Exception:
+        pass
+
     # CP2 映射审（默认关：e2e 实证无它也跑通，下游机器验证兜底；
     # checkpoints.CP2_enabled=true 开启——高保障迁移的映射抽审 + 债批审）
     from ..loop import gates as _gates

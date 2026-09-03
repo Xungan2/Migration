@@ -40,7 +40,8 @@ from .. import log as _log
 
 # ---------- 样例库 ----------
 
-def sample_partitions(kb_dir: Path | None) -> list[tuple[str, Path]]:
+def sample_partitions(kb_dir: Path | None,
+                      ws: Path | None = None) -> list[tuple[str, Path]]:
     """样例库分区表（标签, 目录）。已沉淀 = base ∪ 知识库目录。"""
     parts: list[tuple[str, Path]] = [
         ("工具随附样例（base，任意目标 OS 可用）",
@@ -50,7 +51,7 @@ def sample_partitions(kb_dir: Path | None) -> list[tuple[str, Path]]:
         parts.append(("已沉淀样例（本次知识库目录）",
                       kb.domain_kb("splits", kb_dir)))
     parts.append(("草稿样例（未经人审，与已沉淀冲突时以已沉淀为准）",
-                  kb.domain_temp("splits")))
+                  kb.domain_temp("splits", ws=ws)))
     return parts
 
 
@@ -94,7 +95,7 @@ def _merged_curated_index(kb_dir: Path | None) -> list:
 def _build_samples_injection(ws: Path) -> str:
     """样例库注入块：导读 + 各非空分区的目录路径与 INDEX 内容。"""
     sections = []
-    for label, d in sample_partitions(kb.kb_dir_for(ws)):
+    for label, d in sample_partitions(kb.kb_dir_for(ws), ws=ws):
         entries = _list_entries(d)
         idx = _load_index(d)
         if not entries:
@@ -184,7 +185,7 @@ def _draft_to_temp(ws: Path, proj: dict, driver_root: Path,
                    value=f"已沉淀分区已有完全一致样例（{matched}），不重复草稿")
         return res
 
-    tdir = kb.domain_temp("splits")
+    tdir = kb.domain_temp("splits", ws=ws)
     tidx = _load_index(tdir) or []
     name = _resolve_dest_name(tdir, tidx, driver, set(files))
     if name is None:
@@ -255,7 +256,7 @@ def promote_sample(driver: str, kb_dir: Path) -> int:
     时列候选要求指定条目文件名。目标分区同名碰撞：同文件集=真重复→
     拒绝；构成不同→改名并入（保留）。与 base 完全一致也拒绝（工具已随附）。
     """
-    tdir = kb.domain_temp("splits")
+    tdir = kb.domain_temp("splits", kb_dir=kb_dir)
     tidx = _load_index(tdir) or []
     arg = driver[:-3] if driver.endswith(".md") else driver
     matches = [e for e in tidx if isinstance(e, dict) and

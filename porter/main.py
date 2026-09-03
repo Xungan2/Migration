@@ -92,28 +92,26 @@ def _print_kb_guidance() -> None:
     _log.console_line("[porter] p0: 未指定知识库目录——须显式选择（知识子系统）：")
     print("  新建（复制 base 工具随附知识）：--kb new <名>")
     print("  新建（空目录）：                --kb new <名> --kb-empty")
-    print("  指定既有：                      --kb use <名>")
+    print("  从全局库种子化（沉淀复用）：    --kb use <名>")
     if existing:
-        print(f"  既有目录：{', '.join(existing)}")
-    print("  git 策略：--kb-git track|ignore（新建目录内容是否进 git；"
-          "缺省 track）")
+        print(f"  既有全局库：{', '.join(existing)}")
+    print("  （知识库物化在 <ws>/knowledge/，随工作区 git 统一入库；"
+          "promote 后自动同步回全局库）")
 
 
 def _p0_kb_decision(args, proj_path: Path) -> tuple[int | None, str | None]:
     """p0 的知识库目录决策。返回 (rc, kb_name)；rc 非 None 时直接返回。
 
-    显式必填（定案）：新工作区或未记录 kb_dir 的旧工作区，缺 --kb 即
-    rc 2 并打印选择指引；已记录的工作区复用记录值。
+    只做参数校验与复用判定，不物化（物化需工作区存在，延后到 T1 之后
+    的 select_kb(ws=...)）。
     """
     from porter.bootstrap import kb as _kb
     kb_arg = getattr(args, "kb", None)
     if kb_arg:
-        mode, name = kb_arg[0], kb_arg[1]
-        d = _kb.select_kb(mode, name,
-                          empty=getattr(args, "kb_empty", False),
-                          git_ignore=(getattr(args, "kb_git", "track")
-                                      == "ignore"))
-        if d is None:
+        mode, name = kb_arg
+        err = _kb.validate_kb_arg(mode, name)
+        if err:
+            _log.console_line(f"[porter] --kb: {err}")
             return 2, None
         return None, name
     if proj_path.exists():
@@ -157,17 +155,35 @@ def cmd_p0(args) -> int:
             linux_driver=Path(args.linux_driver),
             target_os=Path(args.target_os),
             materials=[Path(m) for m in (args.materials or [])])
-        if kb_name is not None:
-            _record_kb(proj_path, kb_name)
     else:
         _log.console_line(f"[porter] T1: 复用已有工作区 {ws}")
-        if kb_name is not None:
-            _record_kb(proj_path, kb_name)
+
+    # 知识库物化（工作区就绪后；--kb 给出时。kb 进 <ws>/knowledge/，
+    # 随工作区 git 统一入库——vcs 统一管理版）
+    if kb_name is not None:
+        from porter.bootstrap import kb as _kb
+        d = _kb.select_kb(args.kb[0], args.kb[1],
+                          empty=getattr(args, "kb_empty", False),
+                          ws=ws)
+        if d is None:
+            return 2
+        _record_kb(proj_path, kb_name)
 
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     linux_driver = Path(proj["linux_driver"])
     target_os = Path(proj["target_os"])
     materials = [Path(m) for m in proj.get("materials", [])]
+
+    # VCS 登记（目标树并行仓 baseline + porter 分支 + 工作区 git init；
+    # 幂等，resume 只补齐分支）
+    try:
+        from porter.common import vcs as _vcs
+        _vrc = _vcs.hook_p0(ws, target_os,
+                            branch=getattr(args, "os_branch", None))
+        if _vrc != 0:
+            return _vrc
+    except Exception as _e:
+        _log.console_line(f"[porter] p0: ⚠️ vcs 登记异常（不阻塞）：{_e}")
 
     # T2 类别识别
     if proj.get("category"):
@@ -210,8 +226,14 @@ def cmd_p0(args) -> int:
                              "runner.json 再进入 P1（非阻塞建议）。"),
                 "context_files": ["runner.json", "P0/reports/memo.md"],
                 "answer_form": [{"field": "note", "type": "text",
-                                 "required": False}]}],
+                                  "required": False}]}],
             blocking=False)
+        # vcs：P0 阶段末工作区 commit（best-effort）
+        try:
+            from porter.common import vcs as _vcs
+            _vcs.commit_workspace(ws, "P0: done", phase="P0")
+        except Exception:
+            pass
         return 0
     from porter.loop import gates as _gates2
     return _gates2.panic(ws, {
@@ -346,6 +368,7 @@ def cmd_kb(args) -> int:
         for c in _cand_load(ws):
             print(f"  - {c['id']}（建议类 {c.get('suggested_class')}）："
                   f"{c['draft'][:80]}")
+    _kb_sync_and_commit(ws, acted)
     return 0
 
 
@@ -354,12 +377,27 @@ def _cand_load(ws: Path) -> list[dict]:
     return _c.load_candidates(ws)
 
 
+def _kb_sync_and_commit(ws_raw, acted: bool) -> None:
+    """promote 类命令收尾：知识库沉淀回全局 + 工作区 commit（best-effort）。"""
+    try:
+        from porter.common import vcs as _vcs
+        from porter.bootstrap import kb as _kb
+        if acted and _kb.sync_to_global(Path(ws_raw)):
+            _log.console_line("[porter] kb: 已同步回全局知识库（跨迁移复用）")
+        if acted:
+            _vcs.commit_workspace(Path(ws_raw), "kb: promote", phase="kb")
+    except Exception:
+        pass
+
+
 def cmd_p1_promote(args) -> int:
     """样例草稿晋升（沉淀）：temp/splits → 本次知识库目录。"""
     kb_dir = _kb_dir_for_promote(args.output_dir)
     if kb_dir is None:
         return 1
-    return p1s.promote_sample(args.driver, kb_dir)
+    rc = p1s.promote_sample(args.driver, kb_dir)
+    _kb_sync_and_commit(args.output_dir, rc == 0)
+    return rc
 
 
 def _p2_context(args):
@@ -384,7 +422,9 @@ def cmd_p2_promote(args) -> int:
     kb_dir = _kb_dir_for_promote(args.output_dir)
     if kb_dir is None:
         return 1
-    return kn.promote_map(args.driver, kb_dir, target=args.target)
+    rc = kn.promote_map(args.driver, kb_dir, target=args.target)
+    _kb_sync_and_commit(args.output_dir, rc == 0)
+    return rc
 
 
 def _loop_module(args):
@@ -532,9 +572,17 @@ def cmd_p6(args) -> int:
     if args.defect_fix:
         return p6_mod.fix_defect(ws, args.defect_fix)
 
-    return p6_mod.run_p6(ws, execute_flag=args.execute, l4=args.l4,
-                         finalize_flag=args.finalize_l4,
-                         draft_flag=args.draft_l4)
+    rc = p6_mod.run_p6(ws, execute_flag=args.execute, l4=args.l4,
+                       finalize_flag=args.finalize_l4,
+                       draft_flag=args.draft_l4)
+    if rc == 0 and args.execute:
+        try:                            # vcs：P6 execute 后 commit（best-effort）
+            from porter.common import vcs as _vcs
+            _vcs.commit_target(ws, "P6: execute", phase="P6")
+            _vcs.commit_workspace(ws, "P6: execute done", phase="P6")
+        except Exception:
+            pass
+    return rc
 
 
 def cmd_p7(args) -> int:
@@ -592,6 +640,17 @@ def cmd_p7(args) -> int:
                 "answer_form": [{"field": "note", "type": "text",
                                  "required": False}]}],
             blocking=False)
+        # vcs：P7 阶段末 commit + 可移植导出（bundle → <ws>/exports/）
+        try:
+            from porter.common import vcs as _vcs
+            _vcs.commit_workspace(ws, "P7: done", phase="P7")
+            _m = _vcs.export_all(ws)
+            if _m:
+                _log.console_line(f"[porter] vcs: 可移植导出 → {_m['dir']}"
+                      f"（{_m['branch'] or '默认分支'}，"
+                      f"{len(_m['files'])} 个 bundle + manifest.json）")
+        except Exception as _e:
+            _log.console_line(f"[porter] vcs: ⚠️ 导出失败（不阻塞）：{_e}")
     return rc
 
 
@@ -765,6 +824,11 @@ def cmd_p1(args) -> int:
             return rc
     rpt = _write_p1_final_report(ws)
     _log.console_line(f"[porter] P1: 全流程完成，报告 → {rpt}")
+    try:                                # vcs：P1 阶段末 commit（best-effort）
+        from porter.common import vcs as _vcs
+        _vcs.commit_workspace(ws, "P1: done", phase="P1")
+    except Exception:
+        pass
     return 0
 
 
@@ -848,7 +912,7 @@ def cmd_gate(args) -> int:
 
 
 def cmd_log(args) -> int:
-    """log CLI（观测查询面：tail/show/timeline/runs——docs/log.md §查询）。
+    """log CLI（观测查询面：tail/show/timeline/runs——docs/sub-systems/log.md §查询）。
 
     全部为 events.jsonl 的派生读；debug / resume 定位 / agent 运行考古
     的统一入口。
@@ -936,6 +1000,38 @@ def cmd_log(args) -> int:
     return 2
 
 
+def cmd_vcs(args) -> int:
+    """vcs CLI：可移植导出（bundle 集）/ 导入（commit 链接回 git 仓）。"""
+    from porter.common import vcs as _vcs
+    if args.vcs_cmd == "export":
+        if not args.output_dir:
+            _log.console_line("[porter] vcs: export 需 --output-dir 指向迁移工作区")
+            return 2
+        ws = Path(args.output_dir).resolve()
+        if not (ws / "project.json").exists():
+            _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+            return 2
+        m = _vcs.export_all(ws, out_dir=Path(args.out) if args.out else None)
+        if not m:
+            _log.console_line("[porter] vcs: 无可导出（vcs 未启用或未登记仓）")
+            return 1
+        for f in m["files"]:
+            print(f"  - {f['bundle']}（{f['kind']}，baseline "
+                  f"{str(f['baseline'])[:12] or '全量'}）")
+        _log.console_line(f"[porter] vcs: 导出完成 → {m['dir']}/manifest.json"
+              f"（分支 {m['branch'] or '—'}）")
+        return 0
+    # import
+    if not args.bundle or not args.repo:
+        _log.console_line("[porter] vcs: import 需 --bundle FILE --repo PATH"
+              "（可选 --branch NAME）")
+        return 2
+    ok, detail = _vcs.import_bundle(Path(args.bundle), Path(args.repo),
+                                    branch=args.branch)
+    _log.console_line(f"[porter] vcs: {'✔' if ok else '✖'} {detail}")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="porter",
@@ -967,8 +1063,12 @@ def main(argv=None) -> int:
     p0.add_argument("--kb-empty", action="store_true",
                     help="--kb new 时创建空目录（缺省复制 base 内容）")
     p0.add_argument("--kb-git", choices=["track", "ignore"], default="track",
-                    help="新建知识库目录的 git 策略（track=跟踪；"
-                         "ignore=追加 .gitignore；缺省 track）")
+                    help="（已退役，兼容保留）旧全局布局的 git 策略；"
+                         "知识库现随工作区 git 统一入库")
+    p0.add_argument("--os-branch", default=None, metavar="BRANCH",
+                    help="目标 OS 仓的 porter 分支名（必须是全新分支；"
+                         "缺省自动生成 porter/<驱动>-<日期>-<随机>；"
+                         "工作区仓同分支名）")
     p0.set_defaults(func=cmd_p0)
 
     p1all = sub.add_parser("p1", help="P1 全流程：strategy → divide → resolve（直通，末尾汇总报告）")
@@ -1126,6 +1226,21 @@ def main(argv=None) -> int:
     logcmd.add_argument("-n", type=int, default=50,
                         help="条数（tail/timeline 缺省 50；show 的日志尾行数）")
     logcmd.set_defaults(func=cmd_log)
+
+    vcsgrp = sub.add_parser("vcs", help="git 管理（export=可移植导出 bundle / import=导入 commit 链）")
+    vcsgrp.add_argument("--output-dir", default=None,
+                        help="迁移工作区（export 必填）")
+    vcsgrp.add_argument("vcs_cmd", choices=["export", "import"],
+                        help="export=导出可移植 bundle 集 / import=把 bundle 接回 git 仓")
+    vcsgrp.add_argument("--out", default=None, metavar="DIR",
+                        help="（export）导出目录（缺省 <ws>/exports/）")
+    vcsgrp.add_argument("--bundle", default=None, metavar="FILE",
+                        help="（import）bundle 文件路径")
+    vcsgrp.add_argument("--repo", default=None, metavar="PATH",
+                        help="（import）目标 git 仓路径")
+    vcsgrp.add_argument("--branch", default=None, metavar="NAME",
+                        help="（import）导入后创建/切换的分支名")
+    vcsgrp.set_defaults(func=cmd_vcs)
 
     p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")
     p7cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")

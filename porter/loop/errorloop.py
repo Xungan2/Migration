@@ -183,7 +183,7 @@ def _kb_hint(ws: Path) -> str:
             if kb_dir is not None:
                 dirs.append(str(_kb.domain_kb(dom, kb_dir).resolve()))
             dirs.append(str(_kb.domain_base(dom).resolve()))
-            dirs.append(str(_kb.domain_temp(dom).resolve()))
+            dirs.append(str(_kb.domain_temp(dom, ws=ws).resolve()))
         return "目录：" + "；".join(dirs)
     except Exception:
         return "目录：（不可用）"
@@ -577,6 +577,14 @@ def run_solve_loop(ws: Path, failure: dict, verify,
             verdict.get("signature_candidates") or []
 
         applied, terminal = _apply_action(ws, failure, verdict)
+        if verdict.get("action") == "fix-code":
+            try:                        # vcs：修码动作落 commit（每次修改）
+                from ..common import vcs as _vcs
+                _vcs.commit_target(
+                    ws, f"solve[{failure.get('source')}]: fix-code "
+                        f"{failure.get('subject')}", phase="solve")
+            except Exception:
+                pass
         round_rec.update({"action": verdict.get("action"),
                           "circuit": verdict.get("circuit"),
                           "applied": applied,

@@ -8,9 +8,10 @@
 压缩到特定环节的标准接口（决策队列 / 文档审核 / 知识审核）。
 
 > 首个实验（e1000→Asterinas，18 轮全流程）已完成并验证了方法论可行性。
-> 完整工具开发报告见 [`tool-audit-report.md`](./tool-audit-report.md)（仓外
-> 上层 `/home/xungan/project/tool-audit-report.md`），子系统规范见
-> [`docs/`](./docs/)。
+> [`tool-audit-report.md`](./tool-audit-report.md) 是完整工具开发报告——
+> 记录了这个工具的**所有开发细节**（历史里程碑/架构/文件级实现地图/
+> 已知限制/未做项），0 上下文接手时先读它。子系统/模块规范见
+> [`docs/`](./docs/)（sub-systems/ + modules/ 两层）。
 
 ---
 
@@ -140,15 +141,16 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 （相位推进/agent 调用/命令执行/判定结论/人工介入）都进同一份 append-only
 事件流（`events.jsonl`）。纯静态实现（零 agent），永不抛异常。
 
-**规范**：[`docs/log.md`](./docs/log.md)（五类文件格式/kind 注册表/命名/体积纪律/兼容策略）。
+**规范**：[`docs/sub-systems/log.md`](./docs/sub-systems/log.md)（五类文件格式/kind 注册表/命名/体积纪律/兼容策略）。
 
 ### 知识子系统（kb）
 
 **目标**：把"每次迁移从零摸索"变成"站在上次迁移的肩膀上"——经验自动收集
-成草稿、人工把关晋升、下次 agent 自己查着用。三区（base/temp/per-migration）
+成草稿、人工把关晋升、下次 agent 自己查着用。分区（base=工具随附、
+temp+per-migration=工作区内，见「知识库选择」节）
 × 六域（maps/gaps/runbook/splits/pitfalls/failures）。
 
-**规范**：[`docs/knowledge.md`](./docs/knowledge.md)（目录模型/域注册表/薄 INDEX/
+**规范**：[`docs/sub-systems/knowledge.md`](./docs/sub-systems/knowledge.md)（目录模型/域注册表/薄 INDEX/
 固定收成/随机知识探查/检索协议/晋升协议/CP5 审核）。
 
 ### 人工介入子系统（gates）
@@ -157,7 +159,7 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 拿不准的先记下来攒着事后批量找你确认；实在推进不下去才停下。两车道
 （panic 异常停车 / checkpoint 计划内批审）+ 三级分流（rules→agent→human）。
 
-**规范**：[`docs/human-intervention.md`](./docs/human-intervention.md)（账本协议/
+**规范**：[`docs/sub-systems/human-intervention.md`](./docs/sub-systems/human-intervention.md)（账本协议/
 答案协议/应用协议/检查点协议/panic 协议/路由协议/关口 ID 目录）。
 
 ---
@@ -170,8 +172,20 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 或给出正确处置。知识辅助的 agent 求解循环（≤3 轮 + 同签名早退 + 双信号复验），
 三挂载（p5/p6/d1）+ unsolved 关口（attempts 在挂载点退役）。
 
-**规范**：[`docs/error-handling.md`](./docs/error-handling.md)（核心流程/动作词表/
+**规范**：[`docs/modules/error-handling.md`](./docs/modules/error-handling.md)（核心流程/动作词表/
 挂载点/failures 知识面/观测面事件族/实现地图）。
+
+### git 管理模块（vcs）
+
+**目标**：全程 commit 管理两个 repo（目标 OS 树 + 迁移工作区），记录
+"每个 step 干了什么"，支撑迁移结果分析与优化；git bundle 跨机器可移植。
+P0 登记目标树并行仓 baseline + 建 porter 分支（工作区仓同分支名）；
+agent 调用前后隔离 commit（pre-agent/agent 成对，`diff` 即该次调用的
+ws 产物）；P7 输出 commit 链并自动导出。两仓 commit 流互相独立
+（目标 OS 只按既定点提交）；全程 best-effort，git 失败只告警不阻塞。
+
+**规范**：[`docs/modules/vcs.md`](./docs/modules/vcs.md)（两仓模型与 commit 点地图/分支管理/
+commit 语义/台账与 P7 链/bundle 可移植/配置/实现地图）。
 
 ---
 
@@ -244,17 +258,47 @@ python3 porter/main.py log --output-dir <ws> timeline [--module M]
 
 ### 知识库选择（P0 必填）
 
+知识库物化在 `<ws>/knowledge/`（temp 草稿区在 `<ws>/knowledge/temp/`），
+随工作区 git 统一入库；promote 后自动同步回全局库 `knowledge/<名>/`
+（跨迁移复用素材）：
+
 ```bash
-# 新建（缺省复制 base 工具随附知识）
+# 新建（缺省复制 base 工具随附知识 → <ws>/knowledge/）
 python3 porter/main.py p0 … --kb new my-port
 python3 porter/main.py p0 … --kb new my-port --kb-empty          # 建空目录
-python3 porter/main.py p0 … --kb new my-port --kb-git ignore     # 加进 .gitignore
 
-# 复用既有
+# 从全局库种子化（复用上次迁移的沉淀）
 python3 porter/main.py p0 … --kb use asterinas
 ```
 
-缺省 `--kb` → rc 2 + 打印选择指引（列既有目录）。
+缺省 `--kb` → rc 2 + 打印选择指引（列既有全局库）。
+（`--kb-git` 已退役：知识库不再放工具仓，兼容保留该参数但无效果。）
+
+### git 管理（vcs）
+
+规范：[`docs/modules/vcs.md`](./docs/modules/vcs.md)。两个 repo 全程 commit 管理（best-effort，失败只告警不阻塞）：
+
+- **目标 OS repo**：P0 扫描并行 git 仓（嵌套只管最外层）记 baseline +
+  建 porter 分支（`--os-branch` 指定须全新，缺省自动生成；工作区仓同
+  分支名）。P2 骨架 / P4 每模块 / P6 execute / 求解修码后 commit。
+- **工作区 repo**：P0 时 `git init`（写 `.gitignore` 排除台账与导出物）。
+  阶段末 / loop 每模块 done / **每次 agent 调用前后**（pre-agent 与
+  agent commit 成对，`git diff <pre>..<post>` = 该次调用的 ws 产物）/
+  exit 3 停车 / answers 消费后 commit（知识库随工作区入库）。
+  两仓 commit 流互相独立：目标 OS 只在既定点提交。
+
+```bash
+python3 porter/main.py p0 … --os-branch porter/e1000-round2   # 可选
+python3 porter/main.py vcs export --output-dir <ws>   # 导出 bundle 集 → <ws>/exports/
+python3 porter/main.py vcs import --bundle <f.bundle> --repo <git仓路径> \
+    [--branch porter/e1000-...]                        # 新机器接回 commit 链
+```
+
+- P7 末自动导出；`final_report` 含 commit 链（哪次 commit 改了什么，
+  台账 `<ws>/vcs_commits.json`）。
+- 导入端要求同一起点 commit（目标 OS 的 baseline 一致），hash 完全保留。
+- 配置：`porter/config.json` 的 `vcs` 节（`enabled` 总开关；
+  `identity` git 身份兜底）。`PORTER_VCS=0` 强制全关。
 
 ### 人工介入操作
 
@@ -282,7 +326,7 @@ rationale: e1000 单队列，MVP 无消费方
 ### 测试
 
 ```bash
-python3 -m unittest discover -s tests    # 131 例，~0.15s
+python3 -m unittest discover -s tests    # 152 例，~0.15s
 ```
 
 ---
@@ -364,21 +408,25 @@ driver_migration_tool/
 ├── porter/              # 编排器（Python 标准库，零第三方依赖）
 │   ├── main.py          #   总入口：python3 porter/main.py <phase> <args>
 │   ├── config.json      #   仓级运行时配置
-│   ├── common/          #   跨阶段共用（agent 调用抽象 / C 符号扫描）
+│   ├── common/          #   跨阶段共用（agent 调用抽象 / C 符号扫描 / vcs git 管理）
 │   ├── env/             #   P0 专属（输入解析/类别/环境提取/探测/门禁）
 │   ├── divide/          #   P1 专属（拆分策略→模块划分→依赖解环）
 │   ├── bootstrap/       #   P2 专属（引导映射+骨架+探针）+ 知识子系统
 │   ├── loop/            #   P3-P7 + gates + errorloop
 │   └── log/             #   log 子系统（统一观测框架，纯静态零 agent）
 ├── skills/              # SKILL：agent 行为指令（17 个，每轮注入，指令性精瘦）
-├── docs/                # 子系统规范（log/knowledge/human-intervention/error-handling）
-├── knowledge/           # 知识库（base 工具随附 + temp 草稿区 + <name>/ per-migration）
+├── docs/                # 规范文档（sub-systems/=子系统，modules/=模块）
+│   ├── sub-systems/     #   log / knowledge / human-intervention
+│   └── modules/         #   error-handling / vcs
+├── knowledge/           # 全局知识库（base 工具随附 + <name>/ 跨迁移复用素材）
+│                        # 本次迁移的 kb 与 temp 草稿在 <ws>/knowledge/ 下
 ├── examples/            # 资料束样例（Asterinas；模拟开发者提供的自由资料）
 ├── refs/                # 参考数据（QEMU/libslirp 源码副本等）
 ├── tests/               # 测试（131 例，协议的行为级定义）
 ├── migrations/          # 迁移项目工作区（运行时生成，.gitignore）
+├── tool-audit-report.md # 完整工具开发报告（所有开发细节：历史/架构/文件地图/未做项）
 └── TODO.md              # 全局待办（已商定但不做在本轮）
 ```
 
 完整工具开发报告（历史/架构/文件级实现地图/未做项）见
-[`/home/xungan/project/tool-audit-report.md`](../tool-audit-report.md)。
+[`tool-audit-report.md`](./tool-audit-report.md)。

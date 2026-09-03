@@ -81,7 +81,7 @@ def _ledger_path(ws: Path) -> Path | None:
     except (OSError, json.JSONDecodeError):
         return None
     ns = f"{Path(proj['linux_driver']).name}@{Path(proj['target_os']).name}"
-    return kb.TEMP_DIR / "candidates" / f"{ns}.json"
+    return kb.temp_root(ws=ws) / "candidates" / f"{ns}.json"
 
 
 def _load_doc(p: Path) -> dict:

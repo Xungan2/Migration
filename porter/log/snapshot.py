@@ -5,7 +5,7 @@
 内核哈希 best-effort/QEMU 命令行/criteria+mapping 状态 +
 manifest.json）。快照不可变——升级报告的 evidence_files 只指向它。
 
-体积纪律（docs/log.md）：内核镜像只存哈希不复制；mapping.json 超
+体积纪律（docs/sub-systems/log.md）：内核镜像只存哈希不复制；mapping.json 超
 _MAPPING_COPY_LIMIT 只记 sha256——大文件不整体进快照。
 """
 
@@ -20,7 +20,7 @@ from pathlib import Path
 from . import store
 
 _MAPPING_COPY_LIMIT = 2 * 1024 * 1024   # mapping.json 超此尺寸只记 sha256
-# 快照单文件钳制（体积纪律，docs/log.md）：超阈值改"头+尾"裁剪复制，
+# 快照单文件钳制（体积纪律，docs/sub-systems/log.md）：超阈值改"头+尾"裁剪复制，
 # manifest 如实记 clipped——有界且不静默。
 _CLIP_THRESHOLD = 5 * 1024 * 1024
 _CLIP_HEAD = 1 * 1024 * 1024

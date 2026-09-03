@@ -56,6 +56,7 @@ macro_rules! __log_prefix {{
 }}
 
 mod probes;
+mod external_interfaces;
 
 use alloc::sync::Arc;
 
@@ -160,6 +161,19 @@ pub(crate) fn run_all() {{
     // P3(M): call each probe here, e.g.
     // intx_reachability();
 }}
+'''
+
+_EXTERNAL_INTERFACES_RS = '''// SPDX-License-Identifier: MPL-2.0
+
+//! The platform fill dormitory (平台补齐宿舍).
+//!
+//! P4 fill strategy: when the target OS lacks an equivalent of a Linux
+//! API, the added platform code goes HERE (one submodule per topic,
+//! split with inner mods as it grows) — never scattered across the OS
+//! tree. Wiring files (dependency registration in the root Cargo.toml /
+//! Components.toml / kernel/core/Cargo.toml) are the only exception.
+//! The crate stays `#![deny(unsafe_code)]`: fills must build on the
+//! existing safe abstractions of the target OS.
 '''
 
 _CARGO_TOML = '''[package]
@@ -348,8 +362,10 @@ def run_skeleton(ws: Path, target_os: Path,
                             vendor=f"0x{vendor:x}", nid=len(ids),
                             dev_ids=dev_ids)
     for path, content in ((crate / "Cargo.toml", _CARGO_TOML.format(driver=driver)),
-                          (crate / "src" / "lib.rs", lib_rs),
-                          (crate / "src" / "probes.rs", _PROBES_RS)):
+                           (crate / "src" / "lib.rs", lib_rs),
+                           (crate / "src" / "probes.rs", _PROBES_RS),
+                           (crate / "src" / "external_interfaces.rs",
+                            _EXTERNAL_INTERFACES_RS)):
         if not path.exists():
             path.write_text(content, encoding="utf-8")
             created.append(str(path.relative_to(target_os)))

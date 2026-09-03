@@ -102,10 +102,15 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                           f"历史 fill 失败原因必须正面回应而非重蹈")
         except Exception:
             pass
+        crate = target_os / "kernel" / "core" / "comps" / driver
         prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
                   f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
-                  f"- 驱动 crate：`{target_os / 'kernel' / 'core' / 'comps' / driver}`"
-                  f"（平台补齐不得写进驱动 crate）\n"
+                  f"- 驱动 crate：`{crate}`\n"
+                  f"- 平台补齐落点：`{crate}/src/external_interfaces.rs`"
+                  "（骨架已预置 mod；补写的平台代码一律写进该 mod——"
+                  "按主题拆子模块函数，禁止散写目标树其他位置；"
+                  "仅当确需加依赖/接线时才允许改接线文件：根 Cargo.toml、"
+                  "Components.toml、kernel/core/Cargo.toml）\n"
                   f"- 使用方模块：{module}\n\n## gap 条目\n{lines}\n"
                   f"\n## 任务\n加法式补齐该能力，输出紧凑 JSON 块"
                   f"（patch_summary/files/evidence/reason/probe）。")
@@ -404,7 +409,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                             "applies_to": {"modules": [module]},
                         })
                         break
-                # 上下文接续（docs/log.md §6）：构建日志尾 40 行经
+                # 上下文接续（docs/sub-systems/log.md §6）：构建日志尾 40 行经
                 # log.query.tail_block 注入下一轮 prompt；文件缺失/为空
                 # 时保留旧空围栏形态（不无声变化）
                 from ..log import query as _lq
@@ -511,6 +516,15 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
     try:
         from ..log import core as _log
         _log.phase_end("p4", module=module, rc=0, store_only=True)
+    except Exception:
+        pass
+    try:                                # vcs：P4(M) 末目标树 commit（fill+migrate）
+        from ..common import vcs as _vcs
+        driver = Path(proj["linux_driver"]).name
+        _vcs.commit_target(
+            ws, f"P4[{module}]: fill + migrate",
+            paths=[f"kernel/core/comps/{driver}", *_vcs.TARGET_WIRING_FILES],
+            phase="P4")
     except Exception:
         pass
     return 0

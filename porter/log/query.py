@@ -128,7 +128,7 @@ def tail_text(text: str, lines: int) -> str:
 def tail_block(ws: Path, log_path, lines: int = 40,
                title: str = "上一次输出尾部",
                note: str = "") -> str:
-    """日志文件尾部块（prompt 注入用；docs/log.md §6 上下文接续族）。
+    """日志文件尾部块（prompt 注入用；docs/sub-systems/log.md §6 上下文接续族）。
 
     log_path 相对 ws 解析；文件缺失/为空返回 ""。产出形如：
     "\\n\\n---\\n\\n## {title}\\n{note}```\\n{tail}\\n```"

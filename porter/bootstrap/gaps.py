@@ -91,7 +91,7 @@ def draft_gaps(ws: Path) -> int:
     decisions = _collect_decisions(ws)
     fills = _fill_outcomes(ws)
 
-    gdir = kb.domain_temp("gaps")
+    gdir = kb.domain_temp("gaps", ws=ws)
     ns_dir = gdir / ns
     if decisions:
         ns_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +150,7 @@ def prior_entry(kb_dir: Path | None, api: str) -> Path | None:
     roots: list[Path] = []
     if kb_dir is not None:
         roots.append(kb.domain_kb("gaps", kb_dir))
-    roots.append(kb.domain_temp("gaps"))
+    roots.append(kb.domain_temp("gaps", kb_dir=kb_dir))
     for d in roots:
         if not d.is_dir():
             continue

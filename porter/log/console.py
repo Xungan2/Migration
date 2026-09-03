@@ -1,6 +1,6 @@
 """console.py — console sink（log 子系统的人读面）。
 
-行格式标准（docs/log.md §格式类 5）：`[porter] <scope>: <text>`——
+行格式标准（docs/sub-systems/log.md §格式类 5）：`[porter] <scope>: <text>`——
 scope ∈ {P0..P7, T3, loop, gates, kb, …}，与存量 301 处 print 的既有
 约定一致，本模块将其定型。级别标记（⚠️/✖ 等）写在 text 内（存量
 约定），level 只做可见性过滤（PORTER_LOG_LEVEL，缺省 info）。

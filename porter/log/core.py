@@ -8,7 +8,7 @@
   仅落 store。
 - 上下文戳优先级：显式参数 > ctx() 戳 > bind() 兜底（mount 兼容面）。
 - 派生事件助手：phase_begin/phase_end（时间线）、judge（双信号判定
-  证据流）。kind 命名：存量族冻结，新增族 snake_case（docs/log.md）。
+  证据流）。kind 命名：存量族冻结，新增族 snake_case（docs/sub-systems/log.md）。
 """
 
 from __future__ import annotations
@@ -87,7 +87,7 @@ def console_only(scope: str, text: str, level: str = "info") -> bool:
 def console_line(line: str, level: str = "info") -> bool:
     """整行直打（存量 [porter] 格式行的机械收编通路；级别门控）。
 
-    print 扫尾（docs/log.md §8）的统一映射：print(f"[porter] …") →
+    print 扫尾（docs/sub-systems/log.md §8）的统一映射：print(f"[porter] …") →
     _log.console_line(f"[porter] …")——输出 byte 兼容，获得
     PORTER_LOG_LEVEL 门控与单一咽喉点。
     """

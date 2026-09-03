@@ -1,4 +1,4 @@
-"""events.py — 观测地基门面（实现已迁 porter/log/，docs/log.md 为规范）。
+"""events.py — 观测地基门面（实现已迁 porter/log/，docs/sub-systems/log.md 为规范）。
 
 本模块保留为兼容 re-export：既有 14 个调用点与行为级测试
 （test_events/test_diagnose/test_replay/test_mounts/test_s15_bypass）

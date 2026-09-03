@@ -20,7 +20,7 @@ tail_block 上下文接续 API 并接入 P4/ut_verify；`porter log` CLI；
 快照 >5MB 裁剪钳制；loop/events.py 转 re-export 门面零破坏）。
 **print 全量收编完成**：试点走 record()，其余 284 处（30 文件）经
 机械 codemod 统一 `_log.console_line`（byte 兼容 + 级别门控）。
-规范 = `docs/log.md`。
+规范 = `docs/sub-systems/log.md`。
 
 **残余项（后续轮）**：真实 e2e 验证——留待下次真实迁移轮次顺带完成
 （2026-09-03 用户定案）：跑完后用 `porter log tail/timeline/runs` 核验
@@ -30,7 +30,7 @@ end**）的现场累积形态与体积预期。§15 重设计的读路径已接 
 
 ## 3. §15 失败自诊重设计——已完成（2026-09-03）
 
-重设计为**错误处理模块**（docs/error-handling.md 为规范）：知识辅助的
+重设计为**错误处理模块**（docs/modules/error-handling.md 为规范）：知识辅助的
 agent 求解循环（≤3 轮 + 同签名早退 + 双信号复验），三挂载（p5/p6/d1）
 + unsolved 关口（attempts 在挂载点退役）；签名知识入 kb failures 域
 （base+lineage 两级，去硬编码）；报告生成接线到耗尽处；criteria 修正
@@ -61,7 +61,7 @@ extra_env 注入 + ANSI 变体，p6 改调共享版。
 pitfalls 与工作区 platform_patches 两处漂移。~~§15 失败签名
 （knowledge/failures.md）是事实上的第六类（域外待归位）~~
 ——已解决（2026-09-03）：failures 域归位（base+lineage 两级，
-docs/knowledge.md §3.2）。
+docs/sub-systems/knowledge.md §3.2）。
 
 要做（后续轮）：
 - 复盘一次真实迁移产生的全部候选，检验五类的实际覆盖度；
@@ -115,3 +115,26 @@ promote；目标 base/<域>/）。
 要做：细研批审交互——approve/reject 是否上关口表单（复用
 answers.md）、健康报告的阈值化（多少零咨询该提示下架）、
 classify 的 agent 提示词随分类错误的校准（改判日志已有数据）。
+
+## 10. vcs 遗留项（2026-09 git 管理模块）
+
+已完成：porter/common/vcs.py（两 repo commit 管理 + 分支/baseline
+登记于 project.json["vcs"] + git bundle 跨机器导出导入 + P7 commit 链）；
+知识库挪入 <ws>/knowledge/（随工作区 git 入库，promote 后
+sync_to_global 回流全局库）；fill 平台补齐落点约束到
+crate/src/external_interfaces.rs（骨架预置 mod）；agent 调用前后
+隔离 commit（agent_pre/agent_post 成对，仅工作区仓——两仓 commit 流
+独立，目标 OS 只按既定点提交，不为 agent 调用加点）；工作区仓
+.gitignore（台账/exports 排除，与 pathspec 双保险）；接线层测试
+tests/test_vcs_wiring.py（seam/隔离性/panic/answers/loop/P2/P4）。
+
+遗留：
+- 真实迁移轮 e2e 校准（首个跑完 P0→P7 的迁移验证 commit 粒度/
+  分支切回/bundle 往返的实战表现）。
+- resume 时目标仓被人切走分支且树脏 → 该仓 commit 跳过只告警；
+  是否需要更强的保护（如自动 stash）待定。
+-（已闭）2026-09-04 事故：commit_target 旧兜底 Path("") 落 CWD，
+  测试把工具仓误提交 8 条 solve[d1]——已 reset 撤销并加护栏
+  （绝对路径校验/拒工具仓/_git 拒空路径；回归 test_vcs E8-E11）。
+- vcs commit 消息的 i18n/前缀规范化（当前自由文本 + Porter-Phase
+  trailer）。
