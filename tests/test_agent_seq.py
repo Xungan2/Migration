@@ -514,46 +514,49 @@ class TestTimeoutSalvage(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
-class TestArgvSeparator(unittest.TestCase):
-    """L13（2026-09-05 rerun2 校准实录）：- 开头消息必须走 `--` 分隔。
+class TestStdinChannel(unittest.TestCase):
+    """L13（2026-09-05）：消息经 stdin 传递，argv 不含消息元素。
 
-    回炉/质量续接消息惯用 `---` 分隔线开头，yargs 会把它当选项解析
-    → opencode 参数校验失败 rc=1/0s（会话化 P2b r2 续接全灭于此）。
+    历史：argv 路径两坑——① - 开头消息（反馈块惯用 --- 分隔线）被
+    yargs 当选项 → rc=1/0s（rerun2 校准 r2 全灭，先以 `--` 分隔符
+    修复）；② 含空格消息被包字面引号（run.ts resolveRunInput）。
+    stdin 通道根治两者；live 验证 1.18.28：事件流 / --session 续接 /
+    verbatim 三检全过（stdin 属未文档化行为，opencode 升级需复验）。
     """
 
-    def _capture_args(self, exc=None):
+    def _capture(self):
         captured = {}
 
         def _fake_run(args, **kw):
             captured["args"] = list(args)
-            if exc is not None:
-                raise exc
+            captured["kw"] = kw
             return mock.Mock(returncode=0, stdout="", stderr="")
 
         return captured, mock.patch.object(agent.subprocess, "run",
                                            side_effect=_fake_run)
 
-    def test_json_runner_dash_message_gets_separator(self):
+    def test_json_runner_message_via_stdin(self):
         ws = Path(tempfile.mkdtemp(dir=TMP))
-        captured, patcher = self._capture_args()
+        captured, patcher = self._capture()
+        msg = "---\n## 上一轮验证 FAIL"
         with patcher:
             agent._opencode_json_runner(
-                "---\n## 上一轮验证 FAIL", ws, str(ws / "SEP"),
-                timeout_sec=5, session_id="ses_X")
+                msg, ws, str(ws / "SEP"), timeout_sec=5, session_id="ses_X")
         args = captured["args"]
-        self.assertEqual(args[-1], "---\n## 上一轮验证 FAIL")
-        self.assertEqual(args[args.index("--") + 1], args[-1])
-        self.assertIn("--session", args)       # 分隔符不破坏 --session
+        self.assertNotIn(msg, args)                    # 消息不进 argv
+        self.assertNotIn("--", args)                   # 分隔符一并退役
+        self.assertEqual(captured["kw"].get("input"), msg)  # 走 stdin
+        self.assertIn("--session", args)               # 续接参数不受影响
 
-    def test_run_agent_dash_message_gets_separator(self):
+    def test_run_agent_message_via_stdin(self):
         ws = Path(tempfile.mkdtemp(dir=TMP))
-        captured, patcher = self._capture_args()
+        captured, patcher = self._capture()
+        msg = "---\n反馈"
         with patcher:
-            agent.run_agent("---\n反馈", workdir=ws,
+            agent.run_agent(msg, workdir=ws,
                             log_stem=str(ws / "SEP2"), timeout_sec=5)
-        args = captured["args"]
-        self.assertEqual(args[-1], "---\n反馈")
-        self.assertEqual(args[args.index("--") + 1], args[-1])
+        self.assertNotIn(msg, captured["args"])
+        self.assertEqual(captured["kw"].get("input"), msg)
 
 
 class TestRunAgentStructured(unittest.TestCase):

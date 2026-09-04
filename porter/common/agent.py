@@ -94,9 +94,10 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         "opencode", "run", "--auto",
         "--model", model,
         "--dir", str(workdir),
-        "--", prompt,          # -- 终止选项解析：消息以 - 开头（如反馈块
-    ]                           # 惯用的 --- 分隔线）时不被当成选项（rerun2
-                                # 校准实录：r2 续接消息因此 rc=1/0s 失败）
+    ]   # 消息经 stdin 传入（无位置参数）：无 argv 单参数 128KiB 上限、
+        # 无 - 开头被当选项的问题，且逐字 verbatim——argv 路径会给含
+        # 空格的消息包字面引号（run.ts resolveRunInput 实证；2026-09-05
+        # live 验证 1.18.28：事件流/--session 续接/verbatim 三检全过）
     t0 = time.time()
     env = {**os.environ, "NO_COLOR": "1"}
     env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
@@ -104,7 +105,7 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
     try:
         proc = subprocess.run(
             args, cwd=str(workdir), capture_output=True, text=True,
-            timeout=timeout_sec, env=env,
+            timeout=timeout_sec, env=env, input=prompt,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         rc = proc.returncode
@@ -197,7 +198,7 @@ def extract_json(out: str) -> dict | None:
 #     → 结果发回 → 同一会话继续 → … → done
 #
 # 段间接续（无信息损失，目标 = "像同一次非交互 agent 跑的一样"）：
-#   主路径  opencode run --session <id>（原生会话续接；1.18.27 实测：
+#   主路径  opencode run --session <id>（原生会话续接；1.18.27/28 实测：
 #           非交互下可用，跨段记忆携带经暗号回溯验证）
 #   兜底    解析不到 session id 时，退化为"模仿交互式对话轮次"的
 #           prompt 注入（任务原文 + 用户/助手交替轮次 + 新消息）
@@ -223,7 +224,7 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 def _parse_events(out: str) -> dict | None:
     """从 opencode --format json 的 JSONL 事件流提取 {session_id, text}。
 
-    实测格式（1.18.27）：每行一个 JSON 对象，顶层 sessionID；
+    实测格式（1.18.28）：每行一个 JSON 对象，顶层 sessionID；
     type=="text" 事件的 part.text 为助手文本（可多条，按序拼接）。
     防御式兼容：字段名变体（sessionID/session_id）、非 { 开头的
     噪音行（stderr 合并）一律跳过。无可解析事件返回 None。
@@ -297,7 +298,8 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
             "--model", model, "--dir", str(workdir)]
     if session_id:
         args += ["--session", session_id]
-    args += ["--", message]    # 同 run_agent：防 - 开头消息被当选项
+    # 消息经 stdin 传入（同 run_agent：verbatim / 无 128KiB 上限 /
+    # 无 - 开头选项歧义）
     t0 = time.time()
     env = {**os.environ, "NO_COLOR": "1"}
     env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
@@ -305,7 +307,7 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
     try:
         proc = subprocess.run(
             args, cwd=str(workdir), capture_output=True, text=True,
-            timeout=timeout_sec, env=env,
+            timeout=timeout_sec, env=env, input=message,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         rc = proc.returncode

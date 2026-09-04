@@ -146,6 +146,7 @@ max_tries=2) -> (rc, out, parsed)`：run_agent + done 协议 + schema
 | 组 | 函数 |
 |---|---|
 | 内部调用器 | `_opencode_json_runner`（--format json + --session；归档/事件/vcs 隔离同 run_agent 约定） |
+| 消息通道 | 两个 runner 的消息一律经 **stdin** 传 opencode（argv 无消息元素，2026-09-05 定案）：无 128KiB 单参数上限、无 `-` 开头被当选项的歧义（argv+`--` 为历史中间方案，已被取代）、消息逐字 verbatim——argv 路径会给含空格消息包字面引号（run.ts `resolveRunInput` 实证）。live 验证 1.18.28 三检全过（事件流 / --session 续接 / verbatim）。**stdin 属未文档化行为：opencode 升级后需复验** |
 | 事件解析 | `_parse_events`（JSONL → {session_id, text}；字段变体/噪音行防御式兼容） |
 | 协议解析 | `_parse_phase`（phase 新协议 + status 老契约 + 裸 JSON 兜底） |
 | 校验 | `_validate_schema`（必填+浅类型；bool≠int） |

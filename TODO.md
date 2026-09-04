@@ -230,3 +230,18 @@ sessionID 一致）；② 三信号全绿；③ 自发现观测（见 #13 两项
   （`--` 分隔符，commit 97f78ee，live 验证）。首跑因此中断重跑。
 - 轮时长：r1 发现 519s / r2 修订 282s / r3 修订 192s（session 续接
   的增量消息显著短于全量重发，符合设计预期）。
+
+## 15. opencode stdin 消息通道的版本敏感跟踪
+
+2026-09-05 定案：两个 runner（run_agent / _opencode_json_runner）的
+消息一律经 stdin 传 opencode（argv 无消息元素）。依据 =
+opencode run.ts `resolveRunInput` 的 `return piped` 分支（无位置参数
+→ stdin 全文 = 消息，verbatim）。**该行为未写入官方文档**，属版本
+敏感依赖——opencode 每次升级后应跑三检复验：① 纯 stdin 调用出正常
+JSONL 事件流；② stdin + `--session` 续接记忆在；③ 消息 verbatim
+（让 agent 复述首行，无引号包裹）。失败则回退 argv+`--` 方案
+（97f78ee 保留在 git 历史可考）。
+
+历史包袱备注：argv 路径除 `-` 开头被当选项（97f78ee 已修后仍存在的
+引号包裹问题）外，还会给含空格消息包字面 `"` 并转义内部引号——
+stdin 化后一并消除。
