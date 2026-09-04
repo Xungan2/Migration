@@ -109,9 +109,10 @@ porter/
 ├── bootstrap/           # P2 专属 + 知识子系统
 │   ├── mapping.py       #   P2a 引导映射（agent 分批+机器校验+增量合并）
 │   ├── extract_spine.py #   P2a 主轴 API 提取（纯脚本）
-│   ├── skeleton.py      #   P2b 全局骨架生成（目标 OS 专属模板：Asterinas 起步）
+│   ├── scaffold.py      #   P2b 框架引导（发现式：单 session 闭环，M12）
+│   ├── recipe_apply.py  #   P2b 施工引擎（OS/语言中立：幂等 apply/回滚）
 │   ├── pregen.py        #   P2c 探针预生成（风险主张前置验证）
-│   ├── run.py           #   P2 入口编排（2a→2b→2c→验收）
+│   ├── run.py           #   P2 入口编排（2a→2b→2c；验收已内化 P2b）
 │   ├── kb.py            #   知识库骨架：目录模型+域注册表+薄 INDEX+通用晋升
 │   ├── knowledge.py     #   maps 域收成/晋升
 │   ├── gaps.py          #   gaps 域收成/检索
@@ -182,7 +183,7 @@ open 阻塞关口）。全程幂等断点重入：产物存在即跳过，失败
 
 ---
 
-## 4. 开发历史（9 个里程碑）
+## 4. 开发历史（12 个里程碑）
 
 ### M1 P0 环境门禁（`7f7206c`）
 
@@ -405,6 +406,91 @@ token 只在文件里）。实战验证：e2e-test-retry 副本 + git worktree
 同一根因并修复，新老接口混跑自洽。
 规范见 docs/modules/agent.md。
 
+### M12 P2b 发现式框架引导 session 化 + 裸能力校准（2026-09-05）
+
+**做了什么**：P2b 从"硬编码 skeleton 生成器"重写为"发现式框架引导 + 单
+session 闭环"，四批提交层层递进：
+
+1. **发现式重构（`a651dfa`）**：agent 读目标树产出**施工单 recipe**
+   （骨架 files + 幂等接线 edits + 验收特征 + 探针底座契约 + api_claims
+   join 键）→ `recipe_apply.py` 通用引擎照单施工（marker 幂等判重 /
+   journal 精确回滚 / 路径逃逸与 driver_home 越界防护 / 目标文件缺失
+   防崩）→ 三信号验收内化（build / 带设备 boot+特征 count / 单测
+   smoke，复用 P0 runner 机器）→ FAIL 带证据回炉 ≤3 轮 → 人工关口
+   `p2.scaffold.fail`；成功收尾 scaffold_manifest（宿舍路径/契约，
+   P2c/probes 消费）+ mapping 批注 + kb 候选 + vcs commit。退役
+   skeleton.py、独立 _acceptance 步骤、P2a 类型 B wiring 输出。
+
+2. **session 化改造（`f97db2c`）**：全部轮次**单 opencode session
+   贯穿**——r1 发全量任务（skill+任务数据），r≥2 `--session` 续接
+   只发增量（一行结论摘要 + 指针）；**recipe 文件输出**：agent 把
+   完整施工单（裸 JSON 禁围栏）写到编排器下发路径
+   `P2/reports/out/scaffold_r<N>.json`，消息正文只回"已写入
+   <路径>"——stdout 提取彻底退役，结构性免疫 extract_json 嵌套围栏
+   截断（cal r1 实录 3930/12908 字符）；**质量失败不烧轮**：缺文件/
+   坏 JSON/校验缺陷走同会话微增量续接（≤AGENT_TRIES 次，"把文件
+   写完"式）；session 解析不到 = RuntimeError **静态 panic**（程序
+   错误类，非人工关口）；每轮首发 unlink 输出文件防脏读；三信号
+   完整结果落盘 `P2B_scaffold_verify_r<N>.log`，回炉消息只给指针
+   （agent 自读；指针优于载荷）。
+
+3. **禁令与去硬编码（`c396a26`）**：skill 铁律 +7——三信号验证归
+   编排器外部执行，agent 禁自跑任何编译/启动/单测（含等价局部命令
+   如单 crate 构建；复杂 OS 动辄 10-30 分钟且烧 1200s 预算），只做
+   只读探索；`DEFAULT_DEVICE_IDS`（e1000 0x8086:0x100e 泄漏进工具
+   默认值）退役——未提供 `--device-ids` 时任务数据给"认领键依总线
+   自行收敛（PCI V:D / USB VP / SPI compatible 字符串；纯软件驱动
+   可无设备注入）"引导行，工具不猜测；Asterinas 宿舍路径回落删除
+   （scaffold manifest 为唯一真值源，缺失=RuntimeError 前置错误）；
+   skill schema 示例中立化声明（"Rust 目标树一例，契约是字段语义，
+   路径/语言/构建机制以目标树先例为准"）。
+
+4. **消息通道 stdin 化（`97f78ee`→`1adcbbc`）**：两 runner 消息
+   一律经 `subprocess.run(input=)` 传 opencode（argv 零消息元素）。
+   起因=rerun2 校准实录：回炉消息以 `---` 分隔线开头被 yargs 当
+   选项 → rc=1/0s 两连灭 → 静态 panic 正确拦截（先以 `--` 分隔符
+   修复，后读 opencode run.ts `resolveRunInput` 源码发现 stdin
+   通道可根治三坑：前导 `-` 歧义、含空格消息被包字面引号+转义、
+   128KiB 单参数上限；live 三检实证 1.18.28：事件流 / --session
+   续接 / verbatim）。stdin 属未文档化行为 → TODO #15 版本绑定
+   （钉 1.18.28 + `OPENCODE_DISABLE_AUTOUPDATE=1` 注入方向 + 升级
+   三检复验流程）。配套鲁棒性：`TimeoutExpired` 捞 `e.stdout`
+   部分事件（被杀/超时会话凭残存 sessionID 仍可续接）+ rc≠0 也
+   解析事件流。
+
+**为什么**：P2b 的核心命题是"工具替 agent 铺好环境"还是"工具提供
+发现回路、agent 自己铺"。cal 校准（旧形态）的答案是前者——r1 撞
+stdout 提取截断、r2/r3 败于注入接缝（qemu_args.sh 不消费
+EXTRA_QEMU_ARGS、设备从未挂载）、最终靠**手工补树侧钩子**收尾。
+session 化重写后以**裸能力实验（rerun2）**验证后者成立：skill 删
+"设备注入扩展点"教学节（临时）+ 空 KB + 无拓扑提示 + fresh
+worktree@36ae7fe10，**rc=0 三轮收敛**：r1（519s）发现轮，缺陷=
+`#[init_component]` 默认 Bootstrap 阶段、日志早于 logger 组件就绪
+（行丢失）→ r2（282s）agent 读证据自诊，改
+`#[init_component(kthread)]` 并核验"Bootstrap 已枚举 PCI 设备、后
+注册驱动会重探未认领队列"语义；但 patterns 前缀风格撞 ANSI 转义
+边界**假 MISS 白烧一轮**（行已打出，`e1000: ` 与消息间隔着色码）
+→ r3（192s）双修：patterns 改消息子串 + **自主发现注入接缝**——
+追启动命令链 make run_kernel→OSDK.toml:12→tools/qemu_args.sh、
+grep 确认 EXTRA_QEMU_ARGS 无消费点、树侧挂 e1000（net02 后端，
+论证 find 锚点全文件唯一、不影响 microvm/tdx/riscv 分支）。单
+session 470 事件同 ID 贯穿，轮时长递减（增量消息生效）。三项自
+发现（日志阶段 / ANSI 边界 / 注入接缝）全部发生且 agent 自解——
+#13 两项扣下假设结案、#12（命令侧注入自包含）从"必要"降级为
+"优化"、#16 泛化出**日志源清理前置**架构原则（全工具洗涤矩阵
+盘点：`_verify` 特征 count 是唯一漏网点，回填方案在案 #13.1）。
+
+**当前形态**：`porter/bootstrap/scaffold.py`（编排+验证+证据落盘）
++ `recipe_apply.py`（OS/语言中立引擎）+ `skills/P2-scaffold.md`
+（发现方法 + 铁律 7 条 + 文件输出契约）；测试 test_scaffold.py
+（22：校验/引擎/回滚/session 编排闭环含静态 panic 与脏读防护）
++ test_agent_seq.py 新增 stdin 通道与超时捞取用例，全量 268 绿。
+校准产物 `/tmp/opencode/rerun2/`（run2.log 权威记录）+ cal/* 保留
+对照；知识沉淀 pitfalls 两条（component-link-gc、
+qemu-args-no-inject-hook）+ kb 候选 cand-0003。已知遗留：TODO
+#12（降级后）/ #13.1（ANSI 回填，被 #16 源边界方案覆盖二择一）/
+#15（opencode 版本绑定未实现）/ #16（清理前置原则待实施）。
+
 ---
 
 ## 5. 现状：每个文件做什么（文件级实现地图）
@@ -426,23 +512,31 @@ token 只在文件里）。实战验证：e2e-test-retry 副本 + git worktree
 ### 5.2 porter/common/ — 跨阶段共用
 
 #### agent.py
-**职责**：agent 调用模块——非交互 agent 调用的统一接口层（M11）。
+**职责**：agent 调用模块——非交互 agent 调用的统一接口层（M11；
+M12 通道 stdin 化）。
 **关键公共函数**：`load_skill(name)` 读 skill 正文；`run_agent(prompt,
 workdir, log_stem, model, timeout_sec, task)` 单发原样保留（opencode
 run --auto，输出落 `.log`、输入归档 `.prompt.md`，记 agent_start/end
-事件；首尾挂 vcs `agent_pre`/`agent_post` 隔离点）；`run_agent_seq(
+事件；首尾挂 vcs `agent_pre`/`agent_post` 隔离点）；`_opencode_json_
+runner(message, …, session_id)` 内部调用器（--format json + --session
+续接；**消息经 stdin**——M12 定案：无 128KiB argv 上限/无前导 `-`
+歧义/逐字 verbatim，stdin 属未文档化行为、版本绑定跟踪见 TODO #15；
+TimeoutExpired 捞 `e.stdout` 部分事件，被杀会话凭残存 sessionID 仍可
+续接）；`run_agent_seq(
 task_prompt, …, static, agent_budget_sec, gen_schema, final_static)`
 split_long_op 主入口——agent 段 × N + 外部静态段，session 续接
 （`--session`，兜底交互式 transcript）、总预算（静态段时长在外）、
 同签名早退防打转、结果指针化（完整输出落 `<stem>_S<n>_static.log`，
 消息只给 verdict+路径）；`run_agent_structured(prompt, …, gen_schema,
 max_tries)` 单发+校验+反馈重试；`extract_json(out)` moves JSON 提取
-（存量调用点仍用）。
+（存量调用点仍用；已知嵌套围栏截短 bug 见 TODO #13）。
 **关系**：所有 agent 调用的唯一入口；p4 `_step_migrate` 已接
-run_agent_seq；19 处调用点覆盖地图与接线前置缺口（done_key/infra
+run_agent_seq、P2b scaffold 直连 `_opencode_json_runner`（单 session
+贯穿回炉轮）；19 处调用点覆盖地图与接线前置缺口（done_key/infra
 中止通道）见 docs/modules/agent.md §4。
 **限制**：单任务单静态操作（多操作封闭菜单已设计搁置）；禁令为
-prompt 级无技术强制；跨进程断点续跑未做；注入
+prompt 级无技术强制；跨进程断点续跑未做（P2b 以静态 panic 替代）；
+注入
 `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=131072` 绕 opencode 32K
 静默钳制；模型默认 `zhipu-ai/glm-5.2`，`PORTER_MODEL` 可覆盖。
 
@@ -576,17 +670,38 @@ mapping.json→渲染 mapping.md→mapping_report.md→draft_knowledge）。
 →内核头文件倒排索引→每符号定域→spine_api.json（幂等：存在即跳过）。
 **关系**：mapping.py 前置；用 common.symbol.scan_file。
 
-#### skeleton.py
-**职责**：P2b 全局骨架生成（目标 OS 专属模板：Asterinas 起步）。
-**关键公共函数**：`run_skeleton(ws, target_os, device_ids)` 写 crate 四件
-（Cargo.toml+lib.rs+probes.rs+external_interfaces.rs 平台补齐宿舍——M10
-fill 落点约束的宿主）+ 补丁 5 接线点（根 Cargo.toml/Components.toml/
-kernel/core/Cargo.toml/driver/mod.rs/net/iface/init.rs）→ skeleton_manifest.json。
-**关系**：P2 第二步；骨架=零驱动功能的"入住仪式"。
-**限制**：模板 Asterinas 专属（详见第 7 节）；DEFAULT_DEVICE_IDS=`0x8086:0x100e`；
-marker 幂等（H11：init.rs 锚点缺失仅⚠+return 0，重跑被 manifest 短路——
-设计如此，修复需人工删文件）；members 只插一处不插 default-members（H16）；
-VENDOR_ID 只取 ids[0]（H17，多厂商设备 ID 静默错误）。
+#### scaffold.py
+**职责**：P2b 框架引导编排（发现式 + 单 session 闭环，M12）。
+**关键公共函数**：`run_scaffold(ws, target_os, device_ids)` 主循环——
+每轮 `out/scaffold_r<N>.json`（首发 unlink 防脏读）→ agent 发现/
+修订（r1 全量任务、r≥2 `--session` 续接增量；质量失败同轮微增量
+续接 ≤AGENT_TRIES 次）→ `validate_recipe` → canonical
+`scaffold_recipe.json` → rollback 上轮 → apply → `_verify` 三信号
+（build/boot+特征 count/单测 smoke）→ FAIL 落盘
+`P2B_scaffold_verify_r<N>.log` 指针回炉 / PASS `_finalize`
+（manifest+mapping 批注+kb 候选+vcs）；session 缺失或质量续接耗尽
+= RuntimeError 静态 panic。`dormitory_abs(ws, target_os)` 宿舍路径
+（唯一真值源 = manifest，无回落）。
+**关系**：P2 第二步；消费 `skills/P2-scaffold.md`（铁律 7 条含验证
+归属编排器禁令 + 文件输出契约）与 `agent._opencode_json_runner`
+（stdin 消息通道）；被 run.py/pregen.py 消费。
+**限制**：MAX_ROUNDS=3 / AGENT_TRIES=2 / AGENT_TIMEOUT_SEC=1200
+（每次调用独立满额，无跨轮总预算）；`_verify` 特征 count 尚未过
+`_strip_ansi`（全工具唯一漏网点，回填方案在 TODO #13.1/#16）。
+
+#### recipe_apply.py
+**职责**：施工单落地引擎——OS/语言中立的机械层（发现归 agent、
+落地归本层、证伪归验证）。
+**关键公共函数**：`validate_recipe(recipe, driver)` 字段级轻校验
+（必键/路径逃逸/driver_home 越界/replace 形态/group 正则合法性/
+probe_channel 契约）；`apply_recipe(target_os, recipe, journal)`
+照单施工（files 仅限 driver_home 内创建；edits insert 带 group 正则
+则同组字典序插入否则尾部追加、replace 逐字 find 单点替换；marker
+幂等判重；目标文件缺失 ⚠ 跳过不崩）+ journal 落盘；`rollback(
+target_os, journal)` 精确还原（逆序：replace 换回原文、insert 只删
+一行同文行、新建文件 unlink+剪空目录止于 target_os）。
+**关系**：scaffold.py 每轮回炉前 rollback 上轮再 apply 新单——防
+"旧内容残留+新 marker 被幂等跳过"脏叠加。
 
 #### pregen.py
 **职责**：P2c 探针预生成（风险主张前置验证）。
@@ -596,11 +711,13 @@ pregen_report.md。
 **关系**：P2 第三步；P3 探针步骤退化为补新。调 loop.probes.run_probe_lifecycle。
 
 #### run.py
-**职责**：P2 入口编排（2a→2b→2c→验收）。
-**关键公共函数**：`run_p2(ws, driver_root, target_os, device_ids)` 全流程
-（mapping→skeleton→pregen→_acceptance：build+boot+组件日志特征+无 PROBE FAIL；
-验收过后 vcs 双 commit：目标树 manifest 路径+工作区）。
-**关系**：P2 总入口；调 env.probe 验收。
+**职责**：P2 入口编排（2a→2b→2c；验收已内化 P2b 三信号，独立
+_acceptance 步骤退役）。
+**关键公共函数**：`run_p2(ws, driver_root, target_os, device_ids)`
+全流程（mapping→scaffold→pregen；P2b 自带三信号验收，P2c 自带
+build+boot 判定生命周期；阶段末 vcs commit 面 = P2 骨架+接线
+（commit_paths 派生自 manifest）+ 工作区）。
+**关系**：P2 总入口。
 
 #### kb.py
 **职责**：知识库骨架——目录模型+域注册表+薄 INDEX+通用晋升（知识子系统核心）。
@@ -892,11 +1009,11 @@ H13（blocked 立即停）、H18（exit-3 路径刷新草稿）、H20（T3 失�
 | H6 | P1D plan 先写后抽假成功陷阱 | 中 | 靠 resolve 守恒校验兜底；plan 存在即 return 0 |
 | H7 | fill 回退不闭环 | 中 | fell-back 只写 fill.json 不回写 gap_decisions（部分修复：迁移阶段新撞 gap 回写） |
 | H8 | probes.rs 聚合挤掉当前模块他相位探针 | 中 | 设计取舍：current_module 用 current_reg_path 避免竞态；流程中止则哨网缺员 |
-| H11 | skeleton 幂等短路吞锚点漂移 | 中 | marker 存在即跳过；init.rs 锚点缺失仅⚠+return 0（设计如此） |
+| H11 | skeleton 幂等短路吞锚点漂移 | 中 | marker 存在即跳过；init.rs 锚点缺失仅⚠+return 0（设计如此；M12 已随 skeleton 退役——回炉轮 rollback 后重放） |
 | H14 | p6 SLIRP 设备参数硬编码 e1000 | 中 | DEFAULT_EXEC_DEVICE_ARGS 含 e1000；真工作区 runner 只有 `net` 键时靠硬编码撑 |
 | H15 | surface force 参数死置 | 低 | 无调用方传 True→永不刷新；P3 有活映射对账补偿 |
-| H16 | skeleton members 只插一处 | 低 | 不插 default-members（目标树自述应入 default-members） |
-| H17 | VENDOR_ID 只取 ids[0] | 低 | 多厂商设备 ID 静默错误 |
+| H16 | skeleton members 只插一处 | 低 | 不插 default-members（目标树自述应入 default-members；M12 已随 skeleton 退役——rerun2 的 agent 自主选择了双插） |
+| H17 | VENDOR_ID 只取 ids[0] | 低 | 多厂商设备 ID 静默错误（M12 已随 skeleton 退役——认领键清单整体交 recipe） |
 | H19 | 跨模块探针降级无对账 | 低 | M2 降级某 claim 不回头改 M1 的 gap_decisions |
 | H22 | P2 acceptance.json 无机器消费者 | 低 | 纯人读产物 |
 | H25 | 分层倒置 | 低 | env 层反向 import loop 层（延迟 import+try 防御，未成环） |
@@ -919,11 +1036,11 @@ H13（blocked 立即停）、H18（exit-3 路径刷新草稿）、H20（T3 失�
 
 | 点 | 证据 | 说明 |
 |---|---|---|
-| **skeleton.py 骨架模板整体 Asterinas 专属** | crate 布局 `kernel/core/comps/<driver>`、`aster-*` 命名、依赖清单、Components.toml 组件模型、lib.rs 模板（OSTD/aster_pci API、`#[init_component]`、ktest 位）、init.rs 接线桩锚点写死 virtio 先例字符串 | 无第二目标 OS 抽象层 |
-| 驱动 crate 路径写死 | p4.py/probes.py/pregen.py 四处独立硬编码 `target_os/kernel/core/comps/<driver>` | |
-| probes.rs 文件格式+PROBE_ 日志约定 | skeleton.py + probes.py + bootstrap/run.py | 组件 init 调 run_all + PROBE_<name> PASS/FAIL 行 |
+| ~~skeleton.py 骨架模板整体 Asterinas 专属~~ **已解决（M12）** | 发现式 scaffold 取代模板：路径/语言/构建机制由 agent 按目标树先例产出；skill 示例已加中立声明；DEFAULT_DEVICE_IDS 与宿舍路径回落一并退役 | 换目标 OS 只需换 P0 runner 事实 + skill 先例方法仍通用 |
+| 驱动 crate 路径写死（部分残留） | p4.py/p5.py/p6.py/p7.py 仍硬编码 `target_os/kernel/core/comps/<driver>`；P2 侧（scaffold/pregen/probes 宿舍路径）已 manifest 驱动 | M12 清了 P2 链路；P4-P7 属 TODO #11 后续批次 |
+| probes.rs 文件格式+PROBE_ 日志约定 | loop/probes.py 再生引擎（rust/c 双模板）+ scaffold 发现的 probe_channel 契约 | 组件 init 调 run_all + PROBE_<name> PASS/FAIL 行；格式已语言参数化（manifest.language） |
 | p6 SLIRP 默认设备串含 e1000 | p6.py DEFAULT_EXEC_DEVICE_ARGS | H14 |
-| skeleton 默认设备 ID | skeleton.py DEFAULT_DEVICE_IDS=`0x8086:0x100e` | 可 --device-ids 覆盖 |
+| ~~skeleton 默认设备 ID~~ **已退役（M12）** | `--device-ids` 唯一来源；未提供时任务数据给"认领键依总线自行收敛"引导（PCI V:D / USB VP / SPI compatible；纯软件驱动可无） | 工具不猜测设备身份 |
 | skills/P4-migrate 硬约束 | 忙等规则、trait 抽象、仪式测试——Asterinas 惯例 | 换 OS 需重写 skill |
 | failures 域 lineage 签名 | knowledge/asterinas/failures/ 4 条环境特定签名 | 按 lineage 隔离，跨迁移不污染（设计如此） |
 
@@ -936,9 +1053,12 @@ p1 索引 Linux C 方言正则（输入即 Linux，合理）。
 
 ### 7.3 通用性结论
 
-P0/P1 层与数据面基本可复用于任意目标 OS/驱动；**P2b 骨架起（含 P4 写树、
-探针宿主、P6 SLIRP、L4 形态）为 Asterinas+net 驱动定制**。第二目标 OS
-的现实路径 = skeleton/probes 宿主模板化 + skill 集参数化。
+P0/P1 层与数据面基本可复用于任意目标 OS/驱动；**P2b 经 M12 发现式重构
+后也已通用**（骨架形态由 agent 按目标树先例发现，rerun2 裸能力实验实证：
+无 KB、无注入教学、无手工干预三轮收敛）——**残留 Asterinas/net 定制收窄
+到 P4 写树路径、P6 SLIRP、L4 形态与 P4-P7 的 crate 路径硬编码**。第二
+目标 OS 的现实路径 = P4-P7 路径 manifest 化（TODO #11 批次）+ skill 集
+参数化 + 各 skill 示例中立化（P4-migrate 等仍待做）。
 
 ---
 
