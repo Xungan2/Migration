@@ -94,8 +94,9 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         "opencode", "run", "--auto",
         "--model", model,
         "--dir", str(workdir),
-        prompt,
-    ]
+        "--", prompt,          # -- 终止选项解析：消息以 - 开头（如反馈块
+    ]                           # 惯用的 --- 分隔线）时不被当成选项（rerun2
+                                # 校准实录：r2 续接消息因此 rc=1/0s 失败）
     t0 = time.time()
     env = {**os.environ, "NO_COLOR": "1"}
     env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",
@@ -296,7 +297,7 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
             "--model", model, "--dir", str(workdir)]
     if session_id:
         args += ["--session", session_id]
-    args.append(message)
+    args += ["--", message]    # 同 run_agent：防 - 开头消息被当选项
     t0 = time.time()
     env = {**os.environ, "NO_COLOR": "1"}
     env.setdefault("OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX",

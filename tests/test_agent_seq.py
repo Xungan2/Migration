@@ -514,6 +514,48 @@ class TestTimeoutSalvage(unittest.TestCase):
         self.assertEqual(len(calls), 1)
 
 
+class TestArgvSeparator(unittest.TestCase):
+    """L13（2026-09-05 rerun2 校准实录）：- 开头消息必须走 `--` 分隔。
+
+    回炉/质量续接消息惯用 `---` 分隔线开头，yargs 会把它当选项解析
+    → opencode 参数校验失败 rc=1/0s（会话化 P2b r2 续接全灭于此）。
+    """
+
+    def _capture_args(self, exc=None):
+        captured = {}
+
+        def _fake_run(args, **kw):
+            captured["args"] = list(args)
+            if exc is not None:
+                raise exc
+            return mock.Mock(returncode=0, stdout="", stderr="")
+
+        return captured, mock.patch.object(agent.subprocess, "run",
+                                           side_effect=_fake_run)
+
+    def test_json_runner_dash_message_gets_separator(self):
+        ws = Path(tempfile.mkdtemp(dir=TMP))
+        captured, patcher = self._capture_args()
+        with patcher:
+            agent._opencode_json_runner(
+                "---\n## 上一轮验证 FAIL", ws, str(ws / "SEP"),
+                timeout_sec=5, session_id="ses_X")
+        args = captured["args"]
+        self.assertEqual(args[-1], "---\n## 上一轮验证 FAIL")
+        self.assertEqual(args[args.index("--") + 1], args[-1])
+        self.assertIn("--session", args)       # 分隔符不破坏 --session
+
+    def test_run_agent_dash_message_gets_separator(self):
+        ws = Path(tempfile.mkdtemp(dir=TMP))
+        captured, patcher = self._capture_args()
+        with patcher:
+            agent.run_agent("---\n反馈", workdir=ws,
+                            log_stem=str(ws / "SEP2"), timeout_sec=5)
+        args = captured["args"]
+        self.assertEqual(args[-1], "---\n反馈")
+        self.assertEqual(args[args.index("--") + 1], args[-1])
+
+
 class TestRunAgentStructured(unittest.TestCase):
     def test_first_try_ok(self):
         ws = Path(TMP)
