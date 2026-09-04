@@ -190,9 +190,15 @@ _strip_ansi 更根本；但 `_verify` 加 strip 仍是廉价鲁棒性，见下�
 
 1. ANSI 边界假 MISS：**rerun2 r2 实际触发**（lib.rs 已修好、行已打出，
    但 r2 patterns 仍为前缀风格 `e1000: xxx`，撞上日志里前缀与正文间
-   的 ANSI 转义 → 0 命中）；r3 自行改选消息子串（避开前缀）后命中。
-   可选回填：`_verify` count 前过 `_strip_ansi`（porter/env/probe.py
-   已有）——防 agent 选错 pattern 形态时浪费一轮。
+   的 ANSI 转义 → 0 命中）→ 白烧一整轮回炉轮；r3 自行改选消息子串
+   （避开前缀）后命中。**[定案 2026-09-05：暂缓，登记待办]** 回填
+   方案已备好：`_verify`（scaffold.py:215）count 特征前先过
+   `_strip_ansi`（porter/env/probe.py:62 现成函数）+ 一个跨边界特征
+   单测。依据 = 全工具 ANSI 洗涤矩阵盘点（2026-09-05）：boot 双信号
+   判定（probe.py:133-137）/ 单测 smoke（ut_verify）/ P5 判据注入 /
+   P6 / 失败签名（_static_sig、errorloop）**全部已洗**，唯 scaffold
+   `_verify` 特征 count 原样——P2 重构新写的判定点没跟上既有惯例，
+   属补齐而非新发明；无假阳性风险（strip 只删转义码）。
 2. 注入接缝自发现：**rerun2 r3 完整复现预期发现链**（无 skill 提示、
    空 KB）——读 verify 证据 → 追启动命令链 make run_kernel→OSDK.toml
    →tools/qemu_args.sh → grep EXTRA_QEMU_ARGS 消费点确认无（给了
