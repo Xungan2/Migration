@@ -220,6 +220,10 @@ python3 porter/main.py p1-strategy --output-dir <ws>   # 人工审阅 strategy.m
 python3 porter/main.py p1-divide    --output-dir <ws>
 python3 porter/main.py p1-resolve   --output-dir <ws>   # 出 deps.json
 python3 porter/main.py p1           --output-dir <ws>   # 全流程直通（CP1 也拦）
+# 或：导入外部 P1 交付物（替代 divide+resolve；机器复核——重建 modules/、
+#     图重算环必须 0、deps 对账不一致以重算为准 exit 1）
+python3 porter/main.py p1-import --output-dir <ws> \
+    --plan <P1D_plan.json> [--deps <deps.json>] [--strategy <strategy.md>]
 
 # P2 引导映射+骨架
 python3 porter/main.py p2          --output-dir <ws> [--device-ids V:D[,V:D…]]
@@ -368,6 +372,9 @@ python3 porter/main.py p1-strategy --output-dir migrations/my-e1000-port
 # → 人工审阅 migrations/my-e1000-port/P1/strategy.md
 python3 porter/main.py p1-divide    --output-dir migrations/my-e1000-port
 python3 porter/main.py p1-resolve   --output-dir migrations/my-e1000-port
+# 外部完成的 P1 成果可直接导入（重建 modules/ + deps 对账），替代上面两步：
+# python3 porter/main.py p1-import --output-dir migrations/my-e1000-port \
+#     --plan <P1D_plan.json> --deps <deps.json> --strategy <strategy.md>
 
 # P2 引导映射+骨架+探针+验收
 python3 porter/main.py p2 --output-dir migrations/my-e1000-port

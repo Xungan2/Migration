@@ -72,6 +72,7 @@ _TOOL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_TOOL_ROOT))
 
 from porter.bootstrap import run as p2        # noqa: E402
+from porter.divide import import_p as p1i    # noqa: E402
 from porter.divide import resolve as p1r     # noqa: E402
 from porter.divide import run as p1a        # noqa: E402
 from porter.divide import strategy as p1s    # noqa: E402
@@ -289,6 +290,26 @@ def cmd_p1_resolve(args) -> int:
         return 2
     strategy = Path(args.strategy).resolve() if args.strategy else None
     return p1r.run_resolve(ws, driver_root, strategy_path=strategy)
+
+
+def cmd_p1_import(args) -> int:
+    """P1 外部交付物导入（plan 重建 modules/ + 图重算 + deps 对账 + strategy 就位）。"""
+    ws = Path(args.output_dir).resolve()
+    proj_path = ws / "project.json"
+    if not proj_path.exists():
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    driver_root = Path(proj["linux_driver"])
+    if not driver_root.is_dir():
+        _log.console_line(f"[porter] linux_driver 路径无效: {driver_root}")
+        return 2
+    plan = Path(args.plan).resolve() if args.plan else None
+    deps = Path(args.deps).resolve() if args.deps else None
+    strategy = Path(args.strategy).resolve() if args.strategy else None
+    _log_bind(ws, "p1")
+    return p1i.run_import(ws, driver_root, plan, deps_path=deps,
+                          strategy_path=strategy)
 
 
 def cmd_p1_divide(args) -> int:
@@ -1084,6 +1105,13 @@ def main(argv=None) -> int:
     p1r.add_argument("--strategy", default=None,
                      help="拆分策略文件路径（注入 agent prompt）；缺省 <P1>/strategy.md")
     p1r.set_defaults(func=cmd_p1_resolve)
+
+    p1i = sub.add_parser("p1-import", help="P1 外部交付物导入：plan 重建 modules/ + 图重算 + deps 对账（消费外部三件套）")
+    p1i.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0 或已有 project.json）")
+    p1i.add_argument("--plan", required=True, help="外部 P1D_plan.json 路径")
+    p1i.add_argument("--deps", default=None, help="外部 deps.json 路径（对账用；重算为准）")
+    p1i.add_argument("--strategy", default=None, help="外部 strategy.md 路径（就位到 P1/strategy.md）")
+    p1i.set_defaults(func=cmd_p1_import)
 
     p1d = sub.add_parser("p1-divide", help="P1 任务A：模块划分（物理切分+依赖分析）")
     p1d.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0）")

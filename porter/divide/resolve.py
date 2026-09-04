@@ -353,6 +353,13 @@ def run_resolve(ws: Path, driver_root: Path,
     if not plan_path.exists():
         _log.console_line(f"[porter] P1R: 缺少 {plan_path}（先跑 p1-divide）")
         return 2
+    # 空图守卫（A7 顺修）：modules/ 缺失/为空时 _build_graph 扫不到任何
+    # 模块——不守卫会静默写出空图 deps.json（或 iterdir 直接崩溃）
+    mods_root = ws / "P1" / "modules"
+    if not mods_root.is_dir() or not any(mods_root.glob("*/module.json")):
+        _log.console_line(f"[porter] P1R: {mods_root} 不存在或无模块目录"
+              f"（先跑 p1-divide / p1-import）")
+        return 2
     (p1 / "logs").mkdir(parents=True, exist_ok=True)
 
     spath = strategy_path or (p1 / "strategy.md")

@@ -56,6 +56,21 @@ def run_divide(ws: Path, driver_root: Path) -> int:
     p1 = ws / "P1"
     plan_path = p1 / "reports" / "P1D_plan.json"
     if plan_path.exists():
+        # H6 顺修：plan 复用时 modules/ 必须存在（下游 P2a spine/P3 surface
+        # 读的是物理目录）；缺失则按现存 plan 重建抽取
+        if not any((p1 / "modules").glob("*/module.json")):
+            try:
+                plan = json.loads(plan_path.read_text(encoding="utf-8"))
+                summary = frag_mod.extract_modules(ws, driver_root, plan)
+            except (OSError, json.JSONDecodeError) as e:
+                _log.console_line(f"[porter] P1D: 复用 {plan_path} 读取失败：{e}")
+                return 1
+            except frag_mod.DivideError as e:
+                _log.console_line(f"[porter] P1D: 复用时按现存 plan 重建抽取失败：\n{e}")
+                return 1
+            total = sum(n for fm in summary.values() for n in fm.values())
+            _log.console_line(f"[porter] P1D: modules/ 缺失——按现存 plan 重建抽取"
+                  f"（{len(summary)} 模块 {total} 行）")
         _log.console_line(f"[porter] P1D: 复用 {plan_path}（如需重做请删除该文件）")
         return 0
     strategy_path = p1 / "strategy.md"
