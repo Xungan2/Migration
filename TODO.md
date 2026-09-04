@@ -184,16 +184,20 @@ knowledge/asterinas/pitfalls/asterinas-qemu-args-no-inject-hook.md。
 2026-09-05 session 化改造定案：以下两项加固**故意不编码**，留作新
 P2b 重跑实验（见 #14）的"自发现"观测点——
 
-1. `_verify` count 特征前先 `_strip_ansi`：cal 的 qemu.log 实证 919
-   行含 ANSI 转义码，特征串跨转义边界必假 MISS；但校准四轮未实际
-   触发（r4 原样 count 也命中）。重跑若 patterns=F 而特征肉眼在
-   日志里（考虑 ANSI 边界），回填此修（`porter/env/probe.py` 已有
-   `_strip_ansi`，一行接入）。
-2. 回炉证据的拓扑说明行（"设备经 runner 的 env 注入 boot 命令；若
-   怀疑设备未挂载，先 grep 启动脚本链核实该变量消费点（给
-   file:line），再查驱动侧"）：r2/r3 patterns=F 全败于注入接缝的
-   教训。重跑观测：agent 能否经 verify 证据文件自读，自行发现应去
-   查启动脚本链的注入接缝。
+**[已验结案 2026-09-05 rerun2]** 两项自发现全部发生且 agent 自行绕过，
+工具侧加固暂不回填（agent 的解法=选 post-ANSI 子串作特征，比工具侧
+_strip_ansi 更根本；但 `_verify` 加 strip 仍是廉价鲁棒性，见下）：
+
+1. ANSI 边界假 MISS：**rerun2 r2 实际触发**（lib.rs 已修好、行已打出，
+   但 r2 patterns 仍为前缀风格 `e1000: xxx`，撞上日志里前缀与正文间
+   的 ANSI 转义 → 0 命中）；r3 自行改选消息子串（避开前缀）后命中。
+   可选回填：`_verify` count 前过 `_strip_ansi`（porter/env/probe.py
+   已有）——防 agent 选错 pattern 形态时浪费一轮。
+2. 注入接缝自发现：**rerun2 r3 完整复现预期发现链**（无 skill 提示、
+   空 KB）——读 verify 证据 → 追启动命令链 make run_kernel→OSDK.toml
+   →tools/qemu_args.sh → grep EXTRA_QEMU_ARGS 消费点确认无（给了
+   OSDK.toml:12 / qemu_args.sh:226-227 证据）→ 树侧挂 e1000（net02
+   后端）。拓扑说明行**不需要**——agent 自己走到了。
 
 另记：extract_json 嵌套围栏 bug（非贪婪围栏正则被 JSON 字符串内嵌
 ``` 截短；r1_R1 实录 3930/12908 字符）仍存在于 ~20 处非 P2b 调用点
@@ -201,7 +205,7 @@ P2b 重跑实验（见 #14）的"自发现"观测点——
 输出免疫。修法已验证：```json 围栏后从 `{` 起做字符串感知花括号
 配平扫描（处理转义与字符串内花括号/反引号）。
 
-## 14. 新 P2b 重跑校准实验（session 化验证，下轮）
+## 14. 新 P2b 重跑校准实验（session 化验证）——已执行 PASS（2026-09-05）
 
 上一轮校准是 session 化改造**之前**的形态，需对重写后的 P2b 重跑：
 fresh worktree 自基线 `36ae7fe10`（/tmp/opencode/cal/* 保留勿动），
@@ -210,3 +214,19 @@ fresh worktree 自基线 `36ae7fe10`（/tmp/opencode/cal/* 保留勿动），
 sessionID 一致）；② 三信号全绿；③ 自发现观测（见 #13 两项）。
 注意：DEFAULT_DEVICE_IDS 已退役（2026-09-05 去硬编码），重跑须显式
 `--device-ids 0x8086:0x100e`（QEMU -device e1000 = 82540EM）。
+
+**结果（/tmp/opencode/rerun2/ 保留备查，run2.log 为权威记录）**：
+裸条件 = skill 删"设备注入扩展点"节（跑完已恢复）+ 空 KB（project.json
+无 kb_dir）+ 无拓扑提示。rc=0，3 轮闭环：
+- ① 单 session 贯穿 ✓（470 个事件同一 sessionID，r1/r2/r3 全续接）
+- ② 三信号全绿 ✓（r3：build/boot/patterns×3 全 PASS，attempts=3）
+- ③ 自发现 ✓✓✓（超出预期）：
+  r2 自诊 Bootstrap 阶段日志早于 logger 就绪 → 改
+  `#[init_component(kthread)]`（还核验了 PCI 设备排队重探语义）；
+  r2 MISS 根因= ANSI 边界（见 #13.1）；r3 自发现注入接缝（见 #13.2）
+  + patterns 改消息子串 → 收敛。
+- 中途工具 bug 一枚（与 P2b 设计无关）：`---` 开头的续接消息被
+  opencode CLI 当选项 → rc=1/0s 全灭 → 静态 panic 正确兜住；已修
+  （`--` 分隔符，commit 97f78ee，live 验证）。首跑因此中断重跑。
+- 轮时长：r1 发现 519s / r2 修订 282s / r3 修订 192s（session 续接
+  的增量消息显著短于全量重发，符合设计预期）。
