@@ -138,3 +138,26 @@ tests/test_vcs_wiring.py（seam/隔离性/panic/answers/loop/P2/P4）。
   （绝对路径校验/拒工具仓/_git 拒空路径；回归 test_vcs E8-E11）。
 - vcs commit 消息的 i18n/前缀规范化（当前自由文本 + Porter-Phase
   trailer）。
+
+## 11. 老接口调用点分批迁移到 agent 模块新接口
+
+现状：M11（2026-09-04，`db78fea`）交付 run_agent_seq（split_long_op：
+agent 段×N+外部静态段/session 续接/总预算/同签名防打转/结果指针化）+
+run_agent_structured，并接线 P4 `_step_migrate`（真实重迁 os-probe +
+P5 判据级 55/55 验证）。存量 19 处 `run_agent` 调用点未迁移
+（覆盖地图见 docs/modules/agent.md §4）。
+
+要做：分批替换——🟡 机械可换 9 处（P0 T5 烟测反馈/P1D/P1R/P2a/
+P3×3/P4 fill/P5 补探/P6 draft-l4 → run_agent_structured）；
+🟢 原生场景 3 处（P0 T3 环境提取/探针 FAIL 回炉/errorloop 求解轮
+→ run_agent_seq，把各自的真实执行包成 static fn；errorloop 的
+`_prev_context` 手拼上下文可被 session 续接直接替代）。
+前置框架缺口：
+- **done_key 通用 done 识别**（主缺口）：fill 的 `{patch_summary,…}`、
+  P5 补探的 `{cmd,…}` 无 phase/status 键，`_parse_phase` 会误判
+  不可解析——加参数"```json 块含此键即 done，再走 gen_schema"。
+- **不可重试中止通道**（仅 fill 三重验证进 seq 时需要）：boot 日志
+  不可得今天是 exit 3 停车语义，静态段需能表达"infra 中止"而非
+  可重试失败（如专用异常 → outcome 映射）。
+- 多操作菜单（statics 封闭集合+窄参数）已与用户设计定案、搁置待
+  需求（docs/modules/agent.md §5 定案 9）。

@@ -1,13 +1,15 @@
 # driver_migration_tool 工具报告
 
 > 本文件是工具的**完整开发报告**，面向 0 上下文的接手 agent：读完本文 +
-> README.md + 代码 + docs/ 五份子系统/模块文档，即可理解工具全貌并继续开发。
+> README.md + 代码 + docs/ 六份子系统/模块文档，即可理解工具全貌并继续开发。
 > 生成：2026-09-03 全量（HEAD `189ff11`）；2026-09-04 增补（M10 git 管理
-> 模块 + 知识库挪家 + fill 落点约束 + docs 分层 sub-systems/modules）。
+> 模块 + 知识库挪家 + fill 落点约束 + docs 分层 sub-systems/modules；
+> M11 agent 调用模块 + P4 切片迁移接新接口）。
 > 方法：4 路并行全读 porter/ 源码（47 个 .py 文件，14908 行）+ 17 skills
 > + 4 份 docs + TODO.md + 44 条提交史 + 旧审计报告交叉核对 + 131 测试绿。
-> 增补轮核对：porter/ 54 个 .py 文件 15876 行；docs/ 5 份（sub-systems/×3 +
-> modules/×2，新增 vcs.md）；164 测试绿 + 真实 git/agent 冒烟。
+> 增补轮核对：porter/ 54 个 .py 文件 16487 行；docs/ 6 份（sub-systems/×3 +
+> modules/×3，新增 vcs.md/agent.md）；204 测试绿 + 真实 git/agent 冒烟
+> + os-probe 真实重迁与 P5 判据级验收（M11）。
 
 ---
 
@@ -19,6 +21,7 @@
 - **想接手某个子系统/模块** → 读 docs/sub-systems/<名>.md 或
   docs/modules/<名>.md（规范）+ 本文第 5 节（实现）。
 - **想接手 git 管理模块（vcs）** → 读 docs/modules/vcs.md + 本文 §4 M10 / §5.2。
+- **想接手 agent 调用模块（agent）** → 读 docs/modules/agent.md + 本文 §4 M11 / §5.2。
 - **想知道还有什么没做** → 读本文第 6 节 + TODO.md。
 - **本文与 docs/ 的分工**：docs/（sub-systems/ 与 modules/ 两层）是各
   子系统/模块的**规范**（协议/schema/限制），
@@ -84,8 +87,10 @@ porter/
 ├── main.py              # CLI 总入口（18 子命令分发 + 路由校验）
 ├── config.json          # 仓级运行时配置（routing/checkpoints/kb/panic/self_diagnosis/vcs）
 ├── common/              # 跨阶段共用
-│   ├── agent.py         #   opencode 非交互调用抽象（PORTER_MODEL 可配；32K 输出帽修复；
-│   │                    #   首尾挂 vcs agent_pre/post 隔离点）
+│   ├── agent.py         #   agent 调用模块：run_agent（单发，原样保留）+
+│   │                    #   run_agent_seq（split_long_op：agent 段×N+外部静态段，
+│   │                    #   session 续接/总预算/同签名防打转/结果指针化）+
+│   │                    #   run_agent_structured；首尾挂 vcs 隔离点
 │   ├── symbol.py        #   C 源码符号静态扫描（P1 依赖图/P2a spine 共用；v2.2 语句分类版）
 │   └── vcs.py           #   git 管理模块（两 repo commit/分支/baseline/bundle/台账）
 ├── env/                 # P0 专属
@@ -356,6 +361,50 @@ false`/`PORTER_VCS=0` 全跳过；旧工作区回落单仓兜底；identity `-c`
 拒工具仓+_git 拒空路径，见 docs/modules/vcs.md §3.3）。
 规范见 docs/modules/vcs.md。首个真实迁移轮校准待做（TODO #10）。
 
+### M11 agent 调用模块（2026-09-04，`db78fea`）
+
+**做了什么**：`porter/common/agent.py` 新增 split_long_op 接口族——
+`run_agent_seq`（agent 段 × N + 外部静态段交织：长操作由 `static=
+{"describe","fn"}` 注册、时长不吃 agent 预算；段间 opencode `--session`
+原生会话续接，session id 解析不到时兜底"模仿交互式轮次"transcript
+注入；静态结果**指针化**——完整输出落 `<stem>_S<n>_static.log` 随
+vcs agent 隔离 commit 入库，下一段消息只含 verdict+文件路径零内容
+注入，写盘失败降级尾 40 行；防打转不设轮数上限=同签名早退+上下文
+保证+总预算 `agent_budget_sec` 三层）+ `run_agent_structured`（单发
++必填字段浅类型校验+反馈重试）+ `_parse_phase` 兼容老 skill
+`{"status":"done"|"blocked"}` 输出契约（17 个 skill 零改动；blocked
+短路 schema 交还调用方）。接线：`p4._step_migrate` 切片循环（老
+"agent→probe_build→err_info 手拼反馈"序列）替换为一次 run_agent_seq
+调用（static=probe_build+只追加行数守卫复合；blocked/stalled 映射
+既有 panic 关口；跨切片 sig_counts 与 slice-rework 钩子保留；预算
+2400s）。`run_agent` 一字节不动。
+
+**为什么**：单次 agent 调用自跑长操作（HarmonyOS 级编译 10-30 分钟）
+会吃光 timeout——老接口实测 R1 整轮 TIMEOUT 报废 1200s；且重试=
+全量 prompt 重发+手拼错误尾，agent 每轮失忆重新探索。拆分后静态段
+在预算外、会话续接让重试变"继续干活"（实测 S2 仅收 2.3KB 增量消息、
+33s 完成，还能凭 S1 的会话记忆分析死码警告的消费者）。指针化定案：
+零 prompt 膨胀 + agent 按需选择性消费（自选 tail/grep 窗口）+ 完整
+输出成为 git 管理的可审计证据。与用户逐点定案（docs/modules/agent.md
+§5）：不设轮数上限（签名+上下文替代）、git 提交随 vcs 既有粒度
+（框架不自建）、多操作集合（封闭菜单+窄参数）已设计搁置。
+
+**当前形态**：19 处 run_agent 调用点已接 1（P4 migrate）、原生场景
+3（P0 T3/探针回炉/errorloop——求解轮 `_prev_context` 可被 session
+续接替代）、机械可换 9（run_agent_structured）、无必要 5；接线前置
+缺口=通用 done 识别（done_key 参数，fill 的 patch_summary/P5 的 cmd
+无 phase/status 键）与可选 infra 中止通道（TODO #11）。测试
+test_agent_seq.py（38 mock：指针纯净度/写盘降级/stalled/session
+主路径/兜底 transcript）+ test_agent_seq_live.py（2 例 opt-in
+`PORTER_LIVE_AGENT_TEST=1`：暗号回溯证明续接无信息损失；指针 e2e
+token 只在文件里）。实战验证：e2e-test-retry 副本 + git worktree
+隔离重迁 os-probe（S1 1214s 超老上限不超时→run_static→S2 done→
+冒烟 PASS），P5 判据级 55/55 含 3 条 L3 真实设备正则；过程中 L3
+首败暴露 infra 回归（qemu_args.sh 设备注入钩子为当年未提交改动、
+随树清理丢失——主树同样缺失），老接口求解循环与人工独立诊断出
+同一根因并修复，新老接口混跑自洽。
+规范见 docs/modules/agent.md。
+
 ---
 
 ## 5. 现状：每个文件做什么（文件级实现地图）
@@ -377,16 +426,25 @@ false`/`PORTER_VCS=0` 全跳过；旧工作区回落单仓兜底；identity `-c`
 ### 5.2 porter/common/ — 跨阶段共用
 
 #### agent.py
-**职责**：opencode 非交互调用的最小封装。
-**关键公共函数**：`load_skill(name)` 读 skill 正文；`run_agent(prompt, workdir,
-log_stem, model, timeout_sec, task)` 调 `opencode run --auto`，输出落 `.log`、
-输入归档 `.prompt.md`，记 agent_start/end 事件；首尾挂 vcs
-`agent_pre`/`agent_post` 隔离点（ws 取 `log.store.bound()`）；
-`extract_json(out)` 从混有
-工具转录的输出里提取 moves JSON。
-**关系**：所有 agent 调用的唯一入口；lazy import porter.log.core 记事件。
-**限制**：注入 `OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=131072` 绕 opencode
-32K 静默钳制；模型默认 `zhipu-ai/glm-5.2`，`PORTER_MODEL` 可覆盖。
+**职责**：agent 调用模块——非交互 agent 调用的统一接口层（M11）。
+**关键公共函数**：`load_skill(name)` 读 skill 正文；`run_agent(prompt,
+workdir, log_stem, model, timeout_sec, task)` 单发原样保留（opencode
+run --auto，输出落 `.log`、输入归档 `.prompt.md`，记 agent_start/end
+事件；首尾挂 vcs `agent_pre`/`agent_post` 隔离点）；`run_agent_seq(
+task_prompt, …, static, agent_budget_sec, gen_schema, final_static)`
+split_long_op 主入口——agent 段 × N + 外部静态段，session 续接
+（`--session`，兜底交互式 transcript）、总预算（静态段时长在外）、
+同签名早退防打转、结果指针化（完整输出落 `<stem>_S<n>_static.log`，
+消息只给 verdict+路径）；`run_agent_structured(prompt, …, gen_schema,
+max_tries)` 单发+校验+反馈重试；`extract_json(out)` moves JSON 提取
+（存量调用点仍用）。
+**关系**：所有 agent 调用的唯一入口；p4 `_step_migrate` 已接
+run_agent_seq；19 处调用点覆盖地图与接线前置缺口（done_key/infra
+中止通道）见 docs/modules/agent.md §4。
+**限制**：单任务单静态操作（多操作封闭菜单已设计搁置）；禁令为
+prompt 级无技术强制；跨进程断点续跑未做；注入
+`OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=131072` 绕 opencode 32K
+静默钳制；模型默认 `zhipu-ai/glm-5.2`，`PORTER_MODEL` 可覆盖。
 
 #### vcs.py
 **职责**：git 管理模块核心（两 repo commit/分支/baseline/bundle/台账）。
@@ -802,7 +860,7 @@ criteria+mapping 状态+manifest.json）。
 
 ## 6. 已知限制与未做项
 
-### 6.1 TODO.md（10 条，已商定但不做在本轮）
+### 6.1 TODO.md（11 条，已商定但不做在本轮）
 
 | # | 项 | 状态 | 入手点 |
 |---|---|---|---|
@@ -816,6 +874,7 @@ criteria+mapping 状态+manifest.json）。
 | 8 | corpus→base 通用化晋升 | 待做 | porter kb to-base 类命令（人工触发） |
 | 9 | CP5 知识审核细节细研 | 待做 | approve/reject 是否上关口表单；健康报告阈值化 |
 | 10 | vcs 真实迁移轮 e2e 校准 | 待做 | commit 粒度/分支切回/bundle 往返实战；resume 树脏仅告警无 stash |
+| 11 | 老接口调用点分批迁移到 agent 模块新接口 | 待做 | 19 处已接 1（P4 migrate）；🟡 类 9 处 run_agent_structured 机械替换、🟢 类 3 处（P0 T3/探针回炉/errorloop）run_agent_seq 原生场景；前置缺口=done_key 通用 done 识别（fill 的 patch_summary/P5 的 cmd 无 phase/status 键）+ 可选 infra 中止通道；见 docs/modules/agent.md §4 |
 
 ### 6.2 仍存在的连续性漏洞（audit H 项，剔除已修复）
 
@@ -888,7 +947,8 @@ P0/P1 层与数据面基本可复用于任意目标 OS/驱动；**P2b 骨架起�
 - **静态**：4 路并行 explore agents（env+divide / bootstrap+symbol / loop 全 /
   log+common+main）逐文件全读，行号引用经抽查核对。
 - **动态**：全套件 `python3 -m unittest discover -s tests` →
-  `Ran 164 tests … OK`（131 存量 + test_vcs 22 + test_vcs_wiring 11）。
+  `Ran 204 tests … OK`（131 存量 + test_vcs 22 + test_vcs_wiring 11 +
+  test_agent_seq 38 mock + test_agent_seq_live 2 例默认 skip）。
 - **回归验证**：连续两次全量套件后 `git rev-parse HEAD` 稳定
   （CWD 误提交防护生效）。
 - **vcs 冒烟（M10）**：真实 git 走 登记→commit→幂等→export→

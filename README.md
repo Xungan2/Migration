@@ -42,6 +42,7 @@
 | `PORTER_LOG_LEVEL` | `info` | console 行级别阈值（debug/info/warn/error） |
 | `PORTER_NO_AGENT` | 未设 | `=1` 关 agent 兜底（测试/守护闸门；错误处理降级档） |
 | `PORTER_SELF_DIAGNOSIS` | 未设 | `=1` 强制开错误处理求解循环（测试惯例） |
+| `PORTER_LIVE_AGENT_TEST` | 未设 | `=1` 启用 agent 模块 live 冒烟测试（真实模型调用：session 续接暗号回溯 + 指针 e2e） |
 | `PORTER_TARGET_OS_ROOT` | 自动注入 | 目标树绝对路径，runner.cmd 中以 `${...}` 引用 |
 
 ---
@@ -186,6 +187,20 @@ ws 产物）；P7 输出 commit 链并自动导出。两仓 commit 流互相独�
 
 **规范**：[`docs/modules/vcs.md`](./docs/modules/vcs.md)（两仓模型与 commit 点地图/分支管理/
 commit 语义/台账与 P7 链/bundle 可移植/配置/实现地图）。
+
+### agent 调用模块（agent）
+
+**目标**：非交互 agent 调用的增强接口——`run_agent_seq`（split_long_op：
+agent 段 × N + 外部静态段，编译/测试/启动等长操作时间不吃 agent 预算；
+段间 opencode `--session` 会话续接，无信息损失，解析失败兜底交互式
+transcript；静态结果指针化——完整输出落盘随 vcs 隔离 commit 入库，
+消息只给 verdict + 文件路径）+ `run_agent_structured`（单发 + 字段
+校验 + 反馈重试）。防打转不设轮数上限：同签名早退 + 上下文保证 +
+总时间预算。P4 切片迁移已接线（真实重迁 os-probe + P5 判据级 55/55
+验证）；`run_agent` 原样保留，存量调用点按覆盖地图分批迁移。
+
+**规范**：[`docs/modules/agent.md`](./docs/modules/agent.md)（运行模型/phase 协议与 status 兼容/
+段间接续/静态段与结果指针/预算与防打转/实现地图与老接口覆盖地图/定案记录）。
 
 ---
 
