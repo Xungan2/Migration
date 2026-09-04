@@ -107,8 +107,16 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         rc = proc.returncode
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # 超时也捞部分输出：JSON 事件流里可能已有 sessionID 事件
+        # （被杀/超时会话仍可续接的地基）。TIMEOUT 标记保留在首位。
         out = "TIMEOUT"
+        if e.stdout:
+            out += "\n" + (e.stdout if isinstance(e.stdout, str)
+                           else e.stdout.decode("utf-8", "replace"))
+        if e.stderr:
+            out += "\n" + (e.stderr if isinstance(e.stderr, str)
+                           else e.stderr.decode("utf-8", "replace"))
         rc = -1
     except FileNotFoundError:
         out = "opencode executable not found in PATH"
@@ -300,8 +308,16 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
         )
         out = (proc.stdout or "") + (proc.stderr or "")
         rc = proc.returncode
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as e:
+        # 同 run_agent：超时捞部分事件（sessionID 可能已在流里——
+        # 超时/被杀的会话凭它仍可 --session 续接）
         out = "TIMEOUT"
+        if e.stdout:
+            out += "\n" + (e.stdout if isinstance(e.stdout, str)
+                           else e.stdout.decode("utf-8", "replace"))
+        if e.stderr:
+            out += "\n" + (e.stderr if isinstance(e.stderr, str)
+                           else e.stderr.decode("utf-8", "replace"))
         rc = -1
     except FileNotFoundError:
         out = "opencode executable not found in PATH"
@@ -622,7 +638,9 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             break
         used += elapsed
         outcome["total_agent_sec"] = round(used, 1)
-        parsed_ev = _parse_events(out) if rc == 0 else None
+        # rc≠0（含超时）也尝试解析事件流：session_id 能救则救（超时/
+        # 被杀的会话凭部分事件仍可续接；救不回由后续轮次自然兜底）
+        parsed_ev = _parse_events(out)
         if parsed_ev and parsed_ev.get("session_id"):
             session_id = parsed_ev["session_id"]
             outcome["session_id"] = session_id

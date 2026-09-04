@@ -4,12 +4,15 @@
 A. recipe 校验：必键 / 路径逃逸 / 形态字段 / group 正则
 B. 施工引擎：分组排序插入 / 追加 / replace / marker 幂等 / 文件缺失防崩
    / driver_home 外拒建 / journal 回滚精确还原
-C. 编排闭环：成功路径（manifest + mapping 批注）/ 失败回炉带证据 /
-   回炉耗尽 → 人工关口 / infra 日志缺失 → 抢占中止
+C. 编排闭环（session 化 2026-09-05）：成功路径（manifest + mapping 批注）/
+   失败回炉同会话续接（证据指针自读）/ 回炉耗尽 → 人工关口 /
+   infra 日志缺失 → 抢先中止 / 同轮质量续接（缺文件、校验缺陷）/
+   session 缺失与质量续接耗尽 → 静态 panic（RuntimeError）
 """
 
 import io
 import json
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -22,6 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from porter.bootstrap import recipe_apply, scaffold
 from porter.loop import events as EV
 from porter import log as LOG
+
+SESS = "ses_T1"
 
 
 def ok(name, cond, extra=""):
@@ -68,6 +73,61 @@ def _runner() -> dict:
                 "mechanism": "env",
                 "env": {"EXTRA_QEMU_ARGS": "-device <DEVICE_ARGS>"},
                 "example_args": {"net": "e1000"}}}
+
+
+def _ev_jsonl(text: str, session: str = SESS) -> str:
+    """opencode --format json 风格的最小事件流（含 sessionID）。"""
+    return (json.dumps({"type": "step_start", "sessionID": session}) + "\n"
+            + json.dumps({"type": "text", "sessionID": session,
+                          "part": {"type": "text", "text": text}}) + "\n")
+
+
+def _out_path_from(message: str) -> Path:
+    """从编排器消息里提取施工单输出路径（取最后一个 scaffold_rN.json
+    ——回炉消息中 prev_out 在前、写入目标在后）。锚定绝对路径开头，
+    免得把消息里的中文前缀卷进路径。"""
+    ms = re.findall(r"(/[\w.\-/]*scaffold_r\d+\.json)",
+                    message.replace("`", ""))
+    assert ms, f"消息未携带施工单输出路径: {message[:200]!r}"
+    return Path(ms[-1])
+
+
+class _AgentStub:
+    """_opencode_json_runner 桩：按序回放脚本并记录调用。
+
+    脚本元素：dict=把该 recipe（{"recipe":…} 包装）写入消息指定的输出
+    路径；None=不写文件（缺文件场景）；str=按原文写入（坏 JSON 场景）。
+    回复文本模仿真实 agent：写成功 =「已写入 <路径>」一行。
+    """
+
+    def __init__(self, script, session=SESS):
+        self.script = list(script)
+        self.it = iter(self.script)
+        self.calls = []
+
+    def __call__(self, message, workdir, log_stem, timeout_sec=0,
+                 session_id=None, model=None, task=None):
+        self.calls.append({"message": message, "session_id": session_id,
+                           "stem": str(log_stem)})
+        try:
+            step = next(self.it)
+        except StopIteration:
+            step = self.script[-1]
+        if step is not None:
+            p = _out_path_from(message)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(step if isinstance(step, str)
+                         else json.dumps({"recipe": step},
+                                         ensure_ascii=False),
+                         encoding="utf-8")
+            reply = f"已写入 {p}"
+        else:
+            reply = "（忘了写文件）"
+        return 0, _ev_jsonl(reply)
+
+    @property
+    def messages(self):
+        return [c["message"] for c in self.calls]
 
 
 class RecipeValidationTest(unittest.TestCase):
@@ -222,16 +282,13 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         EV.unbind()
         LOG.core._CTX.clear()
 
-    def _agent_outputs(self, recipes: list[dict]):
-        it = iter(recipes)
+    def _agent_stub(self, script, session=SESS):
+        """_opencode_json_runner 桩：按序回放脚本并记录调用。
 
-        def _fake(prompt, workdir, log_stem, timeout_sec=0, task=None):
-            try:
-                r = next(it)
-            except StopIteration:
-                r = recipes[-1]
-            return 0, json.dumps({"recipe": r})
-        return _fake
+        脚本元素：dict=把该 recipe 写入消息指定的输出路径（{"recipe":…}
+        包装）；None=不写文件（缺文件场景）；str=按原文写入（坏 JSON）。
+        """
+        return _AgentStub(script, session)
 
     def _patch_probes(self, verdicts: list[dict]):
         """verdicts: 每次 boot_and_log 返回 (ok, log, state)。"""
@@ -260,14 +317,17 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
 
     def test_c1_success(self):
         import porter.bootstrap.scaffold as SC
+        stub = _AgentStub([_recipe()])
         with self._patch_probes([(True, "skeleton probe hit\n", "stdout")]) \
                 as (pb, bl), \
-             mock.patch.object(SC.agent, "run_agent",
-                               side_effect=self._agent_outputs([_recipe()])), \
+             mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
              mock.patch("porter.common.vcs.commit_target") as ct, \
              redirect_stdout(io.StringIO()):
             rc = SC.run_scaffold(self.ws, self.os)
         ok("C1 成功路径 rc=0", rc == 0, rc)
+        ok("C1b 单次调用（无质量续接）", len(stub.calls) == 1)
+        ok("C1c agent 把 recipe 写进了下发路径",
+           (self.ws / "P2/reports/out/scaffold_r1.json").exists())
         m = scaffold.load_manifest(self.ws)
         ok("C2 manifest 落盘含宿舍/契约",
            m and m["dormitory"].endswith("src/probes.rs")
@@ -293,8 +353,8 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
                  "risk": "low", "confidence": "low", "domain": "x"}],
             "redesigns": []}), encoding="utf-8")
         with self._patch_probes([(True, "skeleton probe hit\n", "stdout")]), \
-                mock.patch.object(SC.agent, "run_agent",
-                                  side_effect=self._agent_outputs([_recipe()])), \
+                mock.patch.object(SC.agent, "_opencode_json_runner",
+                                  _AgentStub([_recipe()])), \
                 mock.patch("porter.common.vcs.commit_target"), \
                 redirect_stdout(io.StringIO()):
             rc = SC.run_scaffold(self.ws, self.os)
@@ -309,24 +369,33 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         g = next(x for x in ents if x["linux_api"] == "unrelated")
         ok("C10 gap 条目不动", g["confidence"] == "low")
 
-    def test_c3_rework_loop(self):
+    def test_c3_rework_loop_session(self):
+        """r1 特征 MISS → 同会话续接（证据指针自读）→ r2 收敛。"""
         import porter.bootstrap.scaffold as SC
         verdicts = [(True, "BOOTED\n", "stdout"),        # r1: 特征 MISS
                     (True, "skeleton probe hit\n", "stdout")]   # r2: pass
-        prompts = []
-
-        def _fake(prompt, workdir, log_stem, timeout_sec=0, task=None):
-            prompts.append(prompt)
-            return 0, json.dumps({"recipe": _recipe()})
+        stub = _AgentStub([_recipe(), _recipe()])
         with self._patch_probes(verdicts), \
-                mock.patch.object(SC.agent, "run_agent", side_effect=_fake), \
+                mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
                 mock.patch("porter.common.vcs.commit_target"), \
                 redirect_stdout(io.StringIO()):
             rc = SC.run_scaffold(self.ws, self.os)
         ok("C11 回炉后收敛 rc=0", rc == 0)
-        ok("C12 第 2 轮 prompt 携带失败证据",
-           len(prompts) == 2 and "验证失败证据" in prompts[1]
-           and "未命中" in prompts[1])
+        ok("C11b 会话贯穿：r2 复用 r1 的 session",
+           stub.calls[0]["session_id"] is None
+           and stub.calls[1]["session_id"] == SESS)
+        m2 = stub.messages[1]
+        ok("C12 r2 消息=证据指针增量（非全量重发）",
+           "SKILL: P2b" not in m2 and len(m2) < len(stub.messages[0]) // 2)
+        ok("C12b 完整验证结果指针下发（自读）",
+           "P2B_scaffold_verify_r1.log" in m2 and "**自行读取**" in m2)
+        ok("C12c 上轮/本轮施工单路径均在消息里",
+           "scaffold_r1.json" in m2 and "scaffold_r2.json" in m2)
+        ev_file = self.ws / "P2" / "logs" / "P2B_scaffold_verify_r1.log"
+        ok("C12d 验证结果完整落盘（含未命中特征）",
+           ev_file.exists() and "未命中" in ev_file.read_text())
+        ok("C12e r2 输出写的是新路径 scaffold_r2.json",
+           (self.ws / "P2/reports/out/scaffold_r2.json").exists())
         m = scaffold.load_manifest(self.ws)
         ok("C13 attempts 记录", m["attempts"] == 2)
 
@@ -337,8 +406,8 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         bad["acceptance_patterns"] = ["永远不命中"]
         verdicts = [(True, "skeleton probe hit\n", "stdout")] * 3
         with self._patch_probes(verdicts), \
-                mock.patch.object(SC.agent, "run_agent",
-                                  side_effect=self._agent_outputs([bad])), \
+                mock.patch.object(SC.agent, "_opencode_json_runner",
+                                  _AgentStub([bad, bad, bad])), \
                 mock.patch.object(gates, "panic") as gp, \
                 redirect_stdout(io.StringIO()):
             rc = SC.run_scaffold(self.ws, self.os)
@@ -351,13 +420,100 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         import porter.bootstrap.scaffold as SC
         from porter.loop import gates
         with self._patch_probes([(False, "", "missing")]), \
-                mock.patch.object(SC.agent, "run_agent",
-                                  side_effect=self._agent_outputs([_recipe()])), \
+                mock.patch.object(SC.agent, "_opencode_json_runner",
+                                  _AgentStub([_recipe()])), \
                 mock.patch.object(gates, "panic") as gp, \
                 redirect_stdout(io.StringIO()):
             rc = SC.run_scaffold(self.ws, self.os)
         ok("C16 日志缺失抢占中止 rc=3（不烧回炉轮次）",
            rc == 3 and gp.call_count == 0)
+
+    def test_c6_quality_continuation_missing_file(self):
+        """缺文件 → 同轮微增量续接（不烧轮次、同会话）→ 补写成功。"""
+        import porter.bootstrap.scaffold as SC
+        stub = _AgentStub([None, _recipe()])
+        with self._patch_probes([(True, "skeleton probe hit\n", "stdout")]), \
+                mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
+                mock.patch("porter.common.vcs.commit_target"), \
+                redirect_stdout(io.StringIO()):
+            rc = SC.run_scaffold(self.ws, self.os)
+        ok("C17 缺文件经一次续接修复 rc=0", rc == 0)
+        ok("C17b 续接消息=微增量（无 skill 重发）",
+           "SKILL: P2b" not in stub.messages[1]
+           and "施工单文件不可用" in stub.messages[1]
+           and "写完" in stub.messages[1])
+        ok("C17c 同会话续接", stub.calls[1]["session_id"] == SESS)
+        ok("C17d 仍在第 1 轮（未烧回炉轮次）",
+           "r1_R2" in stub.calls[1]["stem"])
+        m = scaffold.load_manifest(self.ws)
+        ok("C17e attempts=1", m["attempts"] == 1)
+
+    def test_c6b_stale_out_file_guard(self):
+        """重跑残留：上次的 scaffold_r1.json 不得被当成本次产物。"""
+        import porter.bootstrap.scaffold as SC
+        stale_dir = self.ws / "P2" / "reports" / "out"
+        stale_dir.mkdir(parents=True)
+        (stale_dir / "scaffold_r1.json").write_text(
+            json.dumps({"recipe": _recipe()}), encoding="utf-8")
+        stub = _AgentStub([None, _recipe()])      # 首发忘写 → 续接补写
+        with self._patch_probes([(True, "skeleton probe hit\n", "stdout")]), \
+                mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
+                mock.patch("porter.common.vcs.commit_target"), \
+                redirect_stdout(io.StringIO()):
+            rc = SC.run_scaffold(self.ws, self.os)
+        ok("C17f 残留文件不短路质量续接（首发前已清）",
+           rc == 0 and len(stub.calls) == 2)
+
+    def test_c7_quality_continuation_validate_defects(self):
+        """校验缺陷 → 同轮续接带缺陷清单 → 修复后同轮成功。"""
+        import porter.bootstrap.scaffold as SC
+        broken = _recipe()
+        del broken["probe_channel"]
+        stub = _AgentStub([broken, _recipe()])
+        with self._patch_probes([(True, "skeleton probe hit\n", "stdout")]), \
+                mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
+                mock.patch("porter.common.vcs.commit_target"), \
+                redirect_stdout(io.StringIO()):
+            rc = SC.run_scaffold(self.ws, self.os)
+        ok("C18 校验缺陷经同轮续接修复 rc=0", rc == 0)
+        ok("C18b 续接消息含缺陷清单与重写指示",
+           "校验缺陷" in stub.messages[1]
+           and "probe_channel" in stub.messages[1])
+        m = scaffold.load_manifest(self.ws)
+        ok("C18c attempts=1（缺陷不烧轮）", m["attempts"] == 1)
+
+    def test_c8_session_missing_static_panic(self):
+        """session_id 解析不到 = 静态 panic（RuntimeError，非人工关口）。"""
+        import porter.bootstrap.scaffold as SC
+        from porter.loop import gates
+        no_sess = json.dumps(
+            {"type": "text", "part": {"type": "text", "text": "没写文件"}})
+        with self._patch_probes([(True, "hit", "stdout")]), \
+                mock.patch.object(SC.agent, "_opencode_json_runner",
+                                  return_value=(0, no_sess + "\n")) as mr, \
+                mock.patch.object(gates, "panic") as gp, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError) as cm:
+                SC.run_scaffold(self.ws, self.os)
+        ok("C19 静态 panic：session id not found",
+           "session id not found" in str(cm.exception))
+        ok("C19b 不走人工关口", gp.call_count == 0)
+        ok("C19c 首次调用即 panic（不重试）", mr.call_count == 1)
+
+    def test_c9_quality_exhausted_static_panic(self):
+        """质量续接耗尽（AGENT_TRIES 次仍无文件）= 静态 panic。"""
+        import porter.bootstrap.scaffold as SC
+        from porter.loop import gates
+        stub = _AgentStub([None, None])
+        with self._patch_probes([(True, "hit", "stdout")]), \
+                mock.patch.object(SC.agent, "_opencode_json_runner", stub), \
+                mock.patch.object(gates, "panic") as gp, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(RuntimeError) as cm:
+                SC.run_scaffold(self.ws, self.os)
+        ok("C20 质量续接耗尽 panic", "施工单输出质量问题" in str(cm.exception))
+        ok("C20b 恰好 AGENT_TRIES 次调用", len(stub.calls) == 2)
+        ok("C20c 不走人工关口", gp.call_count == 0)
 
 
 if __name__ == "__main__":

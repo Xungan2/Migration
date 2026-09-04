@@ -178,3 +178,33 @@ skill 加"消费点核实"铁律（grep 启动脚本链给 file:line——消费
 入手点：runner 契约（validate_runner / P0 skill）→ probe/p6 注入
 路径 → 存量 runner 迁移。坑知识见
 knowledge/asterinas/pitfalls/asterinas-qemu-args-no-inject-hook.md。
+
+## 13. P2b 扣下待验结论（ANSI strip / 拓扑行）与解析器残留
+
+2026-09-05 session 化改造定案：以下两项加固**故意不编码**，留作新
+P2b 重跑实验（见 #14）的"自发现"观测点——
+
+1. `_verify` count 特征前先 `_strip_ansi`：cal 的 qemu.log 实证 919
+   行含 ANSI 转义码，特征串跨转义边界必假 MISS；但校准四轮未实际
+   触发（r4 原样 count 也命中）。重跑若 patterns=F 而特征肉眼在
+   日志里（考虑 ANSI 边界），回填此修（`porter/env/probe.py` 已有
+   `_strip_ansi`，一行接入）。
+2. 回炉证据的拓扑说明行（"设备经 runner 的 env 注入 boot 命令；若
+   怀疑设备未挂载，先 grep 启动脚本链核实该变量消费点（给
+   file:line），再查驱动侧"）：r2/r3 patterns=F 全败于注入接缝的
+   教训。重跑观测：agent 能否经 verify 证据文件自读，自行发现应去
+   查启动脚本链的注入接缝。
+
+另记：extract_json 嵌套围栏 bug（非贪婪围栏正则被 JSON 字符串内嵌
+``` 截短；r1_R1 实录 3930/12908 字符）仍存在于 ~20 处非 P2b 调用点
+（P3/P4/P5/P6/env/divide/routing/review/mapping）；P2b 已改文件
+输出免疫。修法已验证：```json 围栏后从 `{` 起做字符串感知花括号
+配平扫描（处理转义与字符串内花括号/反引号）。
+
+## 14. 新 P2b 重跑校准实验（session 化验证，下轮）
+
+上一轮校准是 session 化改造**之前**的形态，需对重写后的 P2b 重跑：
+fresh worktree 自基线 `36ae7fe10`（/tmp/opencode/cal/* 保留勿动），
+拷 cal/ws 的 project.json/runner.json 改路径，无人工干预跑
+`porter p2-scaffold`。判据：① 单 session 贯穿全部轮次（各段日志
+sessionID 一致）；② 三信号全绿；③ 自发现观测（见 #13 两项）。

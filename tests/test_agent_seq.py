@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -468,6 +469,49 @@ class TestRunAgentSeq(unittest.TestCase):
             out = agent.run_agent_seq("T", ws, stem, agent_budget_sec=0)
         # 预算 0：一段都不跑
         self.assertEqual(out["status"], "budget-exhausted")
+
+
+class TestTimeoutSalvage(unittest.TestCase):
+    """L12（2026-09-05）：超时/非零 rc 先抢救部分事件（续接地基）。"""
+
+    def _ws(self):
+        d = Path(tempfile.mkdtemp(dir=TMP))
+        return d, str(d / "SEQ")
+
+    def test_runner_timeout_salvages_partial_events(self):
+        ws = Path(tempfile.mkdtemp(dir=TMP))
+        partial = _ev("ses_TO", "写了一半")          # 超时前已产出的事件
+        exc = subprocess.TimeoutExpired(
+            cmd=["opencode"], timeout=5,
+            output=partial.encode("utf-8"), stderr=b"")
+        with mock.patch.object(agent.subprocess, "run", side_effect=exc):
+            rc, out = agent._opencode_json_runner(
+                "M", ws, str(ws / "TO"), timeout_sec=5)
+        self.assertEqual(rc, -1)
+        self.assertTrue(out.startswith("TIMEOUT"))    # 标记保留在首位
+        ev = agent._parse_events(out)
+        self.assertEqual((ev or {}).get("session_id"), "ses_TO")
+        self.assertIn("写了一半", (ev or {}).get("text", ""))
+        self.assertIn("ses_TO", Path(str(ws / "TO") + ".log")
+                      .read_text(encoding="utf-8"))   # 部分事件完整落盘
+
+    def test_seq_nonzero_rc_salvages_session(self):
+        ws, stem = self._ws()
+        fn, calls = _static_fn(True, "BUILD OK")
+        r = Runner([
+            (-1, "TIMEOUT\n" + _ev("ses_TO2", _phase_text(
+                {"phase": "run_static", "message": "编译"}))),
+            (0, _ev("ses_TO2", _phase_text({"phase": "done",
+                                            "files": ["a.rs"]}))),
+        ])
+        with mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq(
+                "T", ws, stem, static={"describe": "编译", "fn": fn},
+                gen_schema={"files": "list"}, agent_budget_sec=600)
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out["session_id"], "ses_TO2")   # rc=-1 也会话存活
+        self.assertEqual(r.calls[1]["session_id"], "ses_TO2")
+        self.assertEqual(len(calls), 1)
 
 
 class TestRunAgentStructured(unittest.TestCase):

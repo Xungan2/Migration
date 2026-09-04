@@ -166,6 +166,7 @@ max_tries=2) -> (rc, out, parsed)`：run_agent + done 协议 + schema
 | 级别 | 调用点 | 覆盖物 |
 |---|---|---|
 | ✅ 已接线（1） | P4 migrate 切片循环 | run_agent_seq（真实重迁 os-probe + P5 判据级 55/55 验证） |
+| ✅ 已接线（2026-09-05） | P2b scaffold（发现轮） | 直连 `_opencode_json_runner`：单 session 贯穿回炉轮（--session 续接只发证据指针）；recipe 走**文件输出**（agent 写裸 JSON 到编排器下发路径，消息只回"已写入"——免疫 stdout 提取的截断/围栏坑）；输出质量问题（缺文件/坏 JSON/校验缺陷）同轮微增量续接 ≤2 次不烧轮；session 解析不到 = 静态 panic（RuntimeError，非人工关口）；超时/非零 rc 先经部分事件抢救 session_id |
 | 🟢 原生场景（3） | P0 T3 环境提取（agent×探测交织）/ 探针 FAIL 回炉 / errorloop 求解轮（_prev_context 可被 session 续接替代；verdict 七动作词表需 gen_schema 适配） | run_agent_seq（各需把真实执行包成 static fn） |
 | 🟡 机械可换（9） | P0 T5 烟测反馈 / P1D 划分 / P1R 解环 / P2a 映射 / P3 增量映射+gap+判据（3 处）/ P4 fill / P5 补探 / P6 draft-l4 | run_agent_structured |
 | ⚪ 无必要（5） | P0 T2 类别 / P1S 策略 / routing 关口应答（2 处）/ CP5 分类 | 纯单发，老接口够用 |
