@@ -6,6 +6,10 @@
 - log_file：相对目标树根 或 宿主机绝对路径均可
 - 双信号判定：退出码 + 日志特征（缺一不可）
 - inject_device 双机制：env=合并环境变量；cmd=向 boot.cmd 追加 cmd_suffix
+- 驱动级判定（probe_boot_with_device 的 check_driver，仅 P0 调用方开启；
+  P2+ 共享方不传 → 语义不变）：inject_device.driver_success_pattern 须在
+  boot 日志命中、driver_fail_pattern 不得命中；均未配置 = unconfigured
+  （目标 OS 无该类别内置驱动的合法态，不改变 ok）
 - build 用 timeout_full_sec（保守——缓存状态未知）
 """
 
@@ -103,9 +107,15 @@ def store_mounted() -> str | None:
         return None
 
 
-def probe_boot(ws: Path, target_os: Path, runner: dict,
-               extra_env: dict | None = None, cmd_suffix: str | None = None,
-               label: str = "boot") -> dict:
+def _boot_once(ws: Path, target_os: Path, runner: dict,
+               extra_env: dict | None = None,
+               cmd_suffix: str | None = None,
+               label: str = "boot") -> tuple[dict, str]:
+    """跑一次 boot + 内核级三信号判定（rc + success_pattern + 无 panic）。
+
+    返回 (结果 dict, 去 ANSI 的 boot 日志全文)——日志供调用方做追加判定
+    （boot_with_device 的驱动级特征），judge 证据行在此落。
+    """
     bo = runner["boot"]
     cmd = bo["cmd"] + (f" {cmd_suffix}" if cmd_suffix else "")
     log_path, mode = _resolve_log(target_os, bo)
@@ -131,9 +141,9 @@ def probe_boot(ws: Path, target_os: Path, runner: dict,
     success = bo["success_pattern"] in bo_log
     panic = bo["panic_pattern"].lower() in bo_log.lower()
     log_state = mode if bo_log else f"{mode}:missing_or_empty"
-    ok = (rc == 0) and success and not panic
+    boot_ok = (rc == 0) and success and not panic
     try:                                    # judge 证据流（boot 双信号）
-        _log.judge(label, ok,
+        _log.judge(label, boot_ok,
                    detail=f"rc={rc} success_pattern="
                           f"{'hit' if success else 'MISS'} "
                           f"panic={'yes' if panic else 'no'} "
@@ -142,15 +152,74 @@ def probe_boot(ws: Path, target_os: Path, runner: dict,
                    rc=rc, phase=(store_mounted() or None))
     except Exception:
         pass
-    return {"item": label, "ok": ok,
-            "detail": (f"rc={rc} success_pattern={'hit' if success else 'MISS'} "
+    return {"item": label, "ok": boot_ok,
+            "detail": (f"rc={rc} success_pattern="
+                       f"{'hit' if success else 'MISS'} "
                        f"panic={'yes' if panic else 'no'} log={log_state}"),
-            "log_empty": not bo_log}
+            "log_empty": not bo_log}, bo_log
+
+
+def probe_boot(ws: Path, target_os: Path, runner: dict,
+               extra_env: dict | None = None, cmd_suffix: str | None = None,
+               label: str = "boot") -> dict:
+    return _boot_once(ws, target_os, runner, extra_env=extra_env,
+                      cmd_suffix=cmd_suffix, label=label)[0]
+
+
+def _judge_driver(r: dict, bo_log: str, runner: dict, label: str) -> dict:
+    """boot_with_device 的驱动级追加判定（check_driver=True 时调用）。
+
+    inject_device 两个可选特征（null/缺省 = 不判该项）：
+    - driver_success_pattern：注入设备后 boot 日志中必须命中的目标类别
+      驱动初始化特征（目标 OS 无该类别内置驱动时保持 null——P0 只验
+      "设备注入不破坏启动"，Asterinas 式目标的合法态）
+    - driver_fail_pattern：驱动初始化失败特征（命中即 FAIL）
+    judge 证据流独立一行（subject=<label>:driver）——与内核级行分开，
+    便于归因"内核没起来"还是"驱动没起来"。
+    """
+    inj = runner.get("inject_device") or {}
+    succ = inj.get("driver_success_pattern")
+    fail = inj.get("driver_fail_pattern")
+    if not succ and not fail:
+        r["driver_check"] = "unconfigured"
+        r["detail"] += " driver=unconfigured"
+        return r
+    parts: list[str] = []
+    drv_ok = True
+    if succ:
+        hit = succ in bo_log
+        drv_ok = drv_ok and hit
+        parts.append("hit" if hit else "MISS")
+    else:
+        parts.append("unset")
+    if fail:
+        bad = fail in bo_log
+        drv_ok = drv_ok and not bad
+        parts.append(f"fail={'hit' if bad else 'no-hit'}")
+    try:                                    # judge 证据流（驱动级）
+        _log.judge(f"{label}:driver", drv_ok,
+                   detail=f"driver_success_pattern={parts[0]} "
+                          f"driver_fail_pattern={parts[1] if fail else 'unset'}",
+                   intent="boot", rc=0 if drv_ok else 1,
+                   phase=(store_mounted() or None))
+    except Exception:
+        pass
+    r["ok"] = bool(r.get("ok")) and drv_ok
+    r["driver_check"] = " ".join(parts)
+    r["detail"] += f" driver={' '.join(parts)}"
+    return r
 
 
 def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
                            categories: list[str],
-                           label: str = "boot_with_device") -> dict:
+                           label: str = "boot_with_device",
+                           check_driver: bool = False) -> dict:
+    """设备注入 boot（内核三信号 + 可选驱动级判定）。
+
+    check_driver=True（P0 专用）：内核信号之后用同一次 boot 的日志追判
+    inject_device.driver_success_pattern / driver_fail_pattern（不额外多跑
+    一次 boot）。P2+/P3-P6 共享调用方不传 → 行为与旧版逐字节一致。
+    """
     inj = runner["inject_device"]
     examples = inj.get("example_args") or {}
     picked = next(((c, examples[c]) for c in categories if c in examples), None)
@@ -167,10 +236,14 @@ def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
     if mech == "env":
         extra = {k: v.replace("<DEVICE_ARGS>", dev_args)
                  for k, v in (inj.get("env") or {}).items()}
-        r = probe_boot(ws, target_os, runner, extra_env=extra, label=label)
+        r, bo_log = _boot_once(ws, target_os, runner, extra_env=extra,
+                               label=label)
     else:
         suffix = (inj.get("cmd_suffix") or "").replace("<DEVICE_ARGS>", dev_args)
-        r = probe_boot(ws, target_os, runner, cmd_suffix=suffix, label=label)
+        r, bo_log = _boot_once(ws, target_os, runner, cmd_suffix=suffix,
+                               label=label)
+    if check_driver:
+        r = _judge_driver(r, bo_log, runner, label)
     r.update({"device_category": cat, "device_args": dev_args, "mechanism": mech})
     return r
 
@@ -186,7 +259,8 @@ def probe_development(ws: Path, target_os: Path, runner: dict,
         results.append(probe_boot(p0, target_os, runner))
         if results[-1]["ok"]:
             results.append(probe_boot_with_device(p0, target_os, runner,
-                                                  categories))
+                                                  categories,
+                                                  check_driver=True))
     report = {"kind": "development", "results": results,
               "hard_gate_pass": all(r["ok"] for r in results)}
     (p0 / "reports" / "T3_development.json").write_text(

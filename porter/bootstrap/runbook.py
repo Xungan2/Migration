@@ -58,6 +58,9 @@ def _topic_md(target: str, topic: str, sec: dict) -> str:
                       _kv("example_args", json.dumps(
                           inj.get("example_args") or {},
                           ensure_ascii=False))]
+            for k in ("driver_success_pattern", "driver_fail_pattern"):
+                if inj.get(k):
+                    lines.append(_kv(k, inj[k]))
     if topic == "build" and sec.get("success_pattern"):
         lines.append(_kv("成功特征", sec["success_pattern"]))
     if sec.get("notes"):

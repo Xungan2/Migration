@@ -20,7 +20,8 @@
 
 1. **build**：在宿主机把目标 OS 完整构建出来的单条命令
 2. **boot**：非交互启动（自行退出）+ 日志落点 + 成败判定特征
-3. **inject_device**：让目标类别设备出现在模拟器中的注入方式
+3. **inject_device**：让目标类别设备出现在模拟器中的注入方式（+ 目标
+   类别**内置驱动**的启动判定特征——内核起来 ≠ 驱动起来，须分开验证）
 4. **unit_test**：目标 OS 的内核态单元测试机制（机制中立——ktest/
    KUnit 式/自研 harness/无机制都可能；命令、**最窄作用域**（如限定
    单个 crate/测试名）、输出位置、成败判定样式）。若无机制，mechanism
@@ -58,7 +59,9 @@
       "mechanism": "env",
       "env": { "SOME_VAR": "... <DEVICE_ARGS> ..." },
       "cmd_suffix": null,
-      "example_args": { "net": "..." }
+      "example_args": { "net": "..." },
+      "driver_success_pattern": "e1000 0000:00:03.0 eth0",
+      "driver_fail_pattern": null
     },
     "unit_test": {
       "mechanism": "...",
@@ -97,6 +100,13 @@
   （执行时被替换为实际设备参数）
 - `inject_device.example_args`：键为类别标签，值为该类别一个已知可工作的
   设备参数实例（至少覆盖目标类别）
+- `inject_device.driver_success_pattern`：设备注入后 boot 日志中标志目标
+  类别**驱动成功初始化**的逐字特征子串（如内核内置 e1000 的 probe 日志
+  行）。**必须从目标 OS 驱动源码核实原文**（printk/pr_info 格式串，记
+  file:line 证据，禁止凭记忆），并避开 ANSI 颜色码包裹的 token；目标
+  OS 无该类别内置驱动时填 null（此时 P0 只验证"设备注入不破坏启动"）
+- `inject_device.driver_fail_pattern`：可选——该驱动初始化**失败**的特征
+  子串（命中即 FAIL）；无明确失败特征填 null
 - `unit_test.mechanism`：机制短名（如 "cargo-osdk-test"）或 "none"
 - `unit_test.cmd`：跑一次测试的完整命令（含容器包裹，形态仿 build.cmd；
   默认给**最窄可复用作用域**——如限定驱动 crate 的包级过滤；**结果文本
@@ -124,6 +134,11 @@
 - FAIL 项：根据探测反馈换候选（资料中常被忽略的备选命令、CI 脚本里的
   真实用法、源码树构建文件的实际逻辑），或修正参数/特征串
 - 特征串 MISS：从探测日志摘录中找真正的成功/失败特征，替换你的猜测
+- `driver=MISS`（boot_with_device）：内核起来了但未见驱动初始化特征——
+  从探测日志（P0/logs/T3_boot_with_device.log 与 boot.log_file）找驱动
+  实际打印的初始化行替换 pattern；日志确实无驱动行则核证目标 OS 是否
+  真有该类别内置驱动、console 日志级别是否过滤了它（无内置驱动应填
+  null 并在 confidence_notes 声明）
 - 已 PASS 项不要动（除非你有更强证据）
 - 每轮结束时 missing 应单调不增；新发现的问题如实追加
 

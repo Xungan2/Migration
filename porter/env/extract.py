@@ -63,6 +63,11 @@ def validate_runner(r: dict) -> list[str]:
             defects.append(f"inject_device（mechanism={mech}）载体缺 <DEVICE_ARGS> 占位符")
     if not inj.get("example_args"):
         defects.append("inject_device.example_args 为空")
+    for f in ("driver_success_pattern", "driver_fail_pattern"):
+        v = inj.get(f)
+        if v is not None and not (isinstance(v, str) and v.strip()):
+            defects.append(f"inject_device.{f} 须为非空字符串或 null"
+                           "（null=目标 OS 无该类别内置驱动，不做驱动级判定）")
     return defects
 
 
@@ -139,7 +144,8 @@ def _run_probes(ws: Path, target_os: Path, runner: dict,
                                             label="boot"))
         if results[-1]["ok"]:
             results.append(probe_mod.probe_boot_with_device(
-                p0, target_os, runner, categories, label="boot_with_device"))
+                p0, target_os, runner, categories, label="boot_with_device",
+                check_driver=True))
     (p0 / "reports").mkdir(exist_ok=True)
     (p0 / "reports" / f"T3_probes_R{round_no}.json").write_text(
         json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
