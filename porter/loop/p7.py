@@ -164,10 +164,12 @@ def mapping_stats(ws: Path) -> dict:
         by_origin[e.get("origin", "?")] = by_origin.get(
             e.get("origin", "?"), 0) + 1
         by_risk[e.get("risk", "?")] = by_risk.get(e.get("risk", "?"), 0) + 1
+    sc = _load(ws / "P2" / "reports" / "scaffold_manifest.json") or {}
     return {"total": len(entries), "by_verdict": by_verdict,
             "by_origin": by_origin, "by_risk": by_risk,
             "redesigns": len(m.get("redesigns") or []),
-            "wiring": len(m.get("wiring") or [])}
+            "scaffold_edits": len(sc.get("edits_applied") or []),
+            "scaffold_attempts": sc.get("attempts")}
 
 
 def crate_stats(target_os: Path, driver: str) -> dict:
@@ -300,7 +302,8 @@ def _write_md(ws: Path, path: Path, r: dict) -> None:
         f"- 驱动 crate：{c['files']} 个 .rs / {c['lines']} 行 / "
         f"{c['ktests']} 个 #[ktest]",
         f"- 映射表：{m['total']} 条（{_fmt_counts(m['by_verdict'])}；换思路 "
-        f"{m['redesigns']} + 接线 {m['wiring']}）",
+        f"{m['redesigns']}；框架引导接线 {m['scaffold_edits']} 处"
+        f"（{m['scaffold_attempts']} 轮收敛）",
         f"- P6 判定：{'ALL GREEN（泊车除外）' if v.get('all_green_except_parked') else '—（未见执行态 health）'}",
         f"- L4：{r['l4']['total']} 条 = clear {r['l4']['clear']} + "
         f"park {r['l4']['park']}", "",

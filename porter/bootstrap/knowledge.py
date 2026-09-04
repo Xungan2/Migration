@@ -73,8 +73,9 @@ def _value_judgment(mapping: dict) -> tuple[dict, list[str]]:
         f"（net 驱动复用）/ 驱动特异 {stats['driver_specific']} 条",
         f"- 高置信 direct/adapt：{stats['high_confidence_direct_adapt']} 条"
         "（复用价值最高；消费侧仍须重核实）",
-        f"- 换思路裁定 {len(mapping.get('redesigns', []))} 条 + 接线清单 "
-        f"{len(mapping.get('wiring', []))} 条（目标 OS 侧通用，复用价值高）",
+        f"- 换思路裁定 {len(mapping.get('redesigns', []))} 条"
+        "（目标 OS 侧通用，复用价值高；接线习语经 P2b 框架引导验证后"
+        "另行走 scaffold-verified 知识候选）",
         "- 判定标准：桶分类为启发式清单；`not-migrated` 条目对同裁剪策略"
         "的后续迁移有参照价值；`gap` 条目在目标 OS 演进后需复核",
     ]

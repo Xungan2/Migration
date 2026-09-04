@@ -263,11 +263,11 @@ class TestProbes(unittest.TestCase):
                            {"name": "p_dead", "rust": "fn p_dead() {\n}",
                             "claim": "writel", "status": "downgraded"}]}
         sections = [("P3(modA)", reg1["probes"])]
-        p = PB.sync_probes_rs(tmp, "drv", sections)
+        p = PB.sync_probes(tmp, tmp, "drv", sections)
         text1 = p.read_text(encoding="utf-8")
         ok("active 进 run_all", "p_one();" in text1)
         ok("downgraded 剔除", "p_dead" not in text1)
-        p2 = PB.sync_probes_rs(tmp, "drv", sections)
+        p2 = PB.sync_probes(tmp, tmp, "drv", sections)
         ok("再生成确定性", p2.read_text(encoding="utf-8") == text1)
         # P2 预生成注册表：known_claims / collect_sections / marker
         ws = tmp / "ws"
@@ -382,10 +382,11 @@ class TestFixTargeting(unittest.TestCase):
             "fn p_two() { helper_a(); }\npub(crate) fn run_all() {\n"
             "    p_one();\n    p_two();\n}\n", encoding="utf-8")
         active = [{"name": "p_one"}, {"name": "p_two"}]
-        got = PB._probes_owning_lines(tmp, "drv", active, [3, 4, 8])
+        got = PB._probes_owning_lines(tmp, tmp, "drv", active, [3, 4, 8])
         ok("行号归属正确", got == {"p_one", "p_two"}, str(got))
         ok("路径缺失安全",
-           PB._probes_owning_lines(tmp / "nope", "drv", active, [3]) == set())
+           PB._probes_owning_lines(tmp, tmp / "nope", "drv", active,
+                                   [3]) == set())
         shutil.rmtree(tmp)
 
 

@@ -683,7 +683,7 @@ def _parse_device_ids(raw: str | None) -> list[str] | None:
 
 
 def cmd_p2(args) -> int:
-    """P2 全流程：引导映射（2a）→ 全局骨架（2b）→ 验收（build/boot+日志）。"""
+    """P2 全流程：引导映射（2a）→ 框架引导（2b，三信号自验证）→ 预生成（2c）。"""
     ws, driver_root, target_os = _p2_context(args)
     if driver_root is None:
         return 2
@@ -701,15 +701,23 @@ def cmd_p2_map(args) -> int:
     return p2a.run_map(ws, driver_root, target_os)
 
 
-def cmd_p2_skeleton(args) -> int:
-    """P2b 骨架生成（幂等；--device-ids 覆盖默认收敛）。"""
-    from porter.bootstrap import skeleton as p2b
+def cmd_p2_scaffold(args) -> int:
+    """P2b 框架引导（发现式骨架：方案→施工→三信号验证闭环；幂等）。
+
+    独立可跑：前置仅 project.json + runner.json（校准/新 OS 复用此形态）。
+    """
+    from porter.bootstrap import scaffold as p2b
     ws, _driver_root, target_os = _p2_context(args)
     if target_os is None:
         return 2
     _log_bind(ws, "p2")
-    return p2b.run_skeleton(ws, target_os,
+    return p2b.run_scaffold(ws, target_os,
                             device_ids=_parse_device_ids(args.device_ids))
+
+
+def cmd_p2_skeleton(args) -> int:
+    """别名 → cmd_p2_scaffold（旧名兼容一个版本）。"""
+    return cmd_p2_scaffold(args)
 
 
 def cmd_p2_probes(args) -> int:
@@ -1136,10 +1144,15 @@ def main(argv=None) -> int:
     p2m.add_argument("--output-dir", required=True, help="迁移工作区根目录")
     p2m.set_defaults(func=cmd_p2_map)
 
-    p2s = sub.add_parser("p2-skeleton", help="P2b 全局骨架生成（幂等）")
+    p2s = sub.add_parser("p2-scaffold", help="P2b 框架引导（发现式骨架：方案→施工→三信号验证闭环；幂等）")
     p2s.add_argument("--output-dir", required=True, help="迁移工作区根目录")
     _add_device_ids(p2s)
-    p2s.set_defaults(func=cmd_p2_skeleton)
+    p2s.set_defaults(func=cmd_p2_scaffold)
+
+    p2s_old = sub.add_parser("p2-skeleton", help=argparse.SUPPRESS)
+    p2s_old.add_argument("--output-dir", required=True, help=argparse.SUPPRESS)
+    _add_device_ids(p2s_old)
+    p2s_old.set_defaults(func=cmd_p2_skeleton)
 
     p2pr = sub.add_parser("p2-probes", help="P2c 探针预生成（幂等补跑；风险主张前置验证，P3 探针步骤退化为补新）")
     p2pr.add_argument("--output-dir", required=True, help="迁移工作区根目录")

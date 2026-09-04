@@ -35,25 +35,24 @@ macro/idiom/config）、`verdict`、`target`（目标 API 用法或方案描述�
 物理地址）、阻塞/睡眠限制）、`confidence`（high/medium/low，你对
 裁定的自评）、`domain`（任务数据给出的域键，原样照抄）。
 
-## 任务类型 B：换思路裁定 + 接线清单
+## 任务类型 B：换思路裁定
 
 对任务数据列出的每个 Linux 习语（无 1:1 对应物、塑造整体架构的），
-在目标树核实替代方案后输出 redesigns；并按任务数据要求核实骨架接线
-点输出 wiring。两类条目的 evidence 同样必须树内核实。
+在目标树核实替代方案后输出 redesigns。条目的 evidence 同样必须树内核实。
 
 ## 输出格式（必须，且只输出一个 JSON 块）
 
 **JSON 必须紧凑**：整个对象写成一行（或少数几行）。不要输出任何解释
 文字。截断 = 整批退回重做。
 
-类型 A：
+类型 A（示例仅为形态参考——具体 API 形态以目标树为准，不预设）：
 
 ```json
-{"entries":[{"linux_api":"pci_register_driver","kind":"function","verdict":"adapt","target":"PCI_BUS.lock().register_driver(Arc::new(MyDriver))","evidence":"kernel/core/comps/pci/src/bus.rs:57","notes":"注册即触发对已枚举设备的 probe","risk":"low","confidence":"high","domain":"linux/pci.h"}]}
+{"entries":[{"linux_api":"pci_register_driver","kind":"function","verdict":"adapt","target":"<目标树内等价注册用法>","evidence":"<树内相对路径>:<行>","notes":"注册即触发对已枚举设备的 probe","risk":"low","confidence":"high","domain":"linux/pci.h"}]}
 ```
 
 类型 B：
 
 ```json
-{"redesigns":[{"id":"napi-to-poll","linux_pattern":"NAPI 中断→屏蔽→轮询→重使能","target_approach":"...","rationale":"...","evidence":"...;...","origin":"P2a"}],"wiring":[{"item":"组件注册","target_api":"#[init_component]","evidence":"...","notes":"..."}]}
+{"redesigns":[{"id":"napi-to-poll","linux_pattern":"NAPI 中断→屏蔽→轮询→重使能","target_approach":"...","rationale":"...","evidence":"...;...","origin":"P2a"}]}
 ```

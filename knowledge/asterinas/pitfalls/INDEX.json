@@ -46,5 +46,21 @@
     "entry_file": "ktest-console-args.md",
     "added": "2026-09-01",
     "origin": "e2e-test-retry §14（~3h 破案）"
+  },
+  {
+    "id": "asterinas-component-link-gc",
+    "title": "组件 crate 无 host 显式引用则 init 钩子静默不执行（链接裁剪陷阱）",
+    "scope": ["asterinas", "component", "linking", "scaffold"],
+    "entry_file": "asterinas-component-link-gc.md",
+    "added": "2026-09-05",
+    "origin": "migration/e1000 PROGRESS.md 轮 7；P2b 框架引导发现的关键提示"
+  },
+  {
+    "id": "asterinas-qemu-args-no-inject-hook",
+    "title": "树内 qemu_args.sh 无设备注入钩子——env 注入需树侧配套 edit",
+    "scope": ["asterinas", "qemu", "scaffold", "device-injection"],
+    "entry_file": "asterinas-qemu-args-no-inject-hook.md",
+    "added": "2026-09-05",
+    "origin": "P2b 框架引导校准 r1-r3 全败根因（r4 补 edit 后 PASS）"
   }
 ]

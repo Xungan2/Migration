@@ -141,7 +141,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                 probe_lib.save_registry(reg_path, reg)
                 sections = probe_lib.collect_sections(ws, order, module,
                                                       reg_path, kind="P4")
-                probe_lib.sync_probes_rs(target_os, driver, sections)
+                probe_lib.sync_probes(ws, target_os, driver, sections)
             b = probe_mod.probe_build(ws / "P4", target_os, runner,
                                       label=f"P4_{module}_fill_build_{api}")
             boot_ok = False

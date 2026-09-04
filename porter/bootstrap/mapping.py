@@ -32,7 +32,9 @@ KINDS = {"function", "struct", "macro", "idiom", "config"}
 RISKS = {"none", "low", "med", "high"}
 CONFIDENCES = {"high", "medium", "low"}
 
-# 换思路裁定种子清单（§10 定案 1；agent 树内核实后落 redesigns）
+# 换思路裁定种子清单（§10 定案 1；agent 树内核实后落 redesigns）。
+# 注：骨架接线知识不走此处——P2b 框架引导以施工单+三信号验证的方式
+# 发现并沉淀（2026-09-05 定案，类型 B 的 wiring 输出退役）。
 REDESIGN_SEEDS = [
     "NAPI 模型（中断→屏蔽→轮询→重使能）",
     "qdisc 停队/发送背压",
@@ -41,14 +43,6 @@ REDESIGN_SEEDS = [
     "PCI 驱动注册与设备 ID 匹配形态",
     "DMA 一致性模型与 sync 时机",
     "中断处理上下文限制（probe vs softirq/中断）",
-]
-WIRING_ITEMS = [
-    "组件注册（init_component / Components.toml）",
-    "PCI 驱动注册 + 设备 ID 匹配",
-    "BAR/MMIO 基础访问",
-    "日志设施",
-    "ktest 注册",
-    "网络栈设备注册点",
 ]
 
 
@@ -145,8 +139,11 @@ def _validate_entries(raw: list, target_os: Path,
 def _load_mapping(p2: Path) -> dict:
     path = p2 / "mapping.json"
     if path.exists():
-        return json.loads(path.read_text(encoding="utf-8"))
-    return {"entries": [], "redesigns": [], "wiring": [],
+        m = json.loads(path.read_text(encoding="utf-8"))
+        m.setdefault("entries", [])
+        m.setdefault("redesigns", [])
+        return m
+    return {"entries": [], "redesigns": [],
             "meta": {"created": datetime.now().isoformat()}}
 
 
@@ -203,11 +200,6 @@ def _render_md(mapping: dict, p2: Path) -> None:
                      f"| {r.get('target_approach', '')} "
                      f"| {r.get('evidence', '') or '—'} "
                      f"| {r.get('rationale', '')} |")
-    lines += ["", "## 接线清单（骨架）", "",
-              "| 项 | 目标 API | 已核实 | 备注 |", "|---|---|---|---|"]
-    for w in mapping["wiring"]:
-        lines.append(f"| {w.get('item', '')} | {w.get('target_api', '')} "
-                     f"| {w.get('evidence', '') or '—'} | {w.get('notes', '')} |")
     lines.append("")
     (p2 / "mapping.md").write_text("\n".join(lines), encoding="utf-8")
 
@@ -241,15 +233,13 @@ def _prompt_map(skill: str, driver_root: Path, target_os: Path,
 
 def _prompt_redesign(skill: str, driver_root: Path, target_os: Path) -> str:
     seeds = "\n".join(f"- {s}" for s in REDESIGN_SEEDS)
-    wires = "\n".join(f"- {w}" for w in WIRING_ITEMS)
     return (f"{skill}\n\n---\n\n## 背景数据\n"
             f"- 驱动：Linux 源码参考树 `{driver_root}`（仅语义参考）\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录，"
             f"所有 evidence 必须在此树内核实\n"
-            f"\n## 任务（类型 B：换思路裁定 + 接线清单）\n"
+            f"\n## 任务（类型 B：换思路裁定）\n"
             f"对下列 Linux 习语逐项在目标树核实替代方案，输出 redesigns：\n"
             f"{seeds}\n"
-            f"并核实骨架接线点，输出 wiring（覆盖以下各项）：\n{wires}\n"
             f"输出一个紧凑 JSON 块。")
 
 
@@ -350,30 +340,24 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
                   f"{len(mapping['entries'])} 条）")
         _save(mapping, p2)      # 每批 checkpoint：中断重启不重付已完成批
 
-    # 类型 B：换思路 + 接线（幂等：已存在则跳过）
-    if not mapping["redesigns"] and not mapping["wiring"]:
-        _log.console_line("[porter] P2a: 换思路裁定 + 接线清单（类型 B）")
+    # 类型 B：换思路裁定（幂等：已存在则跳过；wiring 已退役——接线知识
+    # 由 P2b 框架引导的施工单+三信号验证承载）
+    if not mapping["redesigns"]:
+        _log.console_line("[porter] P2a: 换思路裁定（类型 B）")
         parsed = None
         for attempt in range(1, MAX_TRIES + 1):
             parsed = _call_agent(_prompt_redesign(skill, driver_root,
                                                   target_os),
                                  target_os,
                                  p2 / "logs" / f"P2A_redesign_R{attempt}")
-            if parsed and ("redesigns" in parsed or "wiring" in parsed):
+            if parsed and "redesigns" in parsed:
                 break
         if parsed:
             for r in parsed.get("redesigns") or []:
                 r.setdefault("origin", "P2a")
                 mapping["redesigns"].append(r)
-            for w in parsed.get("wiring") or []:
-                mapping["wiring"].append(w)
-            ev_errs = [f"{w.get('item')}: {p}" for w in mapping["wiring"]
-                       if (p := _check_evidence(w.get("evidence", ""),
-                                                target_os))]
-            if ev_errs:
-                _log.console_line(f"[porter] P2a: ⚠ wiring evidence 问题：{ev_errs}")
         else:
-            failed.append("(redesign/wiring)")
+            failed.append("(redesign)")
             _log.console_line("[porter] P2a: 类型 B 调用失败——登记，继续")
 
     _save(mapping, p2)
@@ -389,8 +373,7 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         f"- 生成时间: {datetime.now():%Y-%m-%d %H:%M}",
         f"- 条目总数: {len(ents)}（direct {vc['direct']} / adapt {vc['adapt']}"
         f" / gap {vc['gap']} / not-migrated {vc['not-migrated']}）",
-        f"- redesigns: {len(mapping['redesigns'])} 条；"
-        f"wiring: {len(mapping['wiring'])} 条",
+        f"- redesigns: {len(mapping['redesigns'])} 条",
         f"- 失败批: {failed or '无'}",
         f"- 高风险条目（探针候选，P3 消费）: {len(risky)}: "
         f"{', '.join(risky[:40]) or '—'}",

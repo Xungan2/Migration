@@ -161,3 +161,20 @@ P3×3/P4 fill/P5 补探/P6 draft-l4 → run_agent_structured）；
   可重试失败（如专用异常 → outcome 映射）。
 - 多操作菜单（statics 封闭集合+窄参数）已与用户设计定案、搁置待
   需求（docs/modules/agent.md §5 定案 9）。
+
+## 12. 设备注入的命令侧自包含（qemu_args.sh 案的最终解法方向）
+
+背景：2026-09-05 P2b 校准发现 asterinas 树内 qemu_args.sh 不消费
+EXTRA_QEMU_ARGS（接缝缺口，校准时靠手工补树侧钩子收尾——侵入目标树
+不理想）。用户定案方向：**不改目标树脚本，改 runner 命令侧**——
+boot.cmd 自带一个正确的启动脚本（或直接内联完整 QEMU 参数生成），
+绕开 qemu_args.sh，使设备注入自包含于命令、不依赖树侧钩子。
+
+连带设计题：inject_device 的 env 机制是否整体退役、改显式命令内注入
+（`<DEVICE_ARGS>` 文本替换 / 命令内 `VAR=` 赋值前缀）；P0-env-extract
+skill 加"消费点核实"铁律（grep 启动脚本链给 file:line——消费是静态
+可验证事实：变量名须出现在消费点代码，或存在动态枚举）。
+
+入手点：runner 契约（validate_runner / P0 skill）→ probe/p6 注入
+路径 → 存量 runner 迁移。坑知识见
+knowledge/asterinas/pitfalls/asterinas-qemu-args-no-inject-hook.md。

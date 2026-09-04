@@ -280,25 +280,31 @@ class TestWiringPoints(WiringBase):
 
     def test_p2_end_commits(self):
         from porter.bootstrap import run as p2run
-        from porter.bootstrap import mapping, skeleton, pregen
+        from porter.bootstrap import mapping, scaffold, pregen
         w = self.ws()
         (w / "runner.json").write_text("{}", encoding="utf-8")
         (w / "P1" / "modules").mkdir(parents=True)
         (w / "P1" / "modules" / "deps.json").write_text(
             '{"order": [], "edges": {}}', encoding="utf-8")
+        (w / "P2" / "reports").mkdir(parents=True)
+        (w / "P2" / "reports" / "scaffold_manifest.json").write_text(
+            json.dumps({"commit_paths": ["kernel/core/comps/e1000",
+                                         "Cargo.toml", "Components.toml"],
+                        "dormitory": "kernel/core/comps/e1000/src/probes.rs"}),
+            encoding="utf-8")
         with mock.patch.object(mapping, "run_map", return_value=0), \
-             mock.patch.object(skeleton, "run_skeleton", return_value=0), \
+             mock.patch.object(scaffold, "run_scaffold", return_value=0), \
              mock.patch.object(pregen, "run_pregen", return_value=0), \
-             mock.patch.object(p2run, "_acceptance", return_value=True), \
              mock.patch.object(vcs, "commit_target") as ct, \
              mock.patch.object(vcs, "commit_workspace") as cws:
             rc = p2run.run_p2(w, self._tmp / "drv", self._tmp / "os")
         ok("C11 run_p2 桩跑通过", rc == 0, rc)
         paths = ct.call_args.kwargs.get("paths") or []
-        ok("C12 P2 末目标树 commit（无 manifest → 接线面）",
+        ok("C12 P2 末目标树 commit（面 = scaffold manifest + 宿舍）",
            ct.call_count == 1
            and all(p in paths for p in ("Cargo.toml", "Components.toml",
-                                        "kernel/core/src/net/iface/init.rs")),
+                                        "kernel/core/comps/e1000",
+                                        "kernel/core/comps/e1000/src/probes.rs")),
            paths)
         ok("C13 P2 末工作区 commit",
            cws.call_args.args[1] == "P2: done")
