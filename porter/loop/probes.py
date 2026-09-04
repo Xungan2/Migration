@@ -132,10 +132,10 @@ def marker_of(registry_path: Path) -> str:
     return "?"
 
 
-def _scaffold_ctx(ws: Path, target_os: Path,
-                  driver: str) -> tuple[Path, str, dict]:
-    """(宿舍绝对路径, 语言, probe_channel 契约)——scaffold manifest 优先，
-    存量工作区回落旧 Asterinas 路径（2026-09-05 P2 重构兼容承诺）。"""
+def _scaffold_ctx(ws: Path, target_os: Path) -> tuple[Path, str, dict]:
+    """(宿舍绝对路径, 语言, probe_channel 契约)——唯一真值源 = scaffold
+    manifest（2026-09-05 定案：不留 Asterinas 约定路径回落；缺失 =
+    P2b 未成功完成的硬前置错误，静态 panic 而非猜测）。"""
     try:
         p = ws / "P2" / "reports" / "scaffold_manifest.json"
         m = json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
@@ -145,8 +145,9 @@ def _scaffold_ctx(ws: Path, target_os: Path,
         return (target_os / str(m["dormitory"]),
                 str(m.get("language") or "rust"),
                 m.get("probe_channel") or {})
-    return (target_os / "kernel" / "core" / "comps" / driver / "src"
-            / "probes.rs", "rust", {})
+    raise RuntimeError(
+        "probe 生命周期前置缺失：scaffold_manifest.json 不存在或无 "
+        f"dormitory 字段（{p}）——先跑 p2-scaffold（P2b）再执行探针流程")
 
 
 _PROBES_C_HEADER = '''// SPDX-License-Identifier: GPL-2.0
@@ -168,9 +169,9 @@ def sync_probes(ws: Path, target_os: Path, driver: str,
 
     sections = [(节标记, [注册表条目…]), …]（按调用方给的顺序；
     downgraded 条目自动跳过）。返回文件路径。语言/落点来自 scaffold
-    manifest（存量工作区回落旧 Asterinas 路径 + Rust 形态）。
+    manifest（唯一真值源；缺失 = 前置错误）。
     """
-    path, lang, _pc = _scaffold_ctx(ws, target_os, driver)
+    path, lang, _pc = _scaffold_ctx(ws, target_os)
     parts: list[str] = [_PROBES_RS_HEADER if lang != "c"
                         else _PROBES_C_HEADER]
     calls: list[str] = []
@@ -414,7 +415,7 @@ def _probes_owning_lines(ws: Path, target_os: Path, driver: str,
                          active: list[dict], lines: list[int]) -> set[str]:
     """编译错误行号 → 出错探针名集（按宿舍文件中 fn 定义区间归属；
     agent 私加的 helper fn 归属其上方最近的注册探针）。"""
-    dorm, _lang, _pc = _scaffold_ctx(ws, target_os, driver)
+    dorm, _lang, _pc = _scaffold_ctx(ws, target_os)
     if not dorm.exists():
         return set()
     rs = dorm.read_text(encoding="utf-8").splitlines()
@@ -450,7 +451,7 @@ def _fix_compile(ws: Path, boot_ws: Path, target_os: Path, label: str,
                 keep.append(ln)
                 m = re.search(r"--> \S*"
                               + re.escape(_scaffold_ctx(
-                                  ws, target_os, driver)[0].name)
+                                  ws, target_os)[0].name)
                               + r":(\d+):\d+", ln)
                 if m:
                     err_lines.append(int(m.group(1)))
@@ -579,7 +580,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     # ---- 生成（≤GEN_BATCH 条/批，每批 ≤2 次带反馈重试）----
     gen_failed = 0
     skill = agent.load_skill("P3-probe")
-    dorm, _lang, pc = _scaffold_ctx(ws, target_os, driver)
+    dorm, _lang, pc = _scaffold_ctx(ws, target_os)
     if pc:
         substrate = ("- 探针底座契约（P2b 框架引导三信号验证过的骨架）：\n"
                      f"  - 宿舍文件 `{dorm}`（探针会被 porter 追加进该文件"

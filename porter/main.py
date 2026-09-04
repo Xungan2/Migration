@@ -1151,11 +1151,14 @@ def main(argv=None) -> int:
     p1p.set_defaults(func=cmd_p1_promote)
 
     def _add_device_ids(sp):
-        sp.add_argument("--device-ids", default=None, metavar="V:D[,V:D...]",
-                        help="PCI 设备 ID 收敛清单（如 0x8086:0x100e；"
-                             "缺省用 P1 策略默认 QEMU 目标）")
+        sp.add_argument("--device-ids", default=None, metavar="KEY[,KEY...]",
+                        help="设备认领键清单（形态依总线：PCI 为 "
+                             "0x8086:0x100e、USB 为 VP、SPI 为 compatible "
+                             "字符串等；纯软件驱动无需提供）。未提供时"
+                             "发现 agent 从 runner 注入配置与目标树先例"
+                             "自行收敛——工具不猜测、无默认值")
 
-    p2all = sub.add_parser("p2", help="P2 全流程：引导映射 → 全局骨架 → 验收")
+    p2all = sub.add_parser("p2", help="P2 全流程：引导映射 → 框架引导（三信号自验证）→ 探针预生成")
     p2all.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0/p1）")
     _add_device_ids(p2all)
     p2all.set_defaults(func=cmd_p2)

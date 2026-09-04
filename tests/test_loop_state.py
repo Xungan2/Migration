@@ -258,6 +258,11 @@ class TestProbes(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="porter_probe_t_"))
         crate = tmp / "kernel/core/comps/drv/src"
         crate.mkdir(parents=True)
+        # 宿舍路径唯一真值源 = scaffold manifest（回落已退役，2026-09-05）
+        (tmp / "P2" / "reports").mkdir(parents=True)
+        (tmp / "P2" / "reports" / "scaffold_manifest.json").write_text(
+            json.dumps({"dormitory": "kernel/core/comps/drv/src/probes.rs",
+                        "language": "rust"}), encoding="utf-8")
         reg1 = {"probes": [{"name": "p_one", "rust": "fn p_one() {\n}",
                             "claim": "readl", "status": "active"},
                            {"name": "p_dead", "rust": "fn p_dead() {\n}",
@@ -329,6 +334,11 @@ class TestProbeLifecycle(unittest.TestCase):
         (ws / "P2").mkdir()
         (ws / "P2" / "mapping.json").write_text(json.dumps(mapping),
                                                 encoding="utf-8")
+        # 宿舍路径唯一真值源 = scaffold manifest（回落已退役，2026-09-05）
+        (ws / "P2" / "reports").mkdir(exist_ok=True)
+        (ws / "P2" / "reports" / "scaffold_manifest.json").write_text(
+            json.dumps({"dormitory": "kernel/core/comps/drv/src/probes.rs",
+                        "language": "rust"}), encoding="utf-8")
         gen_json = ('```json\n{"probes": ['
                     '{"name": "p_a", "rust": "fn p_a() { }", "claim": "api_a"},'
                     '{"name": "p_b", "rust": "fn p_b() { }", "claim": "api_b"}'
@@ -377,6 +387,11 @@ class TestFixTargeting(unittest.TestCase):
         tmp = Path(tempfile.mkdtemp(prefix="porter_fix_t_"))
         crate = tmp / "kernel/core/comps/drv/src"
         crate.mkdir(parents=True)
+        # 宿舍路径唯一真值源 = scaffold manifest（回落已退役，2026-09-05）
+        (tmp / "P2" / "reports").mkdir(parents=True)
+        (tmp / "P2" / "reports" / "scaffold_manifest.json").write_text(
+            json.dumps({"dormitory": "kernel/core/comps/drv/src/probes.rs",
+                        "language": "rust"}), encoding="utf-8")
         (crate / "probes.rs").write_text(
             "// header\nfn helper_a() { }\nfn p_one() { let _x = 1; }\n"
             "fn p_two() { helper_a(); }\npub(crate) fn run_all() {\n"

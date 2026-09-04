@@ -86,11 +86,12 @@ def run_pregen(ws: Path, target_os: Path,
         encoding="utf-8"))
     order = list(deps.get("order") or [])
     driver = driver_root.name
-    # 骨架须已落地（探针要住进宿舍；路径以 scaffold manifest 为准，
-    # 存量工作区回落旧路径）
+    # 骨架须已落地（探针要住进宿舍；路径唯一真值源 = scaffold manifest）
     from . import scaffold as _scaffold
-    if not _scaffold.dormitory_abs(ws, target_os, driver).exists():
-        _log.console_line(f"[porter] P2c: 骨架探针宿舍不存在（先跑 p2-scaffold）")
+    dorm = _scaffold.dormitory_abs(ws, target_os)
+    if dorm is None or not dorm.exists():
+        _log.console_line("[porter] P2c: 无 scaffold_manifest 或宿舍未建"
+                          "（先跑 p2-scaffold）")
         return 2
     (ws / "P2" / "logs").mkdir(parents=True, exist_ok=True)
 

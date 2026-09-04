@@ -208,3 +208,5 @@ fresh worktree 自基线 `36ae7fe10`（/tmp/opencode/cal/* 保留勿动），
 拷 cal/ws 的 project.json/runner.json 改路径，无人工干预跑
 `porter p2-scaffold`。判据：① 单 session 贯穿全部轮次（各段日志
 sessionID 一致）；② 三信号全绿；③ 自发现观测（见 #13 两项）。
+注意：DEFAULT_DEVICE_IDS 已退役（2026-09-05 去硬编码），重跑须显式
+`--device-ids 0x8086:0x100e`（QEMU -device e1000 = 82540EM）。

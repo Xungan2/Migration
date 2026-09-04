@@ -328,6 +328,12 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         ok("C1b 单次调用（无质量续接）", len(stub.calls) == 1)
         ok("C1c agent 把 recipe 写进了下发路径",
            (self.ws / "P2/reports/out/scaffold_r1.json").exists())
+        base_msg = stub.messages[0]
+        ok("C1d 任务数据含三信号禁令（验证归编排器）",
+           "三信号验证" in base_msg and "禁止你自己运行" in base_msg)
+        ok("C1e 无设备 ID 时给自行收敛引导（无 e1000 默认）",
+           "自行收敛" in base_msg and "0x8086" not in base_msg
+           and "纯软件驱动" in base_msg)
         m = scaffold.load_manifest(self.ws)
         ok("C2 manifest 落盘含宿舍/契约",
            m and m["dormitory"].endswith("src/probes.rs")
@@ -389,6 +395,8 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
            "SKILL: P2b" not in m2 and len(m2) < len(stub.messages[0]) // 2)
         ok("C12b 完整验证结果指针下发（自读）",
            "P2B_scaffold_verify_r1.log" in m2 and "**自行读取**" in m2)
+        ok("C12b2 回炉消息含禁自跑验证提醒",
+           "勿自行运行" in m2 and "只读证据" in m2)
         ok("C12c 上轮/本轮施工单路径均在消息里",
            "scaffold_r1.json" in m2 and "scaffold_r2.json" in m2)
         ev_file = self.ws / "P2" / "logs" / "P2B_scaffold_verify_r1.log"

@@ -36,9 +36,6 @@ from . import recipe_apply
 MAX_ROUNDS = 3               # 方案回炉有界轮数（仿 T3/探针生命周期）
 AGENT_TRIES = 2              # 每轮内 JSON 解析失败的即席重试
 AGENT_TIMEOUT_SEC = 1200     # 发现要读全树找先例，比映射批宽
-# 默认设备 ID：QEMU `-device e1000` = 82540EM（设备侧事实，非 OS 侧；
-# P1 策略收敛或 --device-ids 可覆盖）
-DEFAULT_DEVICE_IDS = ["0x8086:0x100e"]
 
 RECIPE_NAME = ("P2", "reports", "scaffold_recipe.json")
 MANIFEST_NAME = ("P2", "reports", "scaffold_manifest.json")
@@ -54,13 +51,17 @@ def load_manifest(ws: Path) -> dict | None:
         return None
 
 
-def dormitory_abs(ws: Path, target_os: Path, driver: str) -> Path:
-    """探针宿舍绝对路径：scaffold manifest 优先，存量工作区回落旧路径。"""
+def dormitory_abs(ws: Path, target_os: Path) -> Path | None:
+    """探针宿舍绝对路径（唯一真值源 = scaffold manifest 的 dormitory）。
+
+    manifest 缺失/无 dormitory → None：意味着 P2b 未成功完成——调用方
+    应以前置缺失处理（先跑 p2-scaffold），不猜测路径（2026-09-05 定案：
+    不留 Asterinas 约定路径回落）。
+    """
     m = load_manifest(ws)
     if m and m.get("dormitory"):
         return target_os / str(m["dormitory"])
-    return target_os / "kernel" / "core" / "comps" / driver / "src" \
-        / "probes.rs"
+    return None
 
 
 # ---------- prompt ----------
@@ -74,15 +75,28 @@ def _prompt(skill: str, target_os: Path, driver: str, categories: list[str],
               + "\n".join(f"  - {r.get('id', '?')}: "
                           f"{str(r.get('target_approach', ''))[:120]}"
                           for r in redesigns[:8]))
+    if ids:
+        dev_line = (f"- 设备匹配说明：{ids}（认领键，形态依总线而定——"
+                    "PCI 为 vendor:device；以其为准写骨架认领表）")
+    else:
+        dev_line = ("- 设备匹配说明：未提供——认领键依总线/框架而定"
+                    "（PCI vendor:device / USB idVendor:idProduct / "
+                    "SPI compatible 字符串等），从 runner 注入配置与"
+                    "目标树同类先例自行收敛；纯软件驱动（无硬件设备，"
+                    "如 device-mapper 类框架）可无设备注入，boot 验证"
+                    "退化为注册/认领特征")
     return (f"{skill}\n\n---\n\n## 任务数据\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
             f"- 驱动名：`{driver}`（Linux 侧仅作设备行为参考；"
             f"要搭的是**目标 OS 侧**的驱动框架）\n"
             f"- 设备类别：{categories or '未知'}\n"
-            f"- 设备 ID 收敛清单：{ids}\n"
+            f"{dev_line}\n"
             f"- **施工单输出路径：`{out_path}`**（完整 recipe 以裸 JSON "
             "写入该文件——禁 markdown 围栏；消息正文只回一行"
             "「已写入 <路径>」）\n"
+            f"- 三信号验证（编译/带设备 boot/单测）由编排器外部执行——"
+            "**禁止你自己运行**（含等价局部命令，见 SKILL 铁律 7）；"
+            "结果以文件指针发回，须自行读取\n"
             + (f"\n## 知识库目录（提示，非证据；条目内容自己去读）\n{hints}\n"
                if hints else "")
             + (f"{rd}\n" if rd else "")
@@ -158,7 +172,9 @@ def _rework_message(verdict: dict, verify_path: Path, prev_out: Path,
             f" ut={'skip' if ut is None else ('P' if ut[0] else 'F')}")
     return ("---\n\n## 上一轮三信号验证 FAIL——修订施工单\n\n"
             f"- 结论：{summ}\n"
-            f"- 完整验证结果与证据：`{verify_path}`（**自行读取**定位问题）\n"
+            f"- 完整验证结果与证据：`{verify_path}`（**自行读取**定位问题"
+            "——验证由编排器执行，勿自行运行编译/启动/单测，只读证据"
+            "文件与源码）\n"
             f"- 上轮施工单：`{prev_out}`（修订基础，勿改动）\n"
             f"- 修订后的**完整**施工单写入：`{new_out}`（裸 JSON，整文件重写）\n"
             "\n提醒：对已生效但内容有误的编辑必须换 marker/id"
@@ -332,7 +348,7 @@ def run_scaffold(ws: Path, target_os: Path,
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
     driver = Path(proj["linux_driver"]).name
     categories = proj.get("category") or []
-    ids = device_ids or DEFAULT_DEVICE_IDS
+    ids = device_ids or []           # 无默认：未提供时任务数据给引导行
     (p2 / "logs").mkdir(parents=True, exist_ok=True)
     (p2 / "reports").mkdir(parents=True, exist_ok=True)
 
