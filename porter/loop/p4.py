@@ -36,6 +36,9 @@ AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
 MAX_LINES_PER_SLICE = 900         # 单迁移调用输入上限（32K 教训）
 SAME_SIG_REPEAT = 2               # 同签名失败连发阈值（零进展 → panic）
+# split_long_op（run_agent_seq）总预算 = 老单段上限 ×2；编译（静态段）
+# 时长在预算之外——这正是拆分的目的（R1 整轮 TIMEOUT 的教训）
+SEQ_BUDGET_SEC = 2400
 
 
 def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict, dict] | None:
@@ -317,110 +320,129 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                   + f"\n## 任务\n把本切片重写为安全 Rust 进驱动 crate"
                   f"（目标文件命名贴近模块职责，如 {module.replace('-', '_')}"
                   f".rs；首片建 mod 声明于 lib.rs，后续片只追加内容）。"
-                  f"完成后输出紧凑 JSON 块。")
-        ok = False
-        err_info = ""
-        blocked = False
-        for attempt in range(1, MAX_TRIES + 1):
-            rc, out = agent.run_agent(
-                prompt + err_info, workdir=target_os,
-                log_stem=str(p4m / "logs" /
-                             f"MIG_{f.name}_{start}_R{attempt}"),
-                timeout_sec=AGENT_TIMEOUT_SEC)
-            parsed = agent.extract_json(out) if rc == 0 else None
-            if parsed and parsed.get("status") == "blocked":
-                blocked = True
-                hard_stop = True
-                _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} 被agent报"
-                      f" blocked：{str(parsed.get('notes', ''))[:200]}"
-                      "——立即停车（映射问题走人工，不烧 attempts）")
-                gates.panic(ws, {
-                    "id": f"p4.blocked.{module}.{f.name}-{start}",
-                    "kind": "decision", "gate_type": "decision",
-                    "phase": "P4", "module": module,
-                    "question": (
-                        f"切片 {f.name}:{start}-{end} 迁移中 agent 报映射"
-                        "不可用——P2/P3 的前提可能错了。请重新裁定该 API "
-                        "的映射与处置（改映射/换思路/加平台补丁）。"),
-                    "context_files": [f"P4/{module}/logs/",
-                                      "P2/mapping.md"],
-                    "answer_form": [
-                        {"field": "instruction", "type": "text",
-                         "required": True,
-                         "hint": "新的处置指令（将回写 gap_decisions 与 "
-                                 "mapping notes）"},
-                        {"field": "rationale", "type": "text",
-                         "required": True}],
-                    "applies_to": {"modules": [module]},
-                })
-                break
-            if parsed and parsed.get("status") == "done":
-                b = probe_mod.probe_build(ws / "P4", target_os, runner,
-                                          label=f"P4_{module}_"
-                                                f"{f.name}_{start}")
-                if b["ok"]:
-                    shrunk = _shrunk_files(before_lines,
-                                           _src_line_counts(crate))
-                    if shrunk:
-                        _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
-                              f"覆盖了既有内容（{'; '.join(shrunk)}）——判 FAIL")
-                        err_info = ("\n\n---\n\n## 上一次的严重问题（本片 "
-                                    "重做）\n你覆盖/删除了既有文件内容："
-                                    f"{'; '.join(shrunk)}。契约是**只追加、"
-                                    "不动别片已写内容**。请把被删内容完整"
-                                    "恢复后重做本片（重新输出完整 JSON）。")
-                        continue
-                    ok = True
-                    break
-                log_path = ws / "P4" / "logs" / f"P4_{module}_{f.name}_" \
-                                                f"{start}.log"
-                err_tail = ""
-                if log_path.exists():
-                    err_tail = "\n".join(
-                        log_path.read_text(encoding="utf-8",
-                                           errors="replace").splitlines()
-                        [-40:])
-                # 同签名零进展检测：编译错误尾 40 行哈希相同连发 →
-                # agent 在打转，提前 panic（不再烧满 MAX_TRIES）
-                sig = hashlib.sha1(
-                    err_tail.encode("utf-8")).hexdigest()[:12] \
-                    if err_tail.strip() else ""
-                if sig:
-                    sig_counts[sig] = sig_counts.get(sig, 0) + 1
-                    if sig_counts[sig] >= SAME_SIG_REPEAT:
-                        hard_stop = True
-                        _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
-                              f"同签名失败连发 {sig_counts[sig]} 次"
-                              "（零进展）——panic")
-                        gates.panic(ws, {
-                            "id": f"p4.slice_sig.{module}.{f.name}-{start}",
-                            "kind": "retry", "gate_type": "failure",
-                            "phase": "P4", "module": module, "step": "p4",
-                            "question": (
-                                f"切片 {f.name}:{start}-{end} 编译失败呈"
-                                "同签名连发（agent 修不动同一错误）——"
-                                "错误超出该切片的自动修复能力。日志尾"
-                                f"40 行见 {log_path}。"),
-                            "context_files": [str(log_path)],
-                            "answer_form": [
-                                {"field": "note", "type": "text",
-                                 "required": False,
-                                 "hint": "诊断笔记（人工定位的根因与修复）"}],
-                            "applies_to": {"modules": [module]},
-                        })
-                        break
-                # 上下文接续（docs/sub-systems/log.md §6）：构建日志尾 40 行经
-                # log.query.tail_block 注入下一轮 prompt；文件缺失/为空
-                # 时保留旧空围栏形态（不无声变化）
-                from ..log import query as _lq
-                err_info = (_lq.tail_block(
-                    ws, log_path, 40,
-                    "上一次构建失败（修复后重做本片）")
-                    or "\n\n---\n\n## 上一次构建失败（修复后重做本片）"
-                    "\n```\n\n```")
-            else:
-                err_info = ("\n\n---\n\n## 上一次输出的问题\n未报告完成。"
-                            "修复后重做本片，输出紧凑 JSON。")
+                  f"完成后按运行协议输出 JSON 块（status/files/notes）。")
+
+        # ---- split_long_op（2026-09-04 接线）：切片迁移的
+        # 「agent→build→拼 err_info 反馈重试」老序列整体替换为
+        # run_agent_seq 一次调用：agent 段同会话续接（opencode --session，
+        # 无信息损失）；编译=静态段（独立时长，不吃 agent 预算）；
+        # 行数守卫并入静态段（覆盖事故 → 静态失败 → 注入反馈修复）。
+        label = f"P4_{module}_{f.name}_{start}"
+        build_log_path = ws / "P4" / "logs" / f"{label}.log"
+
+        def _static(label=label, before_lines=before_lines) \
+                -> tuple[bool, str]:
+            b = probe_mod.probe_build(ws / "P4", target_os, runner,
+                                      label=label)
+            out_text = ""
+            if build_log_path.exists():
+                out_text = build_log_path.read_text(
+                    encoding="utf-8", errors="replace")
+            if not b["ok"]:
+                return False, out_text or f"build FAIL: {b.get('detail', '')}"
+            shrunk = _shrunk_files(before_lines, _src_line_counts(crate))
+            if shrunk:
+                return False, ("你覆盖/删除了既有文件内容："
+                               + "; ".join(shrunk)
+                               + "。契约是**只追加、不动别片已写内容**。"
+                               "请把被删内容完整恢复后重做本片。")
+            return True, out_text
+
+        seq = agent.run_agent_seq(
+            prompt, workdir=target_os,
+            log_stem=str(p4m / "logs" / f"MIG_{f.name}_{start}"),
+            static={"describe": "编译验证（docker 内 make kernel）",
+                    "fn": _static},
+            gen_schema={"status": "str", "files": "list", "notes": "str"},
+            final_static=True,          # done 后编排器强制编译（同旧语义）
+            agent_budget_sec=SEQ_BUDGET_SEC,
+            task={"phase": "p4", "module": module, "step": "migrate"})
+        parsed = seq.get("parsed") or {}
+        blocked = parsed.get("status") == "blocked"
+        ok = seq["status"] == "done" and not blocked
+        attempt = len(seq["rounds"]) or 1
+        sig = ""
+        if blocked:
+            hard_stop = True
+            _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} 被agent报"
+                  f" blocked：{str(parsed.get('notes', ''))[:200]}"
+                  "——立即停车（映射问题走人工，不烧 attempts）")
+            gates.panic(ws, {
+                "id": f"p4.blocked.{module}.{f.name}-{start}",
+                "kind": "decision", "gate_type": "decision",
+                "phase": "P4", "module": module,
+                "question": (
+                    f"切片 {f.name}:{start}-{end} 迁移中 agent 报映射"
+                    "不可用——P2/P3 的前提可能错了。请重新裁定该 API "
+                    "的映射与处置（改映射/换思路/加平台补丁）。"),
+                "context_files": [f"P4/{module}/logs/",
+                                  "P2/mapping.md"],
+                "answer_form": [
+                    {"field": "instruction", "type": "text",
+                     "required": True,
+                     "hint": "新的处置指令（将回写 gap_decisions 与 "
+                             "mapping notes）"},
+                    {"field": "rationale", "type": "text",
+                     "required": True}],
+                "applies_to": {"modules": [module]},
+            })
+        elif seq["status"] == "stalled":
+            # 段内防打转早退（连续 2 次同签名静态失败）：映射到既有
+            # 同签名 panic 关口（跨切片 sig_counts 亦保留，见下）
+            hard_stop = True
+            _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                  "静态段同签名失败连发（零进展）——panic")
+            gates.panic(ws, {
+                "id": f"p4.slice_sig.{module}.{f.name}-{start}",
+                "kind": "retry", "gate_type": "failure",
+                "phase": "P4", "module": module, "step": "p4",
+                "question": (
+                    f"切片 {f.name}:{start}-{end} 编译失败呈"
+                    "同签名连发（agent 修不动同一错误）——"
+                    "错误超出该切片的自动修复能力。日志尾"
+                    f"40 行见 {build_log_path}。"),
+                "context_files": [str(build_log_path)],
+                "answer_form": [
+                    {"field": "note", "type": "text",
+                     "required": False,
+                     "hint": "诊断笔记（人工定位的根因与修复）"}],
+                "applies_to": {"modules": [module]},
+            })
+        if not ok and not hard_stop:
+            # 跨切片同签名计数（老机制保留）：本片失败时读构建日志
+            # 尾 40 行计数，同签名跨切片连发 → panic（防换片打转）
+            err_tail = ""
+            if build_log_path.exists():
+                err_tail = "\n".join(
+                    build_log_path.read_text(encoding="utf-8",
+                                             errors="replace").splitlines()
+                    [-40:])
+            sig = hashlib.sha1(
+                err_tail.encode("utf-8")).hexdigest()[:12] \
+                if err_tail.strip() else ""
+            if sig:
+                sig_counts[sig] = sig_counts.get(sig, 0) + 1
+                if sig_counts[sig] >= SAME_SIG_REPEAT:
+                    hard_stop = True
+                    _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
+                          f"同签名失败跨切片连发 {sig_counts[sig]} 次"
+                          "（零进展）——panic")
+                    gates.panic(ws, {
+                        "id": f"p4.slice_sig.{module}.{f.name}-{start}",
+                        "kind": "retry", "gate_type": "failure",
+                        "phase": "P4", "module": module, "step": "p4",
+                        "question": (
+                            f"切片 {f.name}:{start}-{end} 编译失败呈"
+                            "同签名跨切片连发（agent 修不动同一错误）——"
+                            "错误超出该切片的自动修复能力。日志尾"
+                            f"40 行见 {build_log_path}。"),
+                        "context_files": [str(build_log_path)],
+                        "answer_form": [
+                            {"field": "note", "type": "text",
+                             "required": False,
+                             "hint": "诊断笔记（人工定位的根因与修复）"}],
+                        "applies_to": {"modules": [module]},
+                    })
         mig["slices"].append({"file": f.name, "start": start, "end": end,
                               "ok": ok, "blocked": blocked})
         mig_path.write_text(json.dumps(mig, ensure_ascii=False, indent=2),
@@ -432,10 +454,10 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                 from ..bootstrap import candidates as _cand
                 _cand.record_candidate(
                     ws, hook="slice-rework", ref=f"{module}/{f.name}:{start}",
-                    draft=f"切片 {f.name}:{start}-{end} 编译失败后第 "
-                          f"{attempt} 次重试成功（错误尾签名 {sig or '—'}）"
+                    draft=f"切片 {f.name}:{start}-{end} 失败后第 "
+                          f"{attempt} 段重试成功（错误尾签名 {sig or '—'}）"
                           f"——错误与修复对话见 P4/{module}/logs/"
-                          f"MIG_{f.name}_{start}_R1..R{attempt}",
+                          f"MIG_{f.name}_{start}_S1..S{attempt}",
                     evidence=[f"P4/{module}/logs/"],
                     suggested="pitfalls",
                     scope_extra={"module": module})
@@ -448,7 +470,8 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
         if not ok:
             failures.append({"file": f.name, "start": start, "end": end})
             _log.console_line(f"[porter] P4: 切片 {f.name}:{start}-{end} "
-                  f"{MAX_TRIES} 次仍失败——停止本模块后续切片")
+                  f"预算 {SEQ_BUDGET_SEC}s 内未完成（{seq['status']}）"
+                  "——停止本模块后续切片")
             break
     # hard_stop（blocked / 同签名连发）→ rc 3：立即停车不烧 attempts（H13）
     rc_out = 3 if hard_stop else (0 if not failures else 1)
