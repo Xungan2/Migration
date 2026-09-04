@@ -245,3 +245,13 @@ JSONL 事件流；② stdin + `--session` 续接记忆在；③ 消息 verbatim
 历史包袱备注：argv 路径除 `-` 开头被当选项（97f78ee 已修后仍存在的
 引号包裹问题）外，还会给含空格消息包字面 `"` 并转义内部引号——
 stdin 化后一并消除。
+
+**加条（2026-09-05 用户定案）：工具绑定 opencode 版本**。stdin 三检
+实证版本 = **1.18.28**（本机 `~/.opencode/bin/opencode`，`opencode
+--version` 可查）。设计方向：① runner 启动时核对 `opencode --version`
+与仓内钉住的版本串，不符 → 警告（或按需硬失败），提示跑 #15 三检；
+② runner env 注入 `OPENCODE_DISABLE_AUTOUPDATE=1`（官方文档化变量），
+防 opencode 自更新静默改变 stdin 行为——版本敏感依赖的最大风险就
+是"某天悄悄升级了没人知道"；③ 钉住的版本串随三检复验通过而更新
+（升级流程 = 装新版 → 三检 → 改钉住串 → 提交）。commit id 钉法仅在
+自编译场景可用，发行版以版本串为准。
