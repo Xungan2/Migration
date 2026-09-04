@@ -155,9 +155,12 @@ def cmd_p0(args) -> int:
             output_dir=ws,
             linux_driver=Path(args.linux_driver),
             target_os=Path(args.target_os),
-            materials=[Path(m) for m in (args.materials or [])])
+            materials=[Path(m) for m in (args.materials or [])],
+            intent_file=Path(args.intent_file) if args.intent_file else None)
     else:
         _log.console_line(f"[porter] T1: 复用已有工作区 {ws}")
+        if args.intent_file:
+            t1.backfill_intent(ws, proj_path, Path(args.intent_file))
 
     # 知识库物化（工作区就绪后；--kb 给出时。kb 进 <ws>/knowledge/，
     # 随工作区 git 统一入库——vcs 统一管理版）
@@ -174,6 +177,16 @@ def cmd_p0(args) -> int:
     linux_driver = Path(proj["linux_driver"])
     target_os = Path(proj["target_os"])
     materials = [Path(m) for m in proj.get("materials", [])]
+
+    # --t1-only：输入层即止（T1+kb+intent；--category 零 agent 记录），
+    # 跳过 VCS/T2/T3/T5——分步测试或手工准备最小工作区用
+    if getattr(args, "t1_only", False):
+        if args.category and not proj.get("category"):
+            t2.write_result(ws, t2.identify_category(linux_driver, ws,
+                                                     override=args.category))
+        _log.console_line("[porter] p0: --t1-only——输入层完成（工作区+goals.md"
+                          "+kb），跳过 T2/T3/T5；可直接跑 p1-strategy")
+        return 0
 
     # VCS 登记（目标树并行仓 baseline + porter 分支 + 工作区 git init；
     # 幂等，resume 只补齐分支）
@@ -1081,6 +1094,9 @@ def main(argv=None) -> int:
     p0.add_argument("--materials", action="append", default=None,
                     metavar="PATH",
                     help="开发者资料（可多次：文档/笔记/目录，形态不限；可省略）")
+    p0.add_argument("--intent-file", default=None, metavar="PATH",
+                    help="迁移意图文件（可选，自由 Markdown：要什么功能/哪些设备号/"
+                         "明确不迁什么；拷贝入工作区 goals.md，P1-strategy 消费）")
     p0.add_argument("--output-dir", required=True,
                     help="迁移工作区根目录（各阶段在内部建 P0/、P1/ 等子目录）")
     p0.add_argument("--category", default=None,
@@ -1098,6 +1114,10 @@ def main(argv=None) -> int:
                     help="目标 OS 仓的 porter 分支名（必须是全新分支；"
                          "缺省自动生成 porter/<驱动>-<日期>-<随机>；"
                          "工作区仓同分支名）")
+    p0.add_argument("--t1-only", action="store_true",
+                    help="仅执行输入层（T1 建工作区+goals.md+kb 物化；"
+                         "--category 如有则零 agent 记录类别），跳过 "
+                         "T2/T3/T5——用于分步测试或手工准备最小工作区")
     p0.set_defaults(func=cmd_p0)
 
     p1all = sub.add_parser("p1", help="P1 全流程：strategy → divide → resolve（直通，末尾汇总报告）")

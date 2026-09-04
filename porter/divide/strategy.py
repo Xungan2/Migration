@@ -318,6 +318,13 @@ def _task_data(ws: Path, proj: dict, driver_root: Path) -> str:
         "（其所在的 Linux 源码仓全部代码可读，不限于本驱动目录）",
         f"- 项目类别标签（参考）：{cats or '未知'}",
     ]
+    goals_path = ws / "goals.md"
+    if goals_path.exists():
+        lines += ["", "## 迁移意图（用户产品决策，最高优先级）", "",
+                  "以下 goals.md 全文表达用户本次迁移想要什么（功能子集/"
+                  "设备号/明确排除项）。范围闭包与裁剪决策必须遵循它，"
+                  "与你的其他分析结论冲突时以它为准：", "",
+                  goals_path.read_text(encoding="utf-8").strip(), ""]
     runner_path = ws / "runner.json"
     if runner_path.exists():
         r = json.loads(runner_path.read_text(encoding="utf-8"))
@@ -344,13 +351,21 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
 
     if out_path.exists():
         _log.console_line(f"[porter] P1S: 复用 {out_path}（如需重做请删除该文件）")
+        if (ws / "goals.md").exists() and not (p1 / "scope.json").exists():
+            _log.console_line("[porter] P1S: ⚠️ goals.md 在场而 P1/scope.json 缺失——"
+                  "删除 strategy.md 后重跑 p1-strategy 以重新生成双产物")
     else:
+        from ..common import scope as _scope
+        has_goals = (ws / "goals.md").exists()
         skill = agent.load_skill("P1-strategy")
         prompt = (f"{skill}\n\n---\n\n"
                   f"{_task_data(ws, proj, driver_root)}\n\n"
                   f"请按 SKILL 的「产出要求」完成分析。你的分析全文将被保存为"
                   f" strategy.md 呈给开发人员审阅——直接输出 Markdown 正文，"
-                  f"不要输出 JSON。")
+                  + ("并在正文末尾附一个 ```json 围栏块输出迁移范围闭包"
+                     "（schema 见 SKILL「迁移意图与范围闭包」节；编排器会"
+                     "分离落盘为 P1/scope.json）。"
+                     if has_goals else "不要输出 JSON。"))
 
         rc, out = agent.run_agent(prompt, workdir=p1,
                                   log_stem=str(p1 / "logs" / "P1S_R1"),
@@ -362,6 +377,17 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
         # 提取正文：去掉 ANSI 色码；若 agent 用 ```markdown 包裹则剥壳
         import re
         text = re.sub(r"\x1b\[[0-9;]*[a-zA-Z]", "", out).strip()
+
+        # scope JSON 块分离（意图在场时）：先抽块，剩余文本再走剥壳/截断
+        scope: dict | None = None
+        if has_goals:
+            text, scope = _scope.split_strategy_output(text)
+            if scope is None:
+                _log.console_line("[porter] P1S: goals.md 在场但输出缺 scope "
+                      "```json 块（schema 见 skills/P1-strategy.md）——"
+                      "请重跑 p1-strategy")
+                return 1
+
         m = re.search(r"```markdown\s*(.*?)```", text, re.DOTALL)
         if m and len(m.group(1)) > len(text) // 2:
             text = m.group(1).strip()
@@ -384,6 +410,10 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
                 _log.console_line(f"[porter] P1S: agent 已自行写入 strategy.md"
                       f"（{len(agent_written)} 字符），采用文件内容")
                 text = agent_written
+                if scope is not None:
+                    text, scope2 = _scope.split_strategy_output(text)
+                    if scope2 is not None:
+                        scope = scope2
 
         if len(text) < 400:
             _log.console_line(f"[porter] P1S: ⚠️ agent 输出过短（{len(text)} 字符），"
@@ -392,6 +422,16 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
 
         out_path.write_text(text, encoding="utf-8")
         _log.console_line(f"[porter] P1S: strategy.md 已生成（{len(text)} 字符）")
+
+        if scope is not None:
+            defects = _scope.validate_and_normalize(scope, driver_root, ws)
+            if defects:
+                _log.console_line(f"[porter] P1S: ⚠️ scope 校验缺陷"
+                      f"（strategy.md 已落盘，scope.json 未写——修正后可手工"
+                      f"放置或删 strategy.md 重跑）: {defects}")
+                return 1
+            for w in _scope.cross_check(_scope.scope_files(scope), driver_root):
+                _log.console_line(f"[porter] P1S: ⚠️ scope 交叉核对：{w}")
 
     # 样例库：草稿 + 知识报告（生成/复用两路径都执行；幂等）。
     # 失败仅警告，不阻断主产物。
