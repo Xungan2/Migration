@@ -93,15 +93,21 @@ def _domain_of(sym: str, hdr_idx: dict[str, list[str]],
     return sorted(pool, key=prio)[0]
 
 
-def _orig_driver_defs(driver_root: Path) -> set[str]:
+def _orig_driver_defs(driver_root: Path,
+                      scope: set[str] | None = None) -> set[str]:
     """原始（未切分）驱动源文件的定义集——用于区分"内部裁剪噪声"。
 
     P1 物理切分会 TRIM 裁剪块：定义被删、其他模块对它的引用还在。
     这类符号既非内核 API 也非待映射对象，须从外部面剔除：
     在原始树有定义而在模块切分中无定义 → internal_cut。
+
+    scope（范围声明层白名单）在场时只扫闭包内文件——否则同目录无关
+    体系（如 drivers/md 下的 RAID/bcache）符号会污染内部符号基线。
     """
     defs: set[str] = set()
     for f in sorted(driver_root.glob("*.c")) + sorted(driver_root.glob("*.h")):
+        if scope is not None and f.name not in scope:
+            continue
         d, _r, _p = scan_file(f)
         defs |= set(d)
     return defs
@@ -143,7 +149,8 @@ def run_extract(ws: Path, driver_root: Path) -> int:
 
     external = sorted(s for s in (all_refs - all_defs)
                       if s not in _KEYWORDS and len(s) >= 3)
-    orig_defs = _orig_driver_defs(driver_root)
+    from ..common import scope as _scope
+    orig_defs = _orig_driver_defs(driver_root, scope=_scope.load_scope(ws))
     kernel_root = _find_kernel_root(driver_root)
     if kernel_root is None:
         _log.console_line("[porter] P2a: 未定位到 Linux 内核树根"

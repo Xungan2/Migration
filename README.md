@@ -73,6 +73,10 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 #### P0 环境门禁
 
 - **T1 输入解析**（脚本）：校验驱动/目标树/资料，创建工作区+`project.json`。
+- **迁移意图**（可选，`--intent-file goals.md`）：用户产品决策（要什么功能/
+  哪些设备号/明确不要什么），拷贝入工作区 `goals.md`，project.json 记
+  `intent_file`/`intent_source`；resume 支持补拷/恢复/冲突不覆盖。
+  `--t1-only`：输入层即止（跳过 T2/T3/T5，零 agent）——分步测试用。
 - **T2 类别识别**（agent）：识别 pci/net/... 标签（选模板开关；`--category`
   人工覆盖；不可判定回落通用模板+警告）。
 - **T3 环境提取**（agent ×3 轮 × 探测交织）：从资料+目标树提取 `runner.json`
@@ -84,9 +88,13 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 #### P1 拆分策略
 
 - **p1-strategy**（agent）：读 Linux 源码产出自由 Markdown 策略分析
-  `strategy.md`，**人工审阅**（CP1 指纹绑定）。
-- **p1-divide**（agent × 按文件 + 脚本）：索引预建→按文件 agent 分配→
-  机械展开→物理抽取 → `P1/modules/<name>/`。
+  `strategy.md`，**人工审阅**（CP1 指纹绑定）。**意图在场时双产物**：
+  正文含「迁移范围」节（纳入/排除/逐条响应意图）+ 尾部 ```json 块分离
+  落盘 `P1/scope.json`（文件并集=迁移白名单，分组仅参考；文件必须全部
+  位于驱动目录内，公共头仅作参考）。
+- **p1-divide**（agent × 按文件 + 脚本）：索引预建→（scope 白名单过滤：
+  只分配闭包内文件）→按文件 agent 分配→机械展开→物理抽取 →
+  `P1/modules/<name>/`。
 - **p1-resolve**（agent × ≤3 轮 + 脚本）：符号扫描→依赖图→环检测→agent
   搬运循环（守恒校验）→拓扑序 `deps.json`（循环输入）。3 轮败 → exit 3。
 

@@ -770,7 +770,22 @@ def strategy_checkpoint(ws: Path) -> int:
         return 0        # 无策略文件 → 走既有缺文件路径（divide rc 2）
     mode = (load_config().get("review_gates") or {}).get(
         "strategy_review", "human")
-    sha = hashlib.sha256(st.read_bytes()).hexdigest()[:16]
+    # 范围声明层：scope.json 在场 → 指纹= strategy+scope 联合（编辑任一
+    # 即失效重批）；不在场 → 原公式（存量工作区零影响）
+    st_bytes = st.read_bytes()
+    sc_path = ws / "P1" / "scope.json"
+    if sc_path.exists():
+        sha = hashlib.sha256(
+            st_bytes + b"\n--scope--\n" + sc_path.read_bytes()
+        ).hexdigest()[:16]
+        scope_ctx = ["P1/scope.json"]
+        scope_note = ("；P1/scope.json 为迁移范围闭包白名单（文件并集生效，"
+                      "分组仅参考）——重点审 strategy「迁移范围」节与清单，"
+                      "可直接编辑 scope.json，编辑即需重批")
+    else:
+        sha = hashlib.sha256(st_bytes).hexdigest()[:16]
+        scope_ctx = []
+        scope_note = ""
     ledger = GateLedger(ws).load()
     gate = ledger.find("cp1.strategy")
     if mode != "human":
@@ -780,7 +795,7 @@ def strategy_checkpoint(ws: Path) -> int:
                 gate_type="decision", phase="P1", checkpoint="CP1",
                 blocking=False,
                 question="拆分策略审阅（strategy_review=agent 直通）",
-                context_files=["P1/strategy.md"],
+                context_files=["P1/strategy.md"] + scope_ctx,
                 answer_form=[{"field": "verdict", "type": "enum",
                               "options": ["approve", "veto"],
                               "required": True}],
@@ -797,8 +812,9 @@ def strategy_checkpoint(ws: Path) -> int:
             gate_type="decision", phase="P1", checkpoint="CP1",
             question=("拆分策略审阅（CP1）：模块划分与范围取舍是人的意图"
                       "（agent 无从知道 MVP 边界）。请读 P1/strategy.md，"
-                      "可编辑后批准——批准绑定文件指纹，改文件即需重批。"),
-            context_files=["P1/strategy.md"],
+                      "可编辑后批准——批准绑定文件指纹，改文件即需重批。"
+                      + scope_note),
+            context_files=["P1/strategy.md"] + scope_ctx,
             answer_form=[{"field": "verdict", "type": "enum",
                           "options": ["approve", "reject"],
                           "required": True}],

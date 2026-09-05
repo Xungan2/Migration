@@ -45,9 +45,17 @@ def _all_module_defs(p1_modules: Path) -> set[str]:
     return defs
 
 
-def _orig_defs(driver_root: Path) -> set[str]:
+def _orig_defs(driver_root: Path,
+               scope: set[str] | None = None) -> set[str]:
+    """原始驱动源文件定义集（噪音三分类基线）。
+
+    scope（范围声明层白名单）在场时只扫闭包内文件——否则同目录无关
+    体系符号会污染 internal_cut/orig_tails 判定。
+    """
     defs: set[str] = set()
     for f in sorted(driver_root.glob("*.c")) + sorted(driver_root.glob("*.h")):
+        if scope is not None and f.name not in scope:
+            continue
         d, _r, _p = scan_file(f)
         defs |= set(d)
     return defs
@@ -162,7 +170,8 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
         general |= fgen
 
     alldefs = _all_module_defs(ws / "P1" / "modules")
-    orig = _orig_defs(driver_root)
+    from ..common import scope as _scope
+    orig = _orig_defs(driver_root, scope=_scope.load_scope(ws))
     spine_path = ws / "P2" / "reports" / "spine_api.json"
     spine = (json.loads(spine_path.read_text(encoding="utf-8"))
              if spine_path.exists() else {})

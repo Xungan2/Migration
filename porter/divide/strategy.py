@@ -36,6 +36,7 @@ from pathlib import Path
 
 from ..bootstrap import kb
 from ..common import agent
+from ..common import scope as _scope
 from .. import log as _log
 
 # ---------- 样例库 ----------
@@ -173,8 +174,14 @@ def _draft_to_temp(ws: Path, proj: dict, driver_root: Path,
     """样例草稿入 temp 分区（幂等）。返回 {driver, linux_dir,
     linux_files, status, entry_file, value}。"""
     driver = Path(proj["linux_driver"]).name
-    files = sorted(p.name for p in driver_root.iterdir()
-                   if p.is_file() and p.suffix in (".c", ".h"))
+    # 知识指纹（范围声明层）：scope 在场时用白名单并集（子集工作区与
+    # 全目录工作区的样例去重指纹应不同），否则目录顶层文件集（原行为）
+    scope_set = _scope.load_scope(ws)
+    if scope_set is not None:
+        files = sorted(scope_set)
+    else:
+        files = sorted(p.name for p in driver_root.iterdir()
+                       if p.is_file() and p.suffix in (".c", ".h"))
     res = {"driver": driver, "linux_dir": proj.get("linux_driver", ""),
            "linux_files": files, "entry_file": None}
 
@@ -355,7 +362,6 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
             _log.console_line("[porter] P1S: ⚠️ goals.md 在场而 P1/scope.json 缺失——"
                   "删除 strategy.md 后重跑 p1-strategy 以重新生成双产物")
     else:
-        from ..common import scope as _scope
         has_goals = (ws / "goals.md").exists()
         skill = agent.load_skill("P1-strategy")
         prompt = (f"{skill}\n\n---\n\n"

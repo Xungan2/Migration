@@ -85,6 +85,19 @@ def run_divide(ws: Path, driver_root: Path) -> int:
     if not files:
         _log.console_line(f"[porter] P1D: {driver_root} 下未发现含定义的 *.c/*.h——失败")
         return 2
+    # scope 白名单（范围声明层）：意图工作区只分配闭包内文件
+    from ..common import scope as _scope
+    scope_set = _scope.load_scope(ws)
+    if scope_set is not None:
+        total = len(files)
+        files = [f for f in files if f in scope_set]
+        file_index = {k: v for k, v in file_index.items() if k in scope_set}
+        if not files:
+            _log.console_line("[porter] P1D: scope 白名单（P1/scope.json）内"
+                  "无含定义的可分配文件——失败")
+            return 2
+        _log.console_line(f"[porter] P1D: scope 白名单生效——{len(files)}/{total}"
+              " 个文件进入分配")
     (p1 / "logs").mkdir(parents=True, exist_ok=True)
     (p1 / "reports").mkdir(parents=True, exist_ok=True)
     _log.console_line(f"[porter] P1D: 索引预建完成——{len(files)} 个文件待分配："
