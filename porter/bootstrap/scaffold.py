@@ -33,7 +33,8 @@ from ..common import agent
 from .. import log as _log
 from . import recipe_apply
 
-MAX_ROUNDS = 3               # 方案回炉有界轮数（仿 T3/探针生命周期）
+MAX_ROUNDS = 10              # 方案回炉有界轮数（仿 T3/探针生命周期；
+                              #  零知识库 cold-start 实验放宽 3→10）
 AGENT_TRIES = 2              # 每轮内 JSON 解析失败的即席重试
 AGENT_TIMEOUT_SEC = 1200     # 发现要读全树找先例，比映射批宽
 
