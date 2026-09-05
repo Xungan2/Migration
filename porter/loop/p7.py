@@ -210,7 +210,8 @@ def run_p7(ws: Path) -> int:
         _log.console_line("[porter] P7: 缺 project.json（先跑 p0）")
         return 2
     target_os = Path(proj["target_os"])
-    driver = Path(proj["linux_driver"]).name
+    from ..common import scope as _scope
+    driver = _scope.driver_name_of(proj)
     (ws / "P7" / "reports").mkdir(parents=True, exist_ok=True)
 
     st = _load(ws / "loop_state.json") or {}

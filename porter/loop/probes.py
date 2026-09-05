@@ -572,7 +572,8 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     marker = marker_of(registry_path)
     kind = marker.split("(")[0]
     current_module = "(pregen)" if kind == "P2" else marker[len(kind) + 1:-1]
-    driver = Path(proj["linux_driver"]).name
+    from ..common import scope as _scope
+    driver = _scope.driver_name_of(proj)
     tag = "P2pregen" if kind == "P2" else f"{kind}{current_module}"
     reg = load_registry(registry_path)
     locs = usage_locs or {}

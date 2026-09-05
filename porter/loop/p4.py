@@ -28,9 +28,24 @@ from datetime import datetime
 from pathlib import Path
 
 from ..common import agent
+from ..common import scope as _scope
 from ..env import probe as probe_mod
 from . import gates, probes as probe_lib
 from .. import log as _log
+
+
+def _crate_rel(ws: Path, proj: dict) -> str:
+    """驱动 crate 落点（相对目标树）：scaffold_manifest.driver_home
+    （发现式，agent 决定的真值）优先；缺 manifest 回退
+    comps/<driver_name>（身份层：driver_name_of 解析）。"""
+    mp = ws / "P2" / "reports" / "scaffold_manifest.json"
+    try:
+        home = json.loads(mp.read_text(encoding="utf-8")).get("driver_home")
+        if home:
+            return str(home)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return f"kernel/core/comps/{_scope.driver_name_of(proj)}"
 
 AGENT_TIMEOUT_SEC = 1200          # 迁移调用较大，给足预算
 MAX_TRIES = 3                     # 每片迁移：首发 + 带反馈重试 2 次
@@ -76,7 +91,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                                         ensure_ascii=False, indent=2),
                              encoding="utf-8")
         return 0
-    driver = Path(proj["linux_driver"]).name
+    driver = _scope.driver_name_of(proj)
     skill = agent.load_skill("P4-gap-fill")
     from ..bootstrap import kb as _kb
     kb_dir = _kb.kb_dir_for(ws)
@@ -105,7 +120,7 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                           f"历史 fill 失败原因必须正面回应而非重蹈")
         except Exception:
             pass
-        crate = target_os / "kernel" / "core" / "comps" / driver
+        crate = target_os / _crate_rel(ws, proj)
         prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
                   f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
                   f"- 驱动 crate：`{crate}`\n"
@@ -265,8 +280,7 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
     mdir = ws / "P1" / "modules" / module
     files = sorted(f for f in mdir.glob("*") if f.suffix in (".c", ".h"))
     slices = _slices(files)
-    driver = Path(proj["linux_driver"]).name
-    crate = target_os / "kernel" / "core" / "comps" / driver
+    crate = target_os / _crate_rel(ws, proj)
     crit = json.loads((ws / "P3" / module / "reports" / "criteria.json")
                       .read_text(encoding="utf-8"))
     unit_tests = [c for c in crit["criteria"]
@@ -543,10 +557,9 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
         pass
     try:                                # vcs：P4(M) 末目标树 commit（fill+migrate）
         from ..common import vcs as _vcs
-        driver = Path(proj["linux_driver"]).name
         _vcs.commit_target(
             ws, f"P4[{module}]: fill + migrate",
-            paths=[f"kernel/core/comps/{driver}", *_vcs.TARGET_WIRING_FILES],
+            paths=[_crate_rel(ws, proj), *_vcs.TARGET_WIRING_FILES],
             phase="P4")
     except Exception:
         pass

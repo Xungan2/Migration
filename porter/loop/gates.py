@@ -824,6 +824,13 @@ def strategy_checkpoint(ws: Path) -> int:
             ans_v = (gate.get("answer") or {}).get("verdict", "").lower()
             if ans_v == "approve" and gate.get("artifact_sha") == sha:
                 resolve_applied(ledger, "cp1.strategy", "CP1 批准结清")
+                # 身份层：批准时同步 scope 的 driver_name → project.json
+                # （人工编辑 scope.json 改身份→指纹失效→重批→此处跟随）
+                try:
+                    from ..common import scope as _scope
+                    _scope.sync_driver_name(ws)
+                except Exception:
+                    pass
                 return 0
             # 指纹已变或曾 reject → 重新审
         if gate.get("status") in ("open", "invalid"):

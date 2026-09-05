@@ -143,7 +143,8 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
     _log.console_line("[porter] P5: runner.json 缺 unit_test 节——一次性补探回填（含"
           "第二道烟测）")
     skill = agent.load_skill("P0-unit-test-discover")
-    driver = Path(proj["linux_driver"]).name
+    from ..common import scope as _scope
+    driver = _scope.driver_name_of(proj)
     prompt = (f"{skill}\n\n---\n\n## 背景数据\n"
               f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
               f"- 驱动 crate：aster-{driver}（kernel/core/comps/{driver}）\n"

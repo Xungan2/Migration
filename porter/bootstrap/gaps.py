@@ -87,7 +87,8 @@ def draft_gaps(ws: Path) -> int:
     proj = _load(ws / "project.json")
     if not proj:
         return 1
-    ns = f"{Path(proj['linux_driver']).name}@{Path(proj['target_os']).name}"
+    from ..common import scope as _scope
+    ns = f"{_scope.driver_name_of(proj)}@{Path(proj['target_os']).name}"
     decisions = _collect_decisions(ws)
     fills = _fill_outcomes(ws)
 

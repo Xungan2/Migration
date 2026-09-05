@@ -21,6 +21,60 @@ from pathlib import Path
 
 from .. import log as _log
 
+_DRIVER_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+
+
+def driver_name_of(proj: dict) -> str:
+    """驱动身份统一解析：project.json 的 driver_name > 目录名回退。
+
+    身份层（driver_name 由 scope 提案、CP1 人审、同步入 project.json）
+    之前，目录名=身份是全工具隐含假设——一个目录住多套体系时（如
+    drivers/md 同时是 md-RAID 与 dm 的家）该假设破产。回退保持存量
+    工作区/独立校准跑兼容。
+    """
+    dn = proj.get("driver_name")
+    if isinstance(dn, str) and dn.strip():
+        return dn.strip()
+    return Path(proj["linux_driver"]).name
+
+
+def load_driver_name(ws: Path) -> str | None:
+    """读 <ws>/P1/scope.json 的 driver_name；无/缺 → None。"""
+    p = Path(ws) / "P1" / "scope.json"
+    if not p.exists():
+        return None
+    try:
+        dn = json.loads(p.read_text(encoding="utf-8")).get("driver_name")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return dn.strip() if isinstance(dn, str) and dn.strip() else None
+
+
+def sync_driver_name(ws: Path) -> bool:
+    """scope.json 的 driver_name → project.json（幂等）。
+
+    生成侧（run_strategy）与 CP1 放行侧各调一次——人工编辑 scope.json
+    改身份后经 CP1 重批，project.json 跟随。返回是否发生了写入。
+    """
+    ws = Path(ws)
+    dn = load_driver_name(ws)
+    if dn is None:
+        return False
+    proj_path = ws / "project.json"
+    try:
+        proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if proj.get("driver_name") == dn:
+        return False
+    proj["driver_name"] = dn
+    proj_path.write_text(
+        json.dumps(proj, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    _log.console_line(f"[porter] scope: driver_name 已同步入 project.json"
+                      f"（{dn}）")
+    return True
+
 
 def split_strategy_output(text: str) -> tuple[str, dict | None]:
     """分离策略正文与 scope JSON 块。
@@ -75,6 +129,13 @@ def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str
     if not isinstance(mods, list) or not mods:
         return ["modules 缺失或为空"]
 
+    dn = scope.get("driver_name")
+    if not isinstance(dn, str) or not dn.strip():
+        defects.append("driver_name 缺失或为空（驱动身份，从意图提炼——"
+                       "见 skills/P1-strategy.md「迁移意图与范围闭包」）")
+    elif not _DRIVER_NAME_RE.match(dn.strip()):
+        defects.append(f"driver_name 须为 kebab-case（小写字母数字与连字符）: {dn!r}")
+
     clean: list[dict] = []
     for i, mod in enumerate(mods):
         if not isinstance(mod, dict):
@@ -120,10 +181,14 @@ def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str
     clean.sort(key=lambda m: m["name"])
     out = ws / "P1" / "scope.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"modules": clean}, ensure_ascii=False, indent=2)
+    normalized = {"modules": clean}
+    if isinstance(dn, str) and _DRIVER_NAME_RE.match(dn.strip()):
+        normalized["driver_name"] = dn.strip()
+    out.write_text(json.dumps(normalized, ensure_ascii=False, indent=2)
                    + "\n", encoding="utf-8")
     _log.console_line(f"[porter] scope: 已规范化落盘 {out}"
-                      f"（{len(clean)} 模块 / {len(union)} 文件白名单）")
+                      f"（driver={normalized.get('driver_name')!r}"
+                      f" / {len(clean)} 模块 / {len(union)} 文件白名单）")
     return []
 
 

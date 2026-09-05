@@ -80,7 +80,8 @@ def _ledger_path(ws: Path) -> Path | None:
             encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    ns = f"{Path(proj['linux_driver']).name}@{Path(proj['target_os']).name}"
+    from ..common import scope as _scope
+    ns = f"{_scope.driver_name_of(proj)}@{Path(proj['target_os']).name}"
     return kb.temp_root(ws=ws) / "candidates" / f"{ns}.json"
 
 
@@ -138,7 +139,8 @@ def record_candidate(ws: Path, hook: str, ref: str, draft: str,
     try:
         proj = json.loads((Path(ws) / "project.json").read_text(
             encoding="utf-8"))
-        scope = {"driver": Path(proj["linux_driver"]).name,
+        from ..common import scope as _scope_mod
+        scope = {"driver": _scope_mod.driver_name_of(proj),
                  "target_os": Path(proj["target_os"]).name}
     except (OSError, json.JSONDecodeError, KeyError):
         scope = {}

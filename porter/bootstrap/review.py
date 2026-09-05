@@ -42,7 +42,8 @@ def _ns(ws: Path) -> str:
     try:
         proj = json.loads((Path(ws) / "project.json").read_text(
             encoding="utf-8"))
-        return (f"{Path(proj['linux_driver']).name}"
+        from ..common import scope as _scope
+        return (f"{_scope.driver_name_of(proj)}"
                 f"@{Path(proj['target_os']).name}")
     except (OSError, json.JSONDecodeError, KeyError):
         return "unknown@unknown"
