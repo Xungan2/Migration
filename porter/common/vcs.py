@@ -302,7 +302,8 @@ def hook_p0(ws: Path, target_os: Path, branch: str | None = None) -> int:
     repos = register_repos(target_os)
     name = None
     if repos:
-        driver = Path(proj.get("linux_driver") or "drv").name
+        driver = proj.get("driver_name") or Path(
+            proj.get("linux_driver") or "drv").name
         if branch:
             clash = [r["root"] for r in repos
                      if branch_exists(Path(r["root"]), branch)]

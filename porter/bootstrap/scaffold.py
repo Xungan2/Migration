@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..common import agent
+from ..common import scope as _scope
 from .. import log as _log
 from . import recipe_apply
 
@@ -276,7 +277,7 @@ def _annotate_mapping(ws: Path, recipe: dict) -> int:
 
 def _finalize(ws: Path, target_os: Path, proj: dict, recipe: dict,
               res: dict, verdict: dict, rnd: int) -> None:
-    driver = Path(proj["linux_driver"]).name
+    driver = _scope.driver_name_of(proj)
     home = str(recipe["driver_home"])
     pc = recipe.get("probe_channel") or {}
     commit_paths = sorted({home, *res["created"],
@@ -347,7 +348,11 @@ def run_scaffold(ws: Path, target_os: Path,
             return 2
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
     runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-    driver = Path(proj["linux_driver"]).name
+    driver = _scope.driver_name_of(proj)
+    if not proj.get("driver_name"):
+        _log.console_line(f"[porter] P2b: ⚠️ project.json 无 driver_name"
+              f"（无 scope 提案）——回退目录名 {driver!r} 作驱动身份；"
+              "一个目录住多套体系时身份可能错（建议走意图+scope 流程）")
     categories = proj.get("category") or []
     ids = device_ids or []           # 无默认：未提供时任务数据给引导行
     (p2 / "logs").mkdir(parents=True, exist_ok=True)

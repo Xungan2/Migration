@@ -86,7 +86,8 @@ class TestValidateLoad(unittest.TestCase):
         (self.ws / "P1").mkdir(parents=True)
 
     def _scope(self, files_by_mod):
-        return {"modules": [{"name": n, "function": n, "files": fs}
+        return {"driver_name": "test-drv",
+                "modules": [{"name": n, "function": n, "files": fs}
                             for n, fs in files_by_mod.items()]}
 
     def test_e_valid_normalized(self):

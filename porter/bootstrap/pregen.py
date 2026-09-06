@@ -85,7 +85,8 @@ def run_pregen(ws: Path, target_os: Path,
     deps = json.loads((ws / "P1" / "modules" / "deps.json").read_text(
         encoding="utf-8"))
     order = list(deps.get("order") or [])
-    driver = driver_root.name
+    from ..common import scope as _scope
+    driver = _scope.driver_name_of(proj)
     # 骨架须已落地（探针要住进宿舍；路径唯一真值源 = scaffold manifest）
     from . import scaffold as _scaffold
     dorm = _scaffold.dormitory_abs(ws, target_os)

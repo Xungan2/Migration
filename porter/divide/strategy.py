@@ -173,7 +173,7 @@ def _draft_to_temp(ws: Path, proj: dict, driver_root: Path,
                    strategy_path: Path) -> dict:
     """样例草稿入 temp 分区（幂等）。返回 {driver, linux_dir,
     linux_files, status, entry_file, value}。"""
-    driver = Path(proj["linux_driver"]).name
+    driver = _scope.driver_name_of(proj)
     # 知识指纹（范围声明层）：scope 在场时用白名单并集（子集工作区与
     # 全目录工作区的样例去重指纹应不同），否则目录顶层文件集（原行为）
     scope_set = _scope.load_scope(ws)
@@ -436,6 +436,7 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
                 _log.console_line(f"[porter] P1S: scope 校验缺陷"
                                   f"（未发布策略；重跑可重新生成）: {defects}")
                 return 1
+            _scope.sync_driver_name(ws)
             for w in _scope.cross_check(_scope.scope_files(scope), driver_root):
                 _log.console_line(f"[porter] P1S: ⚠️ scope 交叉核对：{w}")
         out_path.write_text(text, encoding="utf-8")

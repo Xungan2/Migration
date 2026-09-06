@@ -31,7 +31,8 @@ class FunctionalScopeTests(unittest.TestCase):
         return path
 
     def set_scope(self, files, features=None):
-        obj = {"modules": [{"name": "m", "files": files}]}
+        obj = {"driver_name": "test-driver",
+               "modules": [{"name": "m", "files": files}]}
         if features is not None:
             obj["features"] = features
         errors = scope.validate_and_normalize(obj, self.driver, self.ws)
@@ -92,7 +93,8 @@ class FunctionalScopeTests(unittest.TestCase):
         outside = self.root / "outside.c"
         outside.write_text("int outside;\n")
         (self.driver / "escape.c").symlink_to(outside)
-        obj = {"modules": [{"name": "m", "files": ["escape.c"]}]}
+        obj = {"driver_name": "test-driver",
+               "modules": [{"name": "m", "files": ["escape.c"]}]}
         self.assertTrue(scope.validate_and_normalize(obj, self.driver, self.ws))
 
     def test_nested_files_keep_distinct_identity(self):

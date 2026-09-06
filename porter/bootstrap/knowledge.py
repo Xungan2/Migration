@@ -90,7 +90,8 @@ def draft_knowledge(ws: Path) -> int:
     if not mapping_path.exists() or not md_path.exists():
         _log.console_line("[porter] P2 知识: 缺少 P2/mapping.json|md（先跑 p2-map）——跳过草稿")
         return 1
-    driver = Path(proj["linux_driver"]).name
+    from ..common import scope as _scope
+    driver = _scope.driver_name_of(proj)
     target = Path(proj["target_os"]).name
     stem = f"{driver}@{target}"
     mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
