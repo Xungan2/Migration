@@ -386,3 +386,50 @@ rebase 合流（T3 v2 提交重放于 f6eb2db 之上）时 v1 包装层随冲突
 `p0.environment.<cap>`，probe 终验 success/failure 各自落 handoff）；
 `extract_env` 在 execution 内注册 `p0.environment` 聚合 task；恢复并把
 上述测试重写到 v2 形态；解除 agent.md「接线范围」P0 句的"暂不发布"标注。
+
+## 20. inject 机制缺第三态（软件设备/设备常在）——dm-zero × asterinas T3 实验边界发现（2026-09-06）
+
+**背景**（migrations/dmzero-t3-e2e-20260906/ws-dmzero，tier① hints 首验）：
+dm-zero 是 device-mapper 软件 target，无 QEMU 硬件形态；"注入"语义 =
+建表参数经内核 cmdline 送达。现行 inject_device 契约只有 env/cmd 两机制、
+判定器只认"驱动特征差分 或 -device/model= 设备名 token"（extract.py
+`_injection_evidence_check`）——软件设备两个都物理不存在：
+- 树内无 dm 框架 → 无驱动 probe 行可锚（检索证据见 ws runner.md）；
+- 无 `-device` 型号 → 无设备名 token；
+- 内核不回显 cmdline（双轮归一化 0 差异实证）。
+
+**本次的替代判据（已冻结进 ws runner，供后续同类场景先例）**：两段式
+回执——`console=ttyS0` 注册参数消费锚（`Registered NS16550A as a console`
+注入轮 1 命中/裸轮 0，ttyS0 拓扑下该行才进 qemu.log）+ 载荷
+`dm-mod.create="<DEVICE_ARGS>"` 同通路送达（grub.cfg 宿主侧逐字可查，
+人工复核辅助）。**载荷回显被证明结构性不可能**（GRUB `;`/`&&` 元字符
+截断 multiboot2 行、内核 split_arg 引号保留 + 含点 token 静默丢弃、
+busybox 词法三重绑定——法医矩阵见 ws 的 inject.md 坑史与 answers.md）。
+
+**要做**：inject_device.mechanism 增第三态（如 `cmdline`/软件设备语义），
+把"注册参数消费锚 + 宿主侧载荷证据"标准化为合法判定路径，替代逐工作区
+人工裁决；树侧 cmdline 回显（dispatch init 一行 info!）作为上游提案另记。
+
+## 21. 探测执行器超时不杀进程组 → 孤儿 QEMU 抓锁毒害后续轮（2026-09-06 实录）
+
+**症状**：T3 inject 终验注入轮 600s 超时（rc=-1）后，`subprocess.run`
+只杀了直接子进程 bash，容器内 cargo-osdk+QEMU 幸存，抓着
+test/initramfs/build/ext2.img 写锁（`Failed to get "write" lock`）+
+hostfwd 端口；同 ws 随后所有 boot 探测两连败（rc=2、qemu.log 缺失），
+貌似回归实为环境毒害；`docker run --rm` 容器因内部 bash 未退而滞留
+（docker ps 可见，宿主 kill EPERM 须 docker kill）。
+
+**修法方向**：probe._run 用 `subprocess.Popen(start_new_session=True)` +
+`os.killpg`（或 `process_group=` 参数）在 TimeoutExpired 时杀整个进程组；
+或文档化"超时后检查 `docker ps` 清残留容器"为运行手册条目。
+
+## 22. handoff 层相对路径 materials 解析按 workspace 拼接（2026-09-06 实录）
+
+**症状**：`porter p0 --materials examples/asterinas-materials/x.md`（相对
+路径，cwd=工具仓根）在 handoff 预检报 `not ready — required material is
+missing: <ws>/examples/...`（handoff/core.py `_material_ref`：非绝对路径
+一律 `self.workspace / path`）。f6eb2db 合流后首次暴露；改绝对路径即绕过。
+
+**修法方向**：CLI 入口统一 `Path(...).resolve()` 后再交 handoff（main.py
+materials/intent_file/hints_dir 全套），或 `_material_ref` 对相对路径先按
+进程 cwd 解析、不存在再按 workspace。

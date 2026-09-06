@@ -555,6 +555,25 @@ probe 日志物理进不了 qemu.log 的坑）→ 4 个真产品决策问题 →
 test_env_probe 27 例（全量 294 绿）。agent.py/probe.py/gate.py/
 main.py 接线外的全部消费方零改动（消费侧按 TODO #17 分批）。
 
+**增补（2026-09-06 晚，dm-zero × asterinas tier① 首验轮）**：
+① 子集等值机械检查退役（用户定案）——`_frag_quality_defects`
+尾块比对与 `_assemble_and_freeze` 子集终检删除，"md 是节 JSON 的
+扩充"降为 skill 软性写作指引（F33 改"无尾块也能收敛"）；②
+`--hints-dir` 首次 live 验证通过：四能力 S1 prompt 全部注入
+（marker/内容双验），OS 级知识复用场景（build 2 轮/boot 2 轮/ut
+2 轮 vs t3v2 基线 2/2/4，agent 时 135/246/445s vs 272/825/849s）；
+③ inject 首次撞上"机制缺第三态"边界（TODO #20）：软件设备无硬件
+注入形态 + 树无 dm 框架 + 内核不回显 cmdline，经两轮人工环定案
+"两段式回执"（console=ttyS0 消费锚 + 宿主侧 grub.cfg 载荷证据），
+载荷回显被三重绑定（GRUB 元字符/kernel split_arg 引号保留+点丢弃/
+busybox 词法）证明结构性不可能——法医证据链存
+migrations/dmzero-t3-e2e-20260906/ws-dmzero（runner.md 坑史 +
+answers.md 两答 + dev 法医 6 轮日志 /tmp/opencode/dmzero-t3/）；④
+两缺陷实录进 TODO #21（probe 超时不杀进程组→孤儿 QEMU 抓锁）与
+#22（handoff 相对路径 materials 按 workspace 拼接）。合流注：同日
+f6eb2db（handoffs/pruning）rebase 合入，T3 v2↔handoff 接线记
+TODO #19。
+
 ---
 
 ## 5. 现状：每个文件做什么（文件级实现地图）
