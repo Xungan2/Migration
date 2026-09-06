@@ -165,8 +165,9 @@ schema/业务 validator 校验。每个 provider 重试各有独立 child execut
 | prompt 块 | `_seq_preamble`（禁令+协议）/ `_static_pointer_block`（指针）/ `_static_result_block`（降级尾块）/ `_transcript_block`（兜底轮次） |
 | 主入口 | `run_agent_seq` / `run_agent_structured` |
 
-**接线范围**：P0 环境提取把 schema、runner 校验和三项 probe 放在同一
-provider-round child 内；P1 按源文件划分、解环与 pruning 单次方案独立记录；
+**接线范围**：P0 T3 已由 v2 四 session 直连流水线取代（文件即信号，不走
+phase 协议，暂不发布 handoff child——接线待定案，见 TODO #19 与下表
+T3 v2 行）；P1 按源文件划分、解环与 pruning 单次方案独立记录；
 P2 mapping 按稳定符号集 ID 串接，scaffold/probe 也发布各自 handoff；P3
 mapping、gap、criteria、probe/rejudge/fix 都是可查询 child；P4 fill API 和
 每个源码切片独立记录，切片内部由 `run_agent_seq` 共享一次 execution；P5

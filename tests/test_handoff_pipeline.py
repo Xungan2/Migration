@@ -340,6 +340,10 @@ class HandoffPipelineTest(unittest.TestCase):
                                  for record in second_records}))
         self.assertEqual("success", self.manager.inspect(phase_task)[0]["status"])
 
+    @unittest.skip("T3 v2 (four-session direct-connect pipeline; 2026-09-06 "
+                   "rebase onto f6eb2db) retired the v1 R1-R4 agent rounds "
+                   "this test drives. Re-wire onto v2 sessions once T3 "
+                   "publishes handoff records (TODO #19).")
     def test_environment_probe_failure_becomes_input_to_fresh_agent_session(self):
         target_os = self.root / "target-os"
         target_os.mkdir()

@@ -79,9 +79,10 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
   `--t1-only`：输入层即止（跳过 T2/T3/T5，零 agent）——分步测试用。
 - **T2 类别识别**（agent）：识别 pci/net/... 标签（选模板开关；`--category`
   人工覆盖；不可判定回落通用模板+警告）。
-- **T3 环境提取**（agent ×3 轮 × 探测交织）：从资料+目标树提取 `runner.json`
-  （build/boot/unit_test/inject_device 四项可执行能力）。探测为金标准——
-  三项双信号全 PASS 才过。3 轮未成 → exit 3（answers.md → R4 答案整合轮）。
+- **T3 环境提取 v2**（四 session 直连流水线 build→boot→inject→unit_test）：
+  从资料+目标树提取 `runner.json`+`runner.md`（各节 JSON 的扩充手册）。
+  每能力终验 probe 双信号 PASS 才过；资源耗尽 → exit 3（agent 总结 →
+  p0.t3.\<cap\> 关口 → 人答 → 新 session 种子续跑）。
 - **T5 门禁**（脚本）：project.json 完整 + runner 校验 + T3 三项全 PASS +
   unit_test 烟测。
 

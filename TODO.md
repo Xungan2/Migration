@@ -363,3 +363,26 @@ ANSI 假 MISS 只是"清理未前置"问题类的**一个实例**，不是问题
 OS 实例，中立铁律）。**上表消费侧清单不受影响，照旧分批。**
 
 **入手点**：消费侧清单逐项分批。
+
+## 19. T3 v2 ↔ handoff 框架接线（2026-09-06 f6eb2db 合流遗留）
+
+**背景**：f6eb2db（durable handoffs）把 v1 T3 的 R1-R4 轮包成
+`p0.environment.agent` handoff task（`_agent_attempt`）+ `p0.environment`
+聚合 task（`extract_env` wrapper）。同期的 T3 v2（四 session 直连流水线，
+定案"文件即信号、不走 phase 协议"，见 #11/#17）退役了全部 v1 路径；
+rebase 合流（T3 v2 提交重放于 f6eb2db 之上）时 v1 包装层随冲突解整体
+让位，v2 暂不发布任何 handoff 记录。
+
+**现状**：
+- 传统 CLI（`porter p0`）路径 v2 裸跑，上游各包装为条件式（execution
+  在场才生效）空转，无碍；`porter/common/agent.py` 的
+  `prepare_agent_prompt`/`record_provider` 对 v2 直连 session 同理空转。
+- handoff-aware CLI 下 P0 execution 内 v2 不产 child task 记录——P0 阶段
+  的 handoff 依赖链/断点复用对 T3 失明。
+- `test_handoff_pipeline.py::test_environment_probe_failure_becomes_input_to_fresh_agent_session`
+  已 skip（驱动的是 v1 轮次协议；skip 理由即指向本条）。
+
+**要做**（接线定案后）：v2 四 session 发布 per-cap task（如
+`p0.environment.<cap>`，probe 终验 success/failure 各自落 handoff）；
+`extract_env` 在 execution 内注册 `p0.environment` 聚合 task；恢复并把
+上述测试重写到 v2 形态；解除 agent.md「接线范围」P0 句的"暂不发布"标注。
