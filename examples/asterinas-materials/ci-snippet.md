@@ -14,3 +14,6 @@ jobs 里编译那步实际执行的就是：
 
 CI 上偶发挂：QEMU 随机 hostfwd 端口撞上宿主机已占端口，qemu.log 空且
 make 报 Error——重跑就好，是瞬时环境故障不是代码问题。
+
+编译日志里 grub-rescue 的 locale warning（cannot open directory
+.../share/locale）不是失败，成功构建照样有这行。

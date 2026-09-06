@@ -167,3 +167,45 @@ def backfill_intent(ws: Path, proj_path: Path, intent_file: Path) -> None:
     _log.console_line(
         "[porter] T1: ⚠️ 工作区已有 goals.md 且与传入文件不同——不覆盖"
         "（如需更换意图请手工编辑 goals.md 后重跑）")
+
+
+def stage_hints(ws: Path, proj_path: Path, hints_dir: Path) -> None:
+    """--hints-dir 暂存（三级输入之①：用户提示；intent 文件同款机制）。
+
+    目录内按能力命名：build.md / boot.md / inject.md / unit_test.md
+    （全部可选）→ 拷贝 <ws>/P0/inputs/hints/<cap>.md，T3 各 session
+    以最高权重注入。幂等：无记录 → 拷+记；有记录：缺失恢复、一致跳过、
+    不一致警告不覆盖（同 backfill_intent 语义）。非能力命名文件警告忽略。
+    """
+    from .extract import CAPS            # 单一真值源：能力名与 T3 对齐
+    if not hints_dir.is_dir():
+        raise InputError(f"hints-dir 路径不存在或不是目录: {hints_dir}")
+    dest_dir = ws / "P0" / "inputs" / "hints"
+    staged: list[str] = []
+    for cap in CAPS:
+        src = hints_dir / f"{cap}.md"
+        if not src.is_file():
+            continue
+        if src.stat().st_size == 0:
+            _log.console_line(f"[porter] T1: ⚠️ hints/{cap}.md 为空——忽略")
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dest = dest_dir / f"{cap}.md"
+        if not dest.exists() or dest.read_bytes() != src.read_bytes():
+            shutil.copyfile(src, dest)
+        staged.append(cap)
+    known = {f"{c}.md" for c in CAPS}
+    stray = [p.name for p in sorted(hints_dir.iterdir())
+             if p.is_file() and p.name not in known
+             and not p.name.startswith(".")]
+    if stray:
+        _log.console_line(f"[porter] T1: ⚠️ hints-dir 含非能力命名文件"
+                          f"（忽略）：{', '.join(stray[:6])}")
+    proj = json.loads(proj_path.read_text(encoding="utf-8"))
+    proj["hints"] = {"source": str(hints_dir.resolve()),
+                     "caps": staged}
+    proj_path.write_text(
+        json.dumps(proj, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8")
+    _log.console_line(f"[porter] T1: 用户提示已暂存（{len(staged)} 能力："
+                      f"{', '.join(staged) or '无'} → P0/inputs/hints/）")

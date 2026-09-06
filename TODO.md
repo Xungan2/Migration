@@ -149,13 +149,17 @@ P5 判据级 55/55 验证）。存量 19 处 `run_agent` 调用点未迁移
 
 要做：分批替换——🟡 机械可换 9 处（P0 T5 烟测反馈/P1D/P1R/P2a/
 P3×3/P4 fill/P5 补探/P6 draft-l4 → run_agent_structured）；
-🟢 原生场景 3 处（P0 T3 环境提取/探针 FAIL 回炉/errorloop 求解轮
-→ run_agent_seq，把各自的真实执行包成 static fn；errorloop 的
-`_prev_context` 手拼上下文可被 session 续接直接替代）。
+🟢 原生场景 ~~3~~ 2 处（~~P0 T3 环境提取~~——**已迁移 2026-09-05**
+，但走的是 **P2b 直连形态**（`_opencode_json_runner` 专用循环 +
+文件即信号）而非 run_agent_seq：T3 v2 四 session 重构定案不引入
+phase 协议，故 done_key 与中止通道两缺口对 T3 不再需要；剩 探针
+FAIL 回炉/errorloop 求解轮 → run_agent_seq 或同款直连形态，
+errorloop 的 `_prev_context` 手拼上下文可被 session 续接直接替代）。
 前置框架缺口：
-- **done_key 通用 done 识别**（主缺口）：fill 的 `{patch_summary,…}`、
-  P5 补探的 `{cmd,…}` 无 phase/status 键，`_parse_phase` 会误判
-  不可解析——加参数"```json 块含此键即 done，再走 gen_schema"。
+- **done_key 通用 done 识别**（🟡 批次缺口，T3 已不需要）：fill 的
+  `{patch_summary,…}`、P5 补探的 `{cmd,…}` 无 phase/status 键，
+  `_parse_phase` 会误判不可解析——加参数"```json 块含此键即 done，
+  再走 gen_schema"。
 - **不可重试中止通道**（仅 fill 三重验证进 seq 时需要）：boot 日志
   不可得今天是 exit 3 停车语义，静态段需能表达"infra 中止"而非
   可重试失败（如专用异常 → outcome 映射）。
@@ -237,6 +241,21 @@ sessionID 一致）；② 三信号全绿；③ 自发现观测（见 #13 两项
 - 轮时长：r1 发现 519s / r2 修订 282s / r3 修订 192s（session 续接
   的增量消息显著短于全量重发，符合设计预期）。
 
+## 18. opencode session_id 跨进程持久化（T3 人工环升级 + P2b panic 恢复共用）
+
+现状：session 只在进程内存里活着。两个消费方受限——
+- T3 v2 人工环（extract.py）：耗尽 → exit 3 后进程结束，重跑时只能
+  **新 session + 总结文件作记忆载体**（agent 总结外化了会话记忆，
+  当前已可用）；持久化落地后可升级为 --session 续接原会话，省去
+  记忆重建；
+- P2b scaffold（scaffold.py）：session 解析不到 = RuntimeError 静态
+  panic 终局；持久化 + t3_state 式状态文件可支持跨进程断点续跑。
+
+要做：编排器把 session_id 随轮次状态落盘（T3 已有 t3_state.json 先例，
+含 session_id 字段）；重跑入口检测在册 session 先试续接（续不动再
+新开）。注意 opencode 会话存储随版本演进（~/.opencode/ 下按 id 索引），
+升级需复验续接语义。
+
 ## 15. opencode stdin 消息通道的版本敏感跟踪
 
 2026-09-05 定案：两个 runner（run_agent / _opencode_json_runner）的
@@ -254,12 +273,17 @@ stdin 化后一并消除。
 
 **加条（2026-09-05 用户定案）：工具绑定 opencode 版本**。stdin 三检
 实证版本 = **1.18.28**（本机 `~/.opencode/bin/opencode`，`opencode
---version` 可查）。设计方向：① runner 启动时核对 `opencode --version`
-与仓内钉住的版本串，不符 → 警告（或按需硬失败），提示跑 #15 三检；
-② runner env 注入 `OPENCODE_DISABLE_AUTOUPDATE=1`（官方文档化变量），
-防 opencode 自更新静默改变 stdin 行为——版本敏感依赖的最大风险就
-是"某天悄悄升级了没人知道"；③ 钉住的版本串随三检复验通过而更新
-（升级流程 = 装新版 → 三检 → 改钉住串 → 提交）。commit id 钉法仅在
+--version` 可查）。**[2026-09-05 复验]** 自更新已发生（本机现为
+**1.18.29**）；三检迷你版复验**通过**（stdin 事件流含 sessionID /
+--session 续接记忆携带（暗号回溯）/ verbatim）——通道未破，但恰是
+"静默升级没人知道"风险的实录；OPENCODE_DISABLE_AUTOUPDATE 注入与
+版本核对仍未实现，升级流程（装新版 → 三检 → 改钉住串）待落地时
+将实证版本更新为 1.18.29。设计方向：① runner 启动时核对 `opencode
+--version` 与仓内钉住的版本串，不符 → 警告（或按需硬失败），提示跑
+三检；② runner env 注入 `OPENCODE_DISABLE_AUTOUPDATE=1`（官方文档化
+变量），防 opencode 自更新静默改变 stdin 行为——版本敏感依赖的最大
+风险就是"某天悄悄升级了没人知道"；③ 钉住的版本串随三检复验通过而
+更新（升级流程 = 装新版 → 三检 → 改钉住串 → 提交）。commit id 钉法仅在
 自编译场景可用，发行版以版本串为准。
 
 ## 16. 日志源接入的清理前置原则（ANSI 假 MISS 的泛化，2026-09-05 定案）
@@ -291,3 +315,51 @@ ANSI 假 MISS 只是"清理未前置"问题类的**一个实例**，不是问题
    从偶然变契约。
 5. 与 #13.1 的关系：#13.1 是单点回填；实施本条时在源边界
    （boot_and_log 层）做即可自然覆盖 #13.1——二择一，勿重复改。
+
+## 17. runner 双产物与三级使用模型（2026-09-05 定案；T3 重构的契约基线）
+
+**定案（用户拍板，T3 agent 循环重构按此对外契约实施）**：
+
+- T3 产双产物：`runner.json` = 冻结的执行契约（通用形态 cmd + 判定
+  特征 + 超时/日志控制 + 注入机制）；`runner.md` = 冻结的语境档案
+  （选择依据/备选与被毙原因/变形方法/坑史/不确定项——含 net-user
+  SLIRP、dm cmdline 式注入、unit_test 作用域收窄、增量构建档实测等）。
+- **子集不变式**：runner.json ⊆ runner.md。实现 = agent 写单文件
+  runner.md（尾部嵌完整 runner JSON 块）→ 机器分离落盘（先例：
+  P1-strategy 双产物协议，divide/strategy.py）；子集按构造成立，
+  可机器校验（runner.json ≡ md 尾块，手改漂移即可检出）。
+- **后续使用三级**：① runner.json 通用形态可用且够 → 静态直用
+  （现状消费方零改动）；② 不满足/需变形 → agent 参考 runner.md
+  推导变体（用完即弃/记相位报告，**不回写**）；③ runner.md 也不够
+  → kb 专用 **runner** 域沉淀解法（跨工作区），下次 T3 重跑注入为
+  起点假设（现 T3 R1 注入 runbook 域的接口正好复用）。
+- **冻结**：T3 探测循环内可变，`_finish` 后双文件定死；知识只准走
+  ②/③ 正门，禁止侧门改写。_finish 时对双文件记指纹（project.json），
+  后续相位消费前校验，改动即关口报错。
+
+**消费侧分批改造清单（本条主体——接不上的先记后做，不阻塞 T3 重构轮）**：
+
+| 存量行为 | 证据 | 违反点 | 改法方向 |
+|---|---|---|---|
+| errorloop fix-runner 改写 runner | `errorloop.py:269 _patch_runner` | 冻结 | 改登记 kb runner 候选 + 关口停车 → 人决定重跑 T3（重跑吃第③级知识）；或显式 override 层——方向待定案 |
+| P5 unit_test 回填写 runner | `p5.py:104 _save_runner_ut`（verified/discovered_by/notes 即侧门字段） | 冻结 | T3 契约收紧为 unit_test 必填（至少 `mechanism:"none"`，不许静默缺课）；驱动级首验改第②级（按 runner.md 收窄方法派生），verified 记 P5 相位报告 |
+| P6 SLIRP 参数硬编码 | `p6.py:51 DEFAULT_EXEC_DEVICE_ARGS`（e1000 专属串） | 第②级 | T3 产 `example_args["net-user"]`（`p6.py:458` 已在读，键产出即退役硬编码，消费侧零代码改动）；新形态派生读 runner.md |
+| runbook 域与 runner 域关系 | draft_runbook 从 runner.json 反推（runbook.py） | 第③级 | 注册 kb "runner" 域（TODO #5 保证三处单点改动）；runbook 域建议被取代（待定案）；draft_runbook 改以 runner.md 为底稿 |
+| scope_hint/notes 双源 | 唯一消费者 runbook.py:45,75（渲染） | 子集纪律 | 迁入 runner.md，runner.json 去知识字段 |
+| confidence_notes 丢弃 | extract.py `_finish` 只落盘 envelope 的 runner 键，全工具零消费者 | 知识流失 | 进 runner.md 不确定项节（人工问题原料，答后回写） |
+| meta.reviewed 可变位 | CP0 人审翻 runner 布尔 | 冻结 | 审阅记录改存关口账本 |
+| timeout_inc_sec 虚设 | 唯一 build 超时消费 probe.py:83 恒用 full 档 | 契约虚设 | runner.md 记实测增量耗时；未来消费者（如 P4 快冒烟）启用时按 md 依据 |
+
+与 #12 的关系：runner.md 的 boot/inject 节承载"消费点核实"证据
+（变量被启动脚本链哪里消费，file:line）；#12 的命令侧自包含
+（boot.cmd 内联完整参数）仍是独立方向。
+
+**产出侧已落地（2026-09-05，T3 v2 四 session 重构）**：extract.py
+重写为 build→boot→inject→unit_test 四 session 流水线（P2b 直连形态，
+文件即信号），双产物 runner.json+runner.md（子集按节校验）+ 冻结
+指纹（project.json["t3_frozen"]）；三级输入之① `--hints-dir`（intent
+同款暂存）；耗尽→agent 总结→p0.t3.<cap> 关口→人答→新 session 种子
+（总结+答案）+ 小额资源续跑；skill P0-env-extract.md 重写（零真实
+OS 实例，中立铁律）。**上表消费侧清单不受影响，照旧分批。**
+
+**入手点**：消费侧清单逐项分批。

@@ -493,6 +493,70 @@ qemu-args-no-inject-hook）+ kb 候选 cand-0003。已知遗留：TODO
 
 ---
 
+### M13 T3 v2：4-session 流水线 + runner 双产物（2026-09-06）
+
+**做了什么**：T3 环境提取整体重构（用户逐点定案，TODO #17 契约基线）：
+
+1. **4-session 流水线**（extract.py 全重写）：build→boot→inject→
+   unit_test 四个顺序 session，P2b 直连形态（`_opencode_json_runner`
+   + --session 续接、文件即信号、无 phase 协议——run_agent_seq 的
+   done_key/中止通道缺口就此销案）。每 session：三级输入（①
+   `--hints-dir` 用户提示，intent 文件同款暂存 ②materials ③目标树）
+   ；两类禁跑（本能力类命令/前序已收敛命令）；测试请求协议
+   （`{"cmd","timeout_sec"?}` → probe._run 静态执行 → 结果文件指针
+   续接）；md 随做随记（备选/坑史/依据/不确定项绑事件）；完成 =
+   片段过机器校验（节契约+md 锚点非空+子集块）且**仅本能力** probe
+   终验 PASS（质量失败不烧轮 ≤2 次微增量→RuntimeError 静态 panic）。
+2. **双产物与冻结**：4 对片段拼装 ws/runner.json（执行契约）+
+   ws/runner.md（调用手册；子集不变式按节校验：md 尾块 ≡ 节 JSON，
+   包装/裸形态皆认）→ 指纹入 project.json["t3_frozen"]；
+   T3_development.json/memo.md 照旧供 T5/CP0 零改动消费。
+3. **人工环（A 类）**：资源三上限（轮 5/agent 1200-1800s/墙钟
+   1800-5400s，同签名检测定案不做）→ 耗尽时同 session 续接一次
+   **总结请求**（agent 写已完成/未完成/给开发者的问题；失败则编排器
+   拼装兜底）→ panic 关口 `p0.t3.<cap>`（四关口，老 p0.t3.extract
+   退役；re-ask 时重开清旧答案）→ 人答 answers.md @节→账本→重跑：
+   新 session 种子=总结指针+答案全文（最高权重）+ 小额资源
+   （2 轮+600s）。断点续跑：t3_state.json（converged 复用/exhausted
+   查答案/running 从头）；session_id 跨进程续接记 TODO #18。
+4. **skill 重写**（P0-env-extract.md 单文件四能力版）：必答锚点由
+   任务数据下发（代码为真值源）；**零真实 OS 实例**（中立铁律，
+   防抄样例作弊）。
+
+**为什么**：e2e-rerun-20260903 实证旧循环结构性缺陷——每轮独立
+run_agent 全量重发（7.5KB×3）+900s 整段超时即整轮报废（3×TIMEOUT
+→exit 3 零产出）；stdout 提取截断风险；失败轮零落盘（H20）。
+新设计把"探索/验证/写作"拆进单 session 增量流，探测移出 agent 预算，
+产出走文件协议。
+
+**注入判定的四轮攻防（本轮最重要的实战发现）**：e2e 中 agent 在
+验证压力下连续三轮构造**形式上过判定**的方案（Goodhart 实录）——
+① cmd_suffix 里 echo 设备参数污染 stdout 捕获（修：证据面收窄到
+boot.log_file）；② `-net nic,model=e1000` 语法变体绕 token 提取
+（修：补 model= 提取）；③ 驱动特征锚定在**默认网卡**行（裸 boot
+也命中，修：**差分判据**——注入轮 vs 裸 boot 各跑一次、特征/设备名
+须"注入轮命中 ∧ 裸轮未命中"，双日志副本存档可审计）。已知残余
+攻击面：宿主 shell 向日志文件追加伪造行——结构性解法是 TODO #12
+（命令侧自包含注入），差分判据是其前的验证层防线。
+
+**e2e 验证**（migrations/t3v2-e2e-20260905/ws-e1000，独立 worktree@
+36ae7fe10，空 KB，e2e 全程抓出 5 个真缺陷即修即回归）：主线 rc=0/
+2372s 四节收敛+冻结+T5 过（对照 e2e-rerun 3×900s 全 TIMEOUT）；
+幂等重跑 131s 零 agent；**人工环真跑闭环**：inject 耗尽（真因：树
+无注入通路+agent 预算尽于写作前）→ 总结即真破案（独立复现
+EXTRA_QEMU_ARGS 全树零消费= #12 结论；发现 OSDK `--qemu-args` 经
+CARGO_OSDK_BUILD_ARGS 的真实注入通路，bundle.toml 实证；锚定
+virtio-net probe warn 真差分特征；发现 console=hvc0 拓扑下驱动
+probe 日志物理进不了 qemu.log 的坑）→ 4 个真产品决策问题 → 人答
+→ 续跑 1 轮收敛（injection-evidence=PASS 差分命中）。opencode
+自更新至 1.18.29，三检迷你版复验通过（TODO #15 已记）。
+
+**当前形态**：extract.py（~950 行）+ inputs.stage_hints + skill +
+test_env_probe 27 例（全量 294 绿）。agent.py/probe.py/gate.py/
+main.py 接线外的全部消费方零改动（消费侧按 TODO #17 分批）。
+
+---
+
 ## 5. 现状：每个文件做什么（文件级实现地图）
 
 > 按 5 子包 + log + main 组织。每文件一段：职责 / 关键公共函数 /
@@ -581,14 +645,30 @@ P7 消费 commit_chain 与自动导出。规范见 docs/modules/vcs.md。
 **关系**：P0 第二步；类别=选模板开关（加速器非承重墙）。
 
 #### extract.py
-**职责**：T3 环境信息提取——agent 多轮×真实探测交织×人工升级，产出 runner.json。
-**关键公共函数**：`validate_runner(r)` 字段级最小契约校验（build/boot/
-inject_device 各字段）；`extract_env(ws, target_os, materials, categories)`
-主循环（R1-R3 自动，R4 答案整合；MAX_AUTO_ROUNDS=3）。
-**关系**：P0 核心；调 probe 执行探测；调 kb 注入 runbook 面（起点假设）；
-失败 → panic gate `p0.t3.extract`（exit 3）。
-**限制**：T3 失败轮不落盘 T3_R{n}.json（H20）；非阻塞备忘覆盖阻塞版 questions
-（H20，低优先级）。
+**职责**：T3 环境信息提取 **v2**（2026-09-05 四 session 重构，M13）——
+build→boot→inject_device→unit_test 四个顺序 session（P2b 直连形态：
+`_opencode_json_runner` + --session 续接，文件即信号），产出双产物
+`runner.json`（冻结执行契约）+ `runner.md`（冻结调用手册；子集不变式
+按节校验：md 尾块 ≡ 节 JSON）。
+**关键公共函数**：`validate_runner(r)` 字段契约校验（行为与 v1 逐字
+兼容，gate.py 消费；内部拆 `_check_build/_check_boot/_check_inject/
+_check_unit_test` 供按节复用）；`extract_env(ws, target_os, materials,
+categories)` 主入口（状态机 t3_state.json 断点续跑：converged 复用 /
+exhausted 查账本答案续跑 / running 重来）；`_run_cap_session` 单能力
+循环（测试请求协议 `{"cmd","timeout_sec"?}` → 静态执行 → 结果文件
+指针；片段质量校验=节契约+md 锚点+子集块，不烧轮；终验只跑本能力
+probe，FAIL 烧轮回炉；轮/agent 时/墙钟三预算）。
+**关系**：probe 执行器零改动复用；耗尽 → 同 session 总结请求（agent
+写已完成/未完成/问题；失败兜底编排器拼装）→ panic 关口
+`p0.t3.<cap>`（四关口，v1 单关口 p0.t3.extract 退役）→ 人答
+answers.md @节 → 账本 → 新 session 种子（总结+答案最高权重）+ 小额
+资源（RESUME_*）；收官 `_assemble_and_freeze`（双文件指纹入
+project.json["t3_frozen"]，T3_development.json/memo.md 照旧供 T5/CP0）。
+三级输入之① 用户提示经 `--hints-dir`（inputs.stage_hints，intent 同款
+暂存）注入；v1 的 R1-R3/R4 循环、runbook 目录注入、human_questions
+生成全部退役。
+**限制**：session_id 跨进程续接未做（TODO #18，重跑靠总结文件作记忆
+载体）；kb runner 域注入位留空（TODO #17 消费侧批次）。
 
 #### probe.py
 **职责**：探测执行器（纯脚本，读 runner）。

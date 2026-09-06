@@ -161,6 +161,8 @@ def cmd_p0(args) -> int:
         _log.console_line(f"[porter] T1: 复用已有工作区 {ws}")
         if args.intent_file:
             t1.backfill_intent(ws, proj_path, Path(args.intent_file))
+    if getattr(args, "hints_dir", None):
+        t1.stage_hints(ws, proj_path, Path(args.hints_dir))
 
     # 知识库物化（工作区就绪后；--kb 给出时。kb 进 <ws>/knowledge/，
     # 随工作区 git 统一入库——vcs 统一管理版）
@@ -1184,6 +1186,10 @@ def main(argv=None) -> int:
     p0.add_argument("--intent-file", default=None, metavar="PATH",
                     help="迁移意图文件（可选，自由 Markdown：要什么功能/哪些设备号/"
                          "明确不迁什么；拷贝入工作区 goals.md，P1-strategy 消费）")
+    p0.add_argument("--hints-dir", default=None, metavar="DIR",
+                    help="用户提示目录（可选，三级输入之①：按能力命名 "
+                         "build.md/boot.md/inject.md/unit_test.md，均可缺；"
+                         "拷入 P0/inputs/hints/，T3 对应 session 最高权重注入）")
     p0.add_argument("--output-dir", required=True,
                     help="迁移工作区根目录（各阶段在内部建 P0/、P1/ 等子目录）")
     p0.add_argument("--category", default=None,
