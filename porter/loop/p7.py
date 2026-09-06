@@ -290,6 +290,8 @@ def _write_md(ws: Path, path: Path, r: dict) -> None:
     p, c, m = r["pipeline"], r["crate"], r["mapping"]
     b = r["baseline"]
     v = r["p6_verdict"] or {}
+    deferred_open_ids = ", ".join(r["deferred"]["open_ids"]) or "—"
+    defect_parked_ids = ", ".join(r["defects"]["parked_ids"]) or "—"
     lines = [
         "# P7 终态报告（骨架——数据面机器生成）", "",
         f"- 工作区：{r['workspace']}", f"- 驱动：{r['driver']} @ "
@@ -309,11 +311,9 @@ def _write_md(ws: Path, path: Path, r: dict) -> None:
         f"park {r['l4']['park']}", "",
         "## 账本", "",
         f"- deferred：cleared {r['deferred']['cleared']} / open "
-        f"{r['deferred']['open']}（{', '.join(r['deferred']['open_ids'])
-           or '—'}）",
+        f"{r['deferred']['open']}（{deferred_open_ids}）",
         f"- defects：fixed {r['defects']['fixed']} / parked "
-        f"{r['defects']['parked']}（{', '.join(r['defects']['parked_ids'])
-           or '—'}）",
+        f"{r['defects']['parked']}（{defect_parked_ids}）",
         f"- platform_patches：{r['patches']['total']} 条（"
         + "；".join(f"{s}: {', '.join(g) if isinstance(g, list) else g}"
                     for s, g in r["patches"]["by_status"].items())

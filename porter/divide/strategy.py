@@ -324,6 +324,8 @@ def _task_data(ws: Path, proj: dict, driver_root: Path) -> str:
         f"- 驱动源码路径：`{driver_root.resolve()}`"
         "（其所在的 Linux 源码仓全部代码可读，不限于本驱动目录）",
         f"- 项目类别标签（参考）：{cats or '未知'}",
+        f"- 目标 OS：{proj.get('target_os', '未指定')}（本步骤只读 Linux 源码；"
+        "目标能力只采用提供的环境事实，不照搬其他平台假设）",
     ]
     goals_path = ws / "goals.md"
     if goals_path.exists():
@@ -358,9 +360,11 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
 
     if out_path.exists():
         _log.console_line(f"[porter] P1S: 复用 {out_path}（如需重做请删除该文件）")
-        if (ws / "goals.md").exists() and not (p1 / "scope.json").exists():
-            _log.console_line("[porter] P1S: ⚠️ goals.md 在场而 P1/scope.json 缺失——"
-                  "删除 strategy.md 后重跑 p1-strategy 以重新生成双产物")
+        try:
+            _scope.load_scope(ws, driver_root)
+        except _scope.ScopeError as e:
+            _log.console_line(f"[porter] P1S: {e}；请修复 scope 或重新生成策略双产物")
+            return 2
     else:
         has_goals = (ws / "goals.md").exists()
         skill = agent.load_skill("P1-strategy")
@@ -426,18 +430,16 @@ def run_strategy(ws: Path, driver_root: Path) -> int:
                   f"疑似异常——请检查 P1/logs/P1S_R1.log 后重跑")
             return 1
 
-        out_path.write_text(text, encoding="utf-8")
-        _log.console_line(f"[porter] P1S: strategy.md 已生成（{len(text)} 字符）")
-
         if scope is not None:
             defects = _scope.validate_and_normalize(scope, driver_root, ws)
             if defects:
-                _log.console_line(f"[porter] P1S: ⚠️ scope 校验缺陷"
-                      f"（strategy.md 已落盘，scope.json 未写——修正后可手工"
-                      f"放置或删 strategy.md 重跑）: {defects}")
+                _log.console_line(f"[porter] P1S: scope 校验缺陷"
+                                  f"（未发布策略；重跑可重新生成）: {defects}")
                 return 1
             for w in _scope.cross_check(_scope.scope_files(scope), driver_root):
                 _log.console_line(f"[porter] P1S: ⚠️ scope 交叉核对：{w}")
+        out_path.write_text(text, encoding="utf-8")
+        _log.console_line(f"[porter] P1S: strategy.md 已生成（{len(text)} 字符）")
 
     # 样例库：草稿 + 知识报告（生成/复用两路径都执行；幂等）。
     # 失败仅警告，不阻断主产物。

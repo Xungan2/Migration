@@ -77,12 +77,17 @@ def validate_criteria(raw: list, module: str) -> tuple[list[dict], list[str]]:
         db = c["deferred_by"]
         if db is not None and not isinstance(db, list):
             problems.append("deferred_by 须为数组或 null")
+        if "pruning_ids" in c and (not isinstance(c["pruning_ids"], list)
+                or any(not isinstance(s, str) or not s for s in c["pruning_ids"])):
+            problems.append("pruning_ids 须为非空字符串组成的列表")
         if problems:
             errs.append(f"[{c.get('id', i)}] {'; '.join(problems)}")
         else:
             seen.add(cid)
             ok.append({"id": cid, "layer": c["layer"], "kind": c["kind"],
                        "expr": expr, "deferred_by": db})
+            if "pruning_ids" in c:
+                ok[-1]["pruning_ids"] = list(dict.fromkeys(c["pruning_ids"]))
     _ = (module, _MODULES_UNKNOWN_OK)   # 预留：消费者存在性弱校验
     return ok, errs
 

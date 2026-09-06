@@ -73,7 +73,9 @@ def _load_json(path: Path, what: str):
 def _norm_deps(d: dict) -> dict:
     """deps 归一化（容错缺失键）：modules/edges 集合化 + order 原样。"""
     edges = d.get("edges") or {}
-    return {"modules": set(d.get("modules") or []),
+    nodes = set(d.get("modules") or []) | set(d.get("order") or []) | set(edges)
+    nodes.update(t for targets in edges.values() for t in targets)
+    return {"modules": nodes,
             "edges": {m: set(ts or []) for m, ts in edges.items()},
             "order": list(d.get("order") or [])}
 
@@ -89,8 +91,13 @@ def _diff_deps(ext: dict, recomp: dict) -> list[str]:
         sa, sb = a["edges"].get(m, set()), b["edges"].get(m, set())
         if sa != sb:
             diffs.append(f"edges[{m}] 不一致（外部: {sorted(sa)} / 重算: {sorted(sb)}）")
-    if a["order"] != b["order"]:
-        diffs.append(f"order 不一致（外部: {a['order']} / 重算: {b['order']}）")
+    order = a["order"]
+    positions = {m: i for i, m in enumerate(order)}
+    valid_order = (len(order) == len(b["modules"]) and set(order) == b["modules"]
+                   and all(positions[t] < positions[m]
+                           for m, targets in b["edges"].items() for t in targets))
+    if not valid_order:
+        diffs.append(f"order 不是覆盖全部模块的合法拓扑序（外部: {order}）")
     return diffs
 
 
@@ -111,6 +118,13 @@ def run_import(ws: Path, driver_root: Path, plan_path: Path,
     err = _validate_plan_schema(plan)
     if err:
         _log.console_line(f"[porter] P1I: plan schema 不合规: {err}")
+        return 2
+
+    from ..common.scope import ScopeError, validate_plan_scope
+    try:
+        validate_plan_scope(ws, driver_root, plan)
+    except ScopeError as e:
+        _log.console_line(f"[porter] P1I: {e}")
         return 2
 
     # ---- 2. 外部 deps 先读进内存（extract_modules 会 rmtree 整个 modules/）----
@@ -194,4 +208,8 @@ def run_import(ws: Path, driver_root: Path, plan_path: Path,
     elif not (p1 / "strategy.md").exists():
         _log.console_line("[porter] P1I: ⚠️ 未提供 --strategy 且 P1/strategy.md"
               " 不存在（CP1 拆分审对象缺失——建议补齐）")
+    from ..common.scope import input_fingerprint
+    (p1 / "reports" / "P1D_inputs.json").write_text(
+        json.dumps({"fingerprint": input_fingerprint(ws, driver_root)}, indent=2) + "\n",
+        encoding="utf-8")
     return rc

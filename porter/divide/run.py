@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 
 from ..common import agent
+from ..common import scope as scope_mod
 from . import fragments as frag_mod
 from . import index
 from .. import log as _log
@@ -24,8 +25,9 @@ MAX_TRIES = 2          # 每文件：首发 + 催补重试 1 次
 AGENT_TIMEOUT_SEC = 900
 
 
-def _assign_one_file(skill: str, strategy: str, fname: str,
-                     entries: list, p1: Path) -> tuple[dict | None, dict]:
+def _assign_one_file_impl(skill: str, strategy: str, fname: str,
+                          entries: list, p1: Path,
+                          task_id: str = "") -> tuple[dict | None, dict]:
     """单文件 agent 分配。返回 (决定, module_desc)；失败返回 (None, {})。"""
     total = entries[-1].end
     base = (f"{skill}\n\n---\n\n## 拆分策略（已人工审阅，按它执行）\n\n"
@@ -33,14 +35,47 @@ def _assign_one_file(skill: str, strategy: str, fname: str,
             f"本次调用只处理一个源文件：`{fname}`。\n\n"
             f"{index.render_slice(fname, entries, total)}\n\n"
             f"请按 SKILL 输出该文件的分配结果（只输出一个 JSON 块）。")
+    proj_path = p1.parent / "project.json"
+    proj = json.loads(proj_path.read_text(encoding="utf-8")) if proj_path.exists() else {}
+    scope_path = p1 / "scope.json"
+    if scope_path.exists():
+        features = json.loads(scope_path.read_text(encoding="utf-8")).get("features")
+        if features is not None:
+            base += ("\n\n## 已审功能范围（scope.json，逐项遵循）\n"
+                     + json.dumps(features, ensure_ascii=False, indent=2))
+    if proj.get("linux_driver"):
+        base += (f"\n源码位置：{Path(proj['linux_driver']) / fname}"
+                 f"\n驱动类别：{proj.get('category') or []}"
+                 "\n符号用途不明时只读核实函数体、调用者与回调注册；按已审策略分配。")
     feedback = ""
     for attempt in range(1, MAX_TRIES + 1):
-        rc, out = agent.run_agent(
-            base + feedback, workdir=p1,
-            log_stem=str(p1 / "logs" / f"P1D_F_{fname}_R{attempt}"),
-            timeout_sec=AGENT_TIMEOUT_SEC)
-        parsed = agent.extract_json(out) if rc == 0 else None
-        err = index.validate_decision(entries, parsed)
+        def _attempt():
+            rc, out = agent.run_agent(
+                base + feedback, workdir=p1,
+                log_stem=str(p1 / "logs" /
+                             f"P1D_F_{fname.replace('/', '__')}_R{attempt}"),
+                timeout_sec=AGENT_TIMEOUT_SEC,
+                task={"phase": "p1", "step": "divide-file",
+                      "attempt": attempt, "task_id": task_id})
+            parsed = agent.extract_json(out) if rc == 0 else None
+            return rc, parsed, index.validate_decision(entries, parsed)
+
+        from ..handoff import current_execution, run_task, TaskSpec
+        if current_execution() is not None:
+            rc, parsed, err = run_task(
+                p1.parent,
+                TaskSpec(task_id, ("p1.strategy",), (p1 / "strategy.md",),
+                         "one P1 source-file assignment attempt"),
+                _attempt,
+                success=lambda value: value[0] == 0 and value[2] is None,
+                summary=lambda value: (
+                    f"Assignment for {fname}: rc={value[0]}, "
+                    f"validation={value[2] or 'accepted'}."),
+                verification=lambda value: (
+                    "index.validate_decision accepted output" if value[2] is None
+                    else f"index.validate_decision rejected output: {value[2]}",))
+        else:
+            rc, parsed, err = _attempt()
         if err is None:
             desc = parsed.get("module_desc")
             return parsed, (desc if isinstance(desc, dict) else {})
@@ -51,14 +86,46 @@ def _assign_one_file(skill: str, strategy: str, fname: str,
     return None, {}
 
 
+def _assign_one_file(skill: str, strategy: str, fname: str,
+                     entries: list, p1: Path) -> tuple[dict | None, dict]:
+    """Assign one source file; every provider attempt is a fresh execution."""
+    safe = __import__("re").sub(r"[^A-Za-z0-9_.-]+", "_", fname)
+    return _assign_one_file_impl(
+        skill, strategy, fname, entries, p1, f"p1.divide.file.{safe}")
+
+
 def run_divide(ws: Path, driver_root: Path) -> int:
     """返回 0=成功；2=前置缺失；1=失败。"""
     p1 = ws / "P1"
     plan_path = p1 / "reports" / "P1D_plan.json"
+    try:
+        scope_set = scope_mod.load_scope(ws, driver_root)
+        fingerprint = scope_mod.input_fingerprint(ws, driver_root)
+    except (scope_mod.ScopeError, OSError, ValueError) as e:
+        _log.console_line(f"[porter] P1D: {e}")
+        return 2
+    stamp_path = p1 / "reports" / "P1D_inputs.json"
     if plan_path.exists():
-        # H6 顺修：plan 复用时 modules/ 必须存在（下游 P2a spine/P3 surface
-        # 读的是物理目录）；缺失则按现存 plan 重建抽取
-        if not any((p1 / "modules").glob("*/module.json")):
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            scope_mod.validate_plan_scope(ws, driver_root, plan)
+            if scope_set is not None and not stamp_path.exists():
+                raise scope_mod.ScopeError(
+                    "旧范围计划缺少源码指纹，不能确认与当前源码一致；"
+                    "请在新工作区重新运行 P1，或通过 p1-import 重新校验导入")
+            if stamp_path.exists() and json.loads(stamp_path.read_text(
+                    encoding="utf-8")).get("fingerprint") != fingerprint:
+                raise scope_mod.ScopeError(
+                    "意图、scope、策略或源码已变化；请在新工作区重新运行 P1，"
+                    "保留当前产物供对照，不能复用旧 plan")
+        except (ValueError, OSError, KeyError) as e:
+            _log.console_line(f"[porter] P1D: {e}")
+            return 2
+        expected = {m["name"] for m in plan["modules"]}
+        actual = {p.parent.name for p in (p1 / "modules").glob("*/module.json")}
+        missing_files = any(not (p1 / "modules" / m["name"] / f["dest"]).is_file()
+                            for m in plan["modules"] for f in m["files"])
+        if expected != actual or missing_files:
             try:
                 plan = json.loads(plan_path.read_text(encoding="utf-8"))
                 summary = frag_mod.extract_modules(ws, driver_root, plan)
@@ -80,14 +147,12 @@ def run_divide(ws: Path, driver_root: Path) -> int:
         return 2
     strategy = strategy_path.read_text(encoding="utf-8")
 
-    file_index = index.build_index(driver_root)
+    file_index = index.build_index(driver_root, scope_set)
     files = index.call_order(file_index)
     if not files:
         _log.console_line(f"[porter] P1D: {driver_root} 下未发现含定义的 *.c/*.h——失败")
         return 2
     # scope 白名单（范围声明层）：意图工作区只分配闭包内文件
-    from ..common import scope as _scope
-    scope_set = _scope.load_scope(ws)
     if scope_set is not None:
         total = len(files)
         files = [f for f in files if f in scope_set]
@@ -104,17 +169,43 @@ def run_divide(ws: Path, driver_root: Path) -> int:
           f"{' '.join(files)}")
 
     skill = agent.load_skill("P1-divide")
-    decisions: dict[str, dict] = {}
-    module_desc: dict[str, str] = {}
+    cache_path = p1 / "reports" / "P1D_assignments.json"
+    cached = json.loads(cache_path.read_text(encoding="utf-8")) if cache_path.exists() else {}
+    if cached.get("fingerprint") != fingerprint:
+        cached = {}
+    decisions: dict[str, dict] = cached.get("decisions", {})
+    module_desc: dict[str, str] = cached.get("module_desc", {})
     for fname in files:
-        dec, desc = _assign_one_file(skill, strategy, fname,
-                                     file_index[fname], p1)
+        dec = decisions.get(fname)
+        desc = {}
+        cached_error = index.validate_decision(file_index[fname], dec)
+        if cached_error is not None:
+            dec, desc = _assign_one_file(skill, strategy, fname,
+                                         file_index[fname], p1)
+        else:
+            # Revalidate an existing cache entry and create a current explicit
+            # handoff; old artifacts alone never bypass the protocol.
+            from ..handoff import current_execution, run_task, TaskSpec
+            if current_execution() is not None:
+                safe = __import__("re").sub(r"[^A-Za-z0-9_.-]+", "_", fname)
+                run_task(
+                    ws, TaskSpec(f"p1.divide.file.{safe}", ("p1.strategy",),
+                                 (strategy_path, cache_path),
+                                 "revalidated cached source-file assignment"),
+                    lambda: 0,
+                    summary=f"Revalidated cached assignment for {fname}.",
+                    artifacts=(cache_path,),
+                    verification=("index.validate_decision accepted cached entry",))
         if dec is None:
             _log.console_line(f"[porter] P1D: {fname} {MAX_TRIES} 次尝试均失败——退出"
                   f"（见 P1/logs/P1D_F_{fname}_R*.log）")
             return 1
         decisions[fname] = dec
         module_desc.update(desc)
+        cache_path.write_text(json.dumps({
+            "fingerprint": fingerprint, "decisions": decisions,
+            "module_desc": module_desc}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8")
         if "whole_file" in dec:
             _log.console_line(f"[porter] P1D: {fname} → 整文件 → {dec['whole_file']}")
         else:
@@ -143,4 +234,8 @@ def run_divide(ws: Path, driver_root: Path) -> int:
         total += n
         _log.console_line(f"[porter] P1D:   {mname}（{len(files_map)} 文件，{n} 行）")
     _log.console_line(f"[porter] P1D: 合计抽取 {total} 行 → P1/modules/")
+    stamp_path.write_text(json.dumps({"fingerprint": fingerprint}, indent=2) + "\n",
+                          encoding="utf-8")
+    (p1 / "reports" / "P1D_decisions.json").write_text(
+        json.dumps(decisions, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return 0

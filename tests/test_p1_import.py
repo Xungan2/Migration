@@ -90,7 +90,8 @@ class TestP1Import(unittest.TestCase):
         ok("1c module.json source_map", mj["name"] == "mod-core"
            and mj["source_map"]["core.c"]["fragments"] == ["1-4"], str(mj))
         deps = json.loads((ws / "P1/modules/deps.json").read_text(encoding="utf-8"))
-        ok("1d edges", deps["edges"] == {"mod-leaf": ["mod-core"]}, str(deps["edges"]))
+        ok("1d edges", deps["edges"] == {"mod-core": [], "mod-leaf": ["mod-core"]},
+           str(deps["edges"]))
         ok("1e order", deps["order"] == ["mod-core", "mod-leaf"], str(deps["order"]))
         ok("1f plan 规范位", (ws / "P1/reports/P1D_plan.json").exists())
         snap1 = _snap(ws / "P1")

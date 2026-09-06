@@ -143,7 +143,8 @@ def _advance_module(ws: Path, state: LoopState, module: str,
             if state.attempts(module, "p3") >= MAX_ATTEMPTS:
                 return _attempts_panic(ws, module, "p3", MAX_ATTEMPTS)
             state.set_phase(module, "p3")
-            rc = p3.run_p3(ws, module, order)
+            rc = _run_phase(ws, module, "p3",
+                            lambda: p3.run_p3(ws, module, order))
             if rc == 3:
                 if not gates.GateLedger(ws).load().open_blocking():
                     return None           # 路由层已消化（决策债）——幂等重进
@@ -159,7 +160,8 @@ def _advance_module(ws: Path, state: LoopState, module: str,
         if phase == "p4":
             if state.attempts(module, "p4") >= MAX_ATTEMPTS:
                 return _attempts_panic(ws, module, "p4", MAX_ATTEMPTS)
-            rc = p4.run_p4(ws, module, order)
+            rc = _run_phase(ws, module, "p4",
+                            lambda: p4.run_p4(ws, module, order))
             if rc == 3:
                 if not gates.GateLedger(ws).load().open_blocking():
                     return None           # blocked 被路由层消化——幂等重进
@@ -175,7 +177,8 @@ def _advance_module(ws: Path, state: LoopState, module: str,
         if phase == "p5":
             if state.attempts(module, "p5") >= MAX_ATTEMPTS:
                 return _attempts_panic(ws, module, "p5", MAX_ATTEMPTS)
-            rc = p5.run_p5(ws, module, order)
+            rc = _run_phase(ws, module, "p5",
+                            lambda: p5.run_p5(ws, module, order))
             if rc == 3:
                 if not gates.GateLedger(ws).load().open_blocking():
                     return None           # deferred 被路由层消化——幂等重进
@@ -189,6 +192,21 @@ def _advance_module(ws: Path, state: LoopState, module: str,
             state.set_phase(module, "done")
             phase = "done"
     return 0
+
+
+def _run_phase(ws: Path, module: str, phase: str, operation) -> int:
+    """Attach module phase tasks when invoked by the handoff-aware CLI."""
+    from ..handoff import current_execution
+    if current_execution() is None:
+        return operation()
+    from ..handoff.integration import (execute_phase, module_dependencies,
+                                       module_task_id)
+    return execute_phase(
+        ws, module_task_id(module, phase),
+        module_dependencies(ws, module, phase), operation,
+        materials=(ws / "project.json", ws / "P1" / "modules" / "deps.json"),
+        artifacts=(ws / phase.upper() / module / "reports",),
+        description=f"vertical loop {phase.upper()} for {module}")
 
 
 def _settle_debt_checkpoint(ws: Path) -> None:

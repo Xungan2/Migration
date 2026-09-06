@@ -103,7 +103,9 @@ def init_workspace(output_dir: Path, linux_driver: Path, target_os: Path,
     随工作区 git 入库，类比 answers.md）。
     """
     ws = output_dir
-    if ws.exists() and any(ws.iterdir()):
+    # Handoff starts P0 before T1 so validation failures also receive a durable
+    # failure document. Its otherwise-empty storage directory may pre-exist.
+    if ws.exists() and any(p.name != "handoffs" for p in ws.iterdir()):
         raise InputError(f"工作区已存在且非空: {ws}（如需重跑请删除或换 --output-dir）")
     ws.mkdir(parents=True, exist_ok=True)
     # P0 阶段子目录

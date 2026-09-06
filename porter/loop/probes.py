@@ -275,18 +275,37 @@ def judge(log_text: str, names: list[str]) -> dict[str, str]:
 
 
 def call_probe_gen(prompt: str, target_os: Path,
-                   log_stem: Path) -> tuple[dict | None, list[dict], list[str]]:
+                   log_stem: Path, *, ws: Path | None = None,
+                   task_id: str = "", dependencies: tuple[str, ...] = (),
+                   include_failures: tuple[str, ...] = ()
+                   ) -> tuple[dict | None, list[dict], list[str]]:
     """探针生成 agent 调用 + 校验。返回 (原始解析, 合格条目, 错误)。"""
-    rc, out = agent.run_agent(prompt, workdir=target_os,
-                              log_stem=str(log_stem),
-                              timeout_sec=AGENT_TIMEOUT_SEC)
-    if rc != 0:
-        return None, [], [f"agent rc={rc}"]
-    parsed = agent.extract_json(out)
-    if not (isinstance(parsed, dict) and "probes" in parsed):
-        return parsed, [], ["输出无 probes JSON 块"]
-    ok, errs = validate_probes(parsed["probes"])
-    return parsed, ok, errs
+    def _operation():
+        rc, out = agent.run_agent(
+            prompt, workdir=target_os, log_stem=str(log_stem),
+            timeout_sec=AGENT_TIMEOUT_SEC,
+            task={"phase": "probe", "step": "generate", "task_id": task_id})
+        if rc != 0:
+            return None, [], [f"agent rc={rc}"]
+        parsed = agent.extract_json(out)
+        if not (isinstance(parsed, dict) and "probes" in parsed):
+            return parsed, [], ["输出无 probes JSON 块"]
+        ok, errs = validate_probes(parsed["probes"])
+        return parsed, ok, errs
+
+    from ..handoff import current_execution, run_task, TaskSpec
+    if ws is None or current_execution() is None:
+        return _operation()
+    return run_task(
+        ws, TaskSpec(task_id, dependencies, (ws / "P2" / "mapping.json",),
+                     "probe proposal generation batch", include_failures),
+        _operation,
+        success=lambda value: bool(value[1]) and not value[2],
+        summary=lambda value: (
+            f"Generated {len(value[1])} schema-valid probe proposals; "
+            f"host validation remains pending; errors={value[2]}."),
+        verification=lambda value: tuple(value[2]) or
+        ("validate_probes accepted every generated item",))
 
 
 # ---------- 共享生命周期（P3 补新 / P2 预生成） ----------
@@ -437,7 +456,8 @@ def _probes_owning_lines(ws: Path, target_os: Path, driver: str,
 
 def _fix_compile(ws: Path, boot_ws: Path, target_os: Path, label: str,
                  reg: dict, registry_path: Path, driver: str, rnd: int,
-                 logs_dir: Path) -> bool:
+                 logs_dir: Path, dependencies: tuple[str, ...] = (),
+                 include_failures: tuple[str, ...] = ()) -> bool:
     """探针 build FAIL 时带编译错误回炉（≤2 次）。只回炉出错探针
     （全量 prompt 会撞 execve ARG_MAX 上限——64 条存量实测崩过）。"""
     log_path = boot_ws / "logs" / f"{label}_probe_build_r{rnd}.log"
@@ -476,8 +496,14 @@ def _fix_compile(ws: Path, boot_ws: Path, target_os: Path, label: str,
               f"\n## 任务\n输出修正后的完整探针函数（紧凑 JSON 块，同生成"
               "schema）。")
     for attempt in range(1, 3):
+        fix_task = ("probe.compile-fix." +
+                    re.sub(r"[^A-Za-z0-9_.-]+", "_", label))
+        direct_dependencies = tuple(
+            task_id for task_id in dependencies if task_id != fix_task)
         _parsed, ok_items, errs = call_probe_gen(
-            prompt, target_os, logs_dir / f"{label}_fix_r{rnd}_{attempt}")
+            prompt, target_os, logs_dir / f"{label}_fix_r{rnd}_{attempt}",
+            ws=ws, task_id=fix_task, dependencies=direct_dependencies,
+            include_failures=include_failures)
         if ok_items and not errs:
             by_name = {p["name"]: p for p in ok_items}
             n = 0
@@ -496,7 +522,9 @@ def _fix_compile(ws: Path, boot_ws: Path, target_os: Path, label: str,
 
 def _rejudge_failed(ws: Path, target_os: Path, label: str, tag: str,
                     reg: dict, registry_path: Path, bad_names: list[str],
-                    logs_dir: Path) -> bool:
+                    logs_dir: Path,
+                    dependencies: tuple[str, ...] = (),
+                    include_failures: tuple[str, ...] = ()) -> bool:
     """带 FAIL 反馈回映射改判：更新条目 + 重写探针。成功返回 True。"""
     mapping = json.loads((ws / "P2" / "mapping.json").read_text(
         encoding="utf-8"))
@@ -518,10 +546,39 @@ def _rejudge_failed(ws: Path, target_os: Path, label: str, tag: str,
               f"\n## 任务\n输出紧凑 JSON：{{\"entries\":[…同映射 schema…],"
               f"\"probes\":[{{\"claim\",\"name\",\"rust\"}}]}}"
               f"（仍可信的主张可原样重给探针）。")
-    rc, out = agent.run_agent(prompt, workdir=target_os,
-                              log_stem=str(logs_dir / f"{label}_rejudge"),
-                              timeout_sec=AGENT_TIMEOUT_SEC)
-    parsed = agent.extract_json(out) if rc == 0 else None
+    task_id = "probe.rejudge." + re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
+
+    def _attempt():
+        rc, out = agent.run_agent(
+            prompt, workdir=target_os,
+            log_stem=str(logs_dir / f"{label}_rejudge"),
+            timeout_sec=AGENT_TIMEOUT_SEC,
+            task={"phase": "probe", "step": "rejudge", "task_id": task_id})
+        parsed = agent.extract_json(out) if rc == 0 else None
+        usable = bool(parsed and isinstance(parsed.get("entries"), list) and
+                      any(e.get("linux_api") in index
+                          for e in parsed["entries"] if isinstance(e, dict)))
+        return rc, parsed, usable
+
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is not None:
+        direct_dependencies = tuple(
+            dependency for dependency in dependencies
+            if dependency != task_id)
+        rc, parsed, usable = run_task(
+            ws, TaskSpec(task_id, direct_dependencies,
+                         materials=(ws / "P2" / "mapping.json", registry_path),
+                         description="probe failure mapping reconsideration",
+                         include_failures=include_failures),
+            _attempt,
+            success=lambda value: value[0] == 0 and value[2],
+            summary=lambda value: (
+                f"Probe rejudge rc={value[0]}; usable entries={value[2]}."),
+            verification=lambda value: (
+                "at least one known mapping entry was returned" if value[2]
+                else "no usable mapping entry was returned",))
+    else:
+        rc, parsed, usable = _attempt()
     if not (parsed and isinstance(parsed.get("entries"), list)):
         return False
     n_fixed = 0
@@ -576,6 +633,8 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     tag = "P2pregen" if kind == "P2" else f"{kind}{current_module}"
     reg = load_registry(registry_path)
     locs = usage_locs or {}
+    previous_gen_task = ("p2.scaffold" if kind == "P2" else
+                         f"loop.module.{current_module}.p3.criteria")
 
     # ---- 生成（≤GEN_BATCH 条/批，每批 ≤2 次带反馈重试）----
     gen_failed = 0
@@ -608,11 +667,17 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
                   f"\n## 待探针的映射条目（本批 {len(chunk)} 条）\n{lines}\n"
                   f"\n## 任务\n逐条产出探针函数（紧凑 JSON 块）。")
         got: list[dict] = []
+        claim_version = __import__("hashlib").sha256(
+            "\0".join(sorted(str(e.get("linux_api", "")) for e in chunk))
+            .encode("utf-8")).hexdigest()[:10]
+        batch_task = f"probe.{tag}.generate.{claim_version}"
         feedback = ""
         for attempt in range(1, 3):
             _parsed, ok_items, errs = call_probe_gen(
                 prompt + feedback, target_os,
-                logs_dir / f"{label}_b{bi // GEN_BATCH}_R{attempt}")
+                logs_dir / f"{label}_b{bi // GEN_BATCH}_R{attempt}",
+                ws=ws, task_id=batch_task,
+                dependencies=(previous_gen_task,))
             if ok_items and not errs:
                 got = ok_items
                 break
@@ -624,6 +689,8 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
         else:
             gen_failed += len(chunk)
             _log.console_line(f"[porter] 探针: 生成失败批（{len(chunk)} 条）——登记")
+            return 1
+        previous_gen_task = batch_task
     if gen_failed and not reg["probes"]:
         _log.console_line(f"[porter] 探针: {label} 生成全败（{gen_failed} 条候选）"
               "——exit 1")
@@ -631,47 +698,104 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
 
     # ---- 同步 + 判定（build 编译回炉 / boot 判定 / 改判有界循环）----
     bad: list[str] = []   # 末轮判定 fail/missing 名单（降级只处理它们）
+    proposal_task = previous_gen_task
+    safe_tag = re.sub(r"[^A-Za-z0-9_.-]+", "_", tag)
+    validation_task = f"probe.{safe_tag}.validation"
     for rnd in range(1, MAX_ROUNDS + 1):
-        sections = collect_sections(ws, order, current_module,
-                                    registry_path, kind=kind)
-        sync_probes(ws, target_os, driver, sections)
-        names = [p["name"] for p in reg["probes"]
-                 if p["status"] == "active"]
-        if not names:
-            break
-        runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-        b = probe_mod.probe_build(boot_ws, target_os, runner,
-                                  label=f"{label}_probe_build_r{rnd}")
-        if not b["ok"]:
-            _log.console_line(f"[porter] 探针: {label} build FAIL（轮 {rnd}）——带错误回炉")
-            if rnd < MAX_ROUNDS and _fix_compile(
-                    ws, boot_ws, target_os, label, reg, registry_path,
-                    driver, rnd, logs_dir):
-                continue
-            return 1
-        ok, log, log_state = _boot_and_log(boot_ws, target_os, proj,
-                                           f"{label}_probe_boot_r{rnd}")
-        if log_state == "missing":
-            # 抢占（H9 重构）：判定输入不存在——不判定、不批量降级，
-            # infra 关口已由助手登记
-            _log.console_line(f"[porter] 探针: {label} 日志不可得——中止判定与降级"
-                  "（infra 关口待答）")
-            return 3
-        verdicts = judge(log, names)
-        bad = [n for n, v in verdicts.items() if v != "ok"]
-        if ok and not bad:
+        def _validate_host_round():
+            sections = collect_sections(ws, order, current_module,
+                                        registry_path, kind=kind)
+            sync_probes(ws, target_os, driver, sections)
+            names = [p["name"] for p in reg["probes"]
+                     if p["status"] == "active"]
+            if not names:
+                return {"accepted": True, "stage": "no-active-probes",
+                        "names": [], "bad": [], "verdicts": {}}
+            runner = json.loads(
+                (ws / "runner.json").read_text(encoding="utf-8"))
+            build = probe_mod.probe_build(
+                boot_ws, target_os, runner,
+                label=f"{label}_probe_build_r{rnd}")
+            if not build["ok"]:
+                return {"accepted": False, "stage": "build",
+                        "names": names, "bad": names, "verdicts": {},
+                        "detail": str(build.get("detail") or "build failed")}
+            boot_ok, log, log_state = _boot_and_log(
+                boot_ws, target_os, proj, f"{label}_probe_boot_r{rnd}")
+            if log_state == "missing":
+                return {"accepted": False, "stage": "infra",
+                        "names": names, "bad": names, "verdicts": {},
+                        "detail": "boot log unavailable"}
+            verdicts = judge(log, names)
+            failed = [name for name, verdict in verdicts.items()
+                      if verdict != "ok"]
+            return {"accepted": bool(boot_ok and not failed),
+                    "stage": "judge", "names": names, "bad": failed,
+                    "verdicts": verdicts, "boot_ok": bool(boot_ok),
+                    "log_state": log_state}
+
+        from ..handoff import current_execution, run_task, TaskSpec
+        if current_execution() is not None:
+            validation = run_task(
+                ws, TaskSpec(
+                    validation_task, (proposal_task,),
+                    (registry_path, ws / "runner.json"),
+                    "host build, boot, and probe verdict validation"),
+                _validate_host_round,
+                success=lambda value: bool(value.get("accepted")),
+                summary=lambda value: (
+                    f"Probe host validation stage={value.get('stage')}; "
+                    f"accepted={value.get('accepted')}; "
+                    f"bad={value.get('bad') or []}."),
+                verification=lambda value: (
+                    f"host validation stage={value.get('stage')}",
+                    f"build/boot/judge accepted={value.get('accepted')}",
+                    f"failed probes={value.get('bad') or []}"))
+        else:
+            validation = _validate_host_round()
+
+        names = validation.get("names") or []
+        bad = list(validation.get("bad") or [])
+        if validation.get("accepted"):
+            if not names:
+                break
             reg["history"] = reg.get("history", []) + [
                 {"round": rnd, "result": "all-pass"}]
             save_registry(registry_path, reg)
             _log.console_line(f"[porter] 探针: {label} {len(names)} 个全 PASS")
             return 0
+
+        if validation.get("stage") == "build":
+            _log.console_line(f"[porter] 探针: {label} build FAIL（轮 {rnd}）——带错误回炉")
+            fix_task = ("probe.compile-fix." +
+                        re.sub(r"[^A-Za-z0-9_.-]+", "_", label))
+            if rnd < MAX_ROUNDS and _fix_compile(
+                    ws, boot_ws, target_os, label, reg, registry_path,
+                    driver, rnd, logs_dir,
+                    dependencies=(proposal_task,),
+                    include_failures=(validation_task,)):
+                proposal_task = fix_task
+                continue
+            return 1
+
+        if validation.get("stage") == "infra":
+            # 抢占（H9 重构）：判定输入不存在——不判定、不批量降级，
+            # infra 关口已由助手登记
+            _log.console_line(f"[porter] 探针: {label} 日志不可得——中止判定与降级"
+                  "（infra 关口待答）")
+            return 3
+
         _log.console_line(f"[porter] 探针: {label} FAIL/missing: {bad}（轮 {rnd}）——"
               "回映射改判")
         if rnd == MAX_ROUNDS:
             break
+        rejudge_task = "probe.rejudge." + safe_tag
         if not _rejudge_failed(ws, target_os, label, tag, reg,
-                               registry_path, bad, logs_dir):
+                               registry_path, bad, logs_dir,
+                               dependencies=(proposal_task,),
+                               include_failures=(validation_task,)):
             break
+        proposal_task = rejudge_task
 
     # ---- 有界改判后仍败：降级 gap ----
     mapping = json.loads((ws / "P2" / "mapping.json").read_text(

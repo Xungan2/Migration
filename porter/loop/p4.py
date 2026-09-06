@@ -118,12 +118,40 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                   f"\n## 任务\n加法式补齐该能力，输出紧凑 JSON 块"
                   f"（patch_summary/files/evidence/reason/probe）。")
         patch = None
+        api_task = (f"loop.module.{module}.p4.fill.api."
+                    f"{__import__('re').sub(r'[^A-Za-z0-9_.-]+', '_', api)}")
+        agent_task = f"{api_task}.proposal"
         for attempt in range(1, MAX_TRIES + 1):
-            rc, out = agent.run_agent(
-                prompt, workdir=target_os,
-                log_stem=str(p4m / "logs" / f"FILL_{api}_R{attempt}"),
-                timeout_sec=AGENT_TIMEOUT_SEC)
-            parsed = agent.extract_json(out) if rc == 0 else None
+            def _attempt():
+                rc, out = agent.run_agent(
+                    prompt, workdir=target_os,
+                    log_stem=str(p4m / "logs" / f"FILL_{api}_R{attempt}"),
+                    timeout_sec=AGENT_TIMEOUT_SEC,
+                    task={"phase": "p4", "module": module, "step": "fill",
+                          "attempt": attempt, "task_id": agent_task})
+                return rc, agent.extract_json(out) if rc == 0 else None
+
+            from ..handoff import current_execution, run_task, TaskSpec
+            if current_execution() is not None:
+                rc, parsed = run_task(
+                    ws, TaskSpec(agent_task,
+                                 materials=(ws / "P2" / "mapping.json",
+                                            ws / "P3" / module / "reports" /
+                                            "gap_decisions.json"),
+                                 description="one P4 fill provider session"),
+                    _attempt,
+                    success=lambda value: (value[0] == 0 and
+                                           bool((value[1] or {}).get(
+                                               "patch_summary"))),
+                    summary=lambda value: (
+                        f"Fill provider rc={value[0]}; "
+                        f"patch proposal present={bool((value[1] or {}).get('patch_summary'))}; "
+                        "host build/boot/probe validation remains pending."),
+                    verification=lambda value: (
+                        "fill response schema accepted" if (value[1] or {}).get(
+                            "patch_summary") else "fill response schema rejected",))
+            else:
+                rc, parsed = _attempt()
             if parsed and parsed.get("patch_summary"):
                 patch = parsed
                 break
@@ -131,36 +159,68 @@ def _step_fill(ws: Path, driver_root: Path, target_os: Path, module: str,
                        "只输出一个紧凑 JSON 对象（一行）。")
         status = "fell-back"
         if patch:
-            probes_new, _e = probe_lib.validate_probes(
-                patch.get("probe") and [patch["probe"]] or [])
-            reg = probe_lib.load_registry(reg_path)
-            if probes_new:
-                reg["probes"] = [p for p in reg["probes"]
-                                 if p["claim"] != api]
-                reg["probes"].append(probes_new[0])
-                probe_lib.save_registry(reg_path, reg)
-                sections = probe_lib.collect_sections(ws, order, module,
-                                                      reg_path, kind="P4")
-                probe_lib.sync_probes(ws, target_os, driver, sections)
-            b = probe_mod.probe_build(ws / "P4", target_os, runner,
-                                      label=f"P4_{module}_fill_build_{api}")
-            boot_ok = False
-            log = ""
-            if b["ok"]:
+            def _validate_fill():
+                probes_new, probe_errors = probe_lib.validate_probes(
+                    patch.get("probe") and [patch["probe"]] or [])
+                reg = probe_lib.load_registry(reg_path)
+                if probes_new:
+                    reg["probes"] = [p for p in reg["probes"]
+                                     if p["claim"] != api]
+                    reg["probes"].append(probes_new[0])
+                    probe_lib.save_registry(reg_path, reg)
+                    sections = probe_lib.collect_sections(
+                        ws, order, module, reg_path, kind="P4")
+                    probe_lib.sync_probes(ws, target_os, driver, sections)
+                build = probe_mod.probe_build(
+                    ws / "P4", target_os, runner,
+                    label=f"P4_{module}_fill_build_{api}")
+                if not build["ok"]:
+                    return {"accepted": False, "stage": "build",
+                            "probe_errors": probe_errors,
+                            "detail": str(build.get("detail") or "build failed")}
                 boot_ok, log, log_state = probe_lib.boot_and_log(
                     ws, "P4", target_os, proj,
                     f"P4_{module}_fill_boot_{api}")
                 if log_state == "missing":
-                    # 抢占（H9 重构）：判定输入不存在，infra 关口已登记
-                    _log.console_line(f"[porter] P4: fill {api} 验证中止（boot 日志"
-                          "不可得）——exit 3")
-                    return 3
-            names = [p["name"] for p in probe_lib.load_registry(reg_path)
-                     .get("probes", []) if p["status"] == "active"]
-            verdicts = probe_lib.judge(log, [n for n in names]) if log else {}
-            fill_probe_ok = (b["ok"] and boot_ok and
-                             (not probes_new or
-                              verdicts.get(probes_new[0]["name"]) == "ok"))
+                    return {"accepted": False, "stage": "infra",
+                            "probe_errors": probe_errors,
+                            "detail": "boot log unavailable"}
+                names = [p["name"] for p in probe_lib.load_registry(reg_path)
+                         .get("probes", []) if p["status"] == "active"]
+                verdicts = probe_lib.judge(log, names) if log else {}
+                accepted = (boot_ok and
+                            (not probes_new or verdicts.get(
+                                probes_new[0]["name"]) == "ok"))
+                return {"accepted": bool(accepted), "stage": "judge",
+                        "boot_ok": bool(boot_ok), "verdicts": verdicts,
+                        "probe_errors": probe_errors}
+
+            validation_task = f"{api_task}.validation"
+            if current_execution() is not None:
+                validation = run_task(
+                    ws, TaskSpec(
+                        validation_task, (agent_task,),
+                        (ws / "P2" / "mapping.json",
+                         ws / "P3" / module / "reports" /
+                         "gap_decisions.json"),
+                        "P4 fill host build, boot, and probe validation"),
+                    _validate_fill,
+                    success=lambda value: bool(value.get("accepted")),
+                    summary=lambda value: (
+                        f"Fill {api} host validation stage={value.get('stage')}; "
+                        f"accepted={value.get('accepted')}."),
+                    verification=lambda value: (
+                        f"fill validation stage={value.get('stage')}",
+                        f"build/boot/probe accepted={value.get('accepted')}",
+                        f"probe schema errors={value.get('probe_errors') or []}"))
+            else:
+                validation = _validate_fill()
+            if validation.get("stage") == "infra":
+                # 抢占（H9 重构）：判定输入不存在，infra 关口已登记。
+                _log.console_line(f"[porter] P4: fill {api} 验证中止（boot 日志"
+                      "不可得）——exit 3")
+                return 3
+            fill_probe_ok = bool(validation.get("accepted"))
             if fill_probe_ok:
                 status = "filled"
                 e = index.get(api)
@@ -204,7 +264,8 @@ def _slices(files: list[Path], max_lines: int = MAX_LINES_PER_SLICE
     """(文件, 起 1-based 行, 止行) 切片序列。"""
     out: list[tuple[Path, int, int]] = []
     for f in files:
-        n = sum(1 for _ in f.open(encoding="utf-8", errors="replace"))
+        with f.open(encoding="utf-8", errors="replace") as source:
+            n = sum(1 for _ in source)
         for start in range(1, n + 1, max_lines):
             out.append((f, start, min(start + max_lines - 1, n)))
     return out
@@ -215,9 +276,11 @@ def _src_line_counts(crate: Path) -> dict[str, int]:
     src = crate / "src"
     if not src.is_dir():
         return {}
-    return {p.name: sum(1 for _ in p.open(encoding="utf-8",
-                                          errors="replace"))
-            for p in sorted(src.glob("*.rs"))}
+    counts = {}
+    for path in sorted(src.glob("*.rs")):
+        with path.open(encoding="utf-8", errors="replace") as source:
+            counts[path.name] = sum(1 for _ in source)
+    return counts
 
 
 def _shrunk_files(before: dict[str, int], after: dict[str, int],
@@ -281,18 +344,33 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
     map_block, redesign_block = _mapping_data_block(ws, surface, module)
     mod_json = json.loads((mdir / "module.json").read_text(encoding="utf-8"))
     skill = agent.load_skill("P4-migrate")
+    from ..divide.pruning import module_context
+    pruning_context = module_context(ws, module)
 
     mig_path = p4m / "reports" / "migration.json"
     mig = json.loads(mig_path.read_text(encoding="utf-8")) \
         if mig_path.exists() else {"slices": []}
-    done_keys = {(s["file"], s["start"], s["end"]) for s in mig["slices"]}
+    done_keys = {(s["file"], s["start"], s["end"]) for s in mig["slices"]
+                 if s.get("ok")}
     sig_counts: dict[str, int] = mig.setdefault("sig_counts", {})
     failures: list[dict] = []
     hard_stop = False              # blocked / 同签名连发 → 立即 panic（H13）
+    previous_slice_task: str | None = None
 
     for f, start, end in slices:
         key = (f.name, start, end)
+        slice_task = (f"loop.module.{module}.p4.slice."
+                      f"{f.name}.{start}-{end}")
+        slice_deps = ((previous_slice_task,) if previous_slice_task else
+                      (f"loop.module.{module}.p4.fill",))
         if key in done_keys:
+            # The mutable migration ledger is not proof of a prior task.  A
+            # cached slice is usable only when its original durable handoff is
+            # still valid; legacy caches must be explicitly imported/rebuilt.
+            from ..handoff import current_execution, HandoffManager
+            if current_execution() is not None:
+                HandoffManager(ws).require_success(slice_task)
+            previous_slice_task = slice_task
             continue
         # 每片重算 existing 与行数快照（2026-08-30 事故：一次性快照误导
         # moved_2 片以为 hw_defs.rs 不存在而"新建"覆盖前片 1472 行成果）
@@ -322,6 +400,8 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                   f".rs；首片建 mod 声明于 lib.rs，后续片只追加内容）。"
                   f"完成后按运行协议输出 JSON 块（status/files/notes）。")
 
+        prompt += pruning_context
+
         # ---- split_long_op（2026-09-04 接线）：切片迁移的
         # 「agent→build→拼 err_info 反馈重试」老序列整体替换为
         # run_agent_seq 一次调用：agent 段同会话续接（opencode --session，
@@ -348,15 +428,43 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                                "请把被删内容完整恢复后重做本片。")
             return True, out_text
 
-        seq = agent.run_agent_seq(
-            prompt, workdir=target_os,
-            log_stem=str(p4m / "logs" / f"MIG_{f.name}_{start}"),
-            static={"describe": "编译验证（docker 内 make kernel）",
-                    "fn": _static},
-            gen_schema={"status": "str", "files": "list", "notes": "str"},
-            final_static=True,          # done 后编排器强制编译（同旧语义）
-            agent_budget_sec=SEQ_BUDGET_SEC,
-            task={"phase": "p4", "module": module, "step": "migrate"})
+        def _run_seq():
+            return agent.run_agent_seq(
+                prompt, workdir=target_os,
+                log_stem=str(p4m / "logs" / f"MIG_{f.name}_{start}"),
+                static={"describe": "编译验证（docker 内 make kernel）",
+                        "fn": _static},
+                gen_schema={"status": "str", "files": "list", "notes": "str"},
+                final_static=True,      # done 后编排器强制编译（同旧语义）
+                agent_budget_sec=SEQ_BUDGET_SEC,
+                task={"phase": "p4", "module": module, "step": "migrate",
+                      "task_id": slice_task})
+
+        from ..handoff import current_execution, run_task, TaskSpec, Material
+        if current_execution() is not None:
+            seq = run_task(
+                ws, TaskSpec(
+                    slice_task, slice_deps,
+                    (Material(f, must_remain_unchanged=True),
+                     ws / "P2" / "mapping.json",
+                     ws / "P3" / module / "reports" / "criteria.json"),
+                    "P4 migration slice with in-session static validation"),
+                _run_seq,
+                success=lambda value: (
+                    value.get("status") == "done" and
+                    (value.get("parsed") or {}).get("status") != "blocked"),
+                summary=lambda value: str(
+                    (value.get("parsed") or {}).get("notes") or
+                    f"Slice ended with {value.get('status')}."),
+                artifacts=(crate,),
+                verification=lambda value: (
+                    f"run_agent_seq status={value.get('status')}",
+                    f"segments={len(value.get('rounds') or [])}",
+                    "final_static build and line-preservation guard accepted"
+                    if value.get("status") == "done" else
+                    "final static acceptance was not reached"))
+        else:
+            seq = _run_seq()
         parsed = seq.get("parsed") or {}
         blocked = parsed.get("status") == "blocked"
         ok = seq["status"] == "done" and not blocked
@@ -463,6 +571,8 @@ def _step_migrate(ws: Path, driver_root: Path, target_os: Path, module: str,
                     scope_extra={"module": module})
             except Exception:
                 pass
+        if ok:
+            previous_slice_task = slice_task
         if blocked:
             failures.append({"file": f.name, "start": start, "end": end,
                              "blocked": True})
@@ -517,11 +627,42 @@ def run_p4(ws: Path, module: str, order: list[str]) -> int:
     if ctx is None:
         return 2
     driver_root, target_os, p4m, proj, runner = ctx
+    from ..divide.pruning import criteria_errors, require_ready
+    if require_ready(ws, driver_root):
+        return 2
+    pruning_errors = criteria_errors(ws, module, json.loads(
+        (ws / "P3" / module / "reports" / "criteria.json").read_text(
+            encoding="utf-8")).get("criteria", []))
+    if pruning_errors:
+        _log.console_line("[porter] P4: " + "；".join(pruning_errors) + "；先重跑 P3")
+        return 2
     surface = json.loads((ws / "P3" / module / "reports" / "surface.json")
                          .read_text(encoding="utf-8"))
 
-    rc = _step_fill(ws, driver_root, target_os, module, p4m, proj, runner,
-                    order)
+    from ..handoff import (current_execution, run_task, TaskSpec,
+                           HandoffManager, NotReady)
+    if current_execution() is not None:
+        fill_task = f"loop.module.{module}.p4.fill"
+        fill_artifact = p4m / "reports" / "fill.json"
+        try:
+            HandoffManager(ws).require_success(
+                fill_task, current_artifacts=(fill_artifact,))
+            rc = 0
+        except NotReady:
+            rc = run_task(
+                ws, TaskSpec(
+                    fill_task, (f"loop.module.{module}.p3",),
+                    (ws / "P2" / "mapping.json",
+                     ws / "P3" / module / "reports" / "gap_decisions.json"),
+                    f"P4({module}) shared platform fill"),
+                lambda: _step_fill(ws, driver_root, target_os, module, p4m,
+                                   proj, runner, order),
+                summary=lambda value: f"Fill acceptance returned rc={value}.",
+                artifacts=(fill_artifact,),
+                verification=lambda value: (f"fill business result rc={value}",))
+    else:
+        rc = _step_fill(ws, driver_root, target_os, module, p4m, proj, runner,
+                        order)
     if rc != 0:
         return rc
 

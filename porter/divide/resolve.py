@@ -72,7 +72,7 @@ def _build_graph(ws: Path) -> dict:
         if c_mods:
             owner[sym] = sorted(c_mods)[0]
 
-    edges: dict[str, dict[str, list[str]]] = {}
+    edges: dict[str, dict[str, list[str]]] = {m: {} for m in defs}
     for m, rs in refs.items():
         for sym in sorted(rs):
             t = owner.get(sym)
@@ -135,6 +135,19 @@ def _topo_order(edges: dict[str, dict[str, list[str]]]) -> list[str]:
                 ready.append(d)
         ready.sort()
     return order
+
+
+def _dependency_report(graph: dict, cycles: list[list[str]]) -> dict:
+    """Serialize a scanned graph for both resolve and pruning validation."""
+    return {
+        "modules": sorted(graph["edges"]),
+        "edges": {m: sorted(ts) for m, ts in graph["edges"].items()},
+        "edge_symbols": {m: {t: sorted(s) for t, s in ts.items()}
+                         for m, ts in graph["edges"].items()},
+        "order": _topo_order(graph["edges"]) if not cycles else [],
+        "cycles": cycles,
+        "duplicate_symbols": graph["dup"],
+    }
 
 
 # ---------- 报告与 prompt ----------
@@ -373,22 +386,14 @@ def run_resolve(ws: Path, driver_root: Path,
     skill = agent.load_skill("P1-resolve")
     history: list[dict] = []
 
-    for rnd in range(1, MAX_ROUNDS + 1):
+    for rnd in range(1, MAX_ROUNDS + 2):
         g = _build_graph(ws)
         cycles = _find_cycles(g["edges"])
-        _log.console_line(f"[porter] P1R: 第 {rnd} 次扫描——{len(g['edges'])} 个模块有出边，"
+        _log.console_line(f"[porter] P1R: 第 {rnd} 次扫描——{len(g['edges'])} 个模块，"
               f"{len(cycles)} 个环，重复符号 {len(g['dup'])}")
         if not cycles:
-            order = _topo_order(g["edges"])
-            deps = {
-                "modules": sorted(g["edges"]),
-                "edges": {m: sorted(ts) for m, ts in g["edges"].items()},
-                "edge_symbols": {m: {t: sorted(s) for t, s in ts.items()}
-                                 for m, ts in g["edges"].items()},
-                "order": order,
-                "cycles": [],
-                "duplicate_symbols": g["dup"],
-            }
+            deps = _dependency_report(g, cycles)
+            order = deps["order"]
             (p1 / "modules" / "deps.json").write_text(
                 json.dumps(deps, ensure_ascii=False, indent=2),
                 encoding="utf-8")
@@ -399,44 +404,70 @@ def run_resolve(ws: Path, driver_root: Path,
                       f"（所有权按 .c 侧，详见 deps.json）")
             return 0
 
+        if rnd > MAX_ROUNDS:
+            break
         report = _make_report(cycles, g["edges"],
                               json.loads(plan_path.read_text(encoding="utf-8")),
                               g["dup"])
         (p1 / "reports" / f"P1R_report_R{rnd}.md").write_text(
             report, encoding="utf-8")
-        rc, out = agent.run_agent(
-            _prompt(skill, report, rnd, history, strategy_block), workdir=p1,
-            log_stem=str(p1 / "logs" / f"P1R_R{rnd}"), timeout_sec=3600)
-        parsed = agent.extract_json(out) if rc == 0 else None
-        moves = (parsed or {}).get("moves")
+        old_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        agent_task = "p1.resolve.agent"
+
+        def _attempt():
+            rc, out = agent.run_agent(
+                _prompt(skill, report, rnd, history, strategy_block), workdir=p1,
+                log_stem=str(p1 / "logs" / f"P1R_R{rnd}"), timeout_sec=3600,
+                task={"phase": "p1", "step": "resolve", "attempt": rnd,
+                      "task_id": agent_task})
+            parsed = agent.extract_json(out) if rc == 0 else None
+            moves = (parsed or {}).get("moves")
+            if moves is None:
+                return rc, None, old_plan, ["output has no moves JSON"]
+            new_plan, errors = _apply_moves(old_plan, moves)
+            if not errors and not _conservation(old_plan, new_plan):
+                errors = ["fragment conservation check failed"]
+            if not errors:
+                try:
+                    (p1 / "reports" / f"P1D_plan_R{rnd}.json").write_text(
+                        json.dumps(new_plan, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+                    plan_path.write_text(json.dumps(
+                        new_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                    frag_mod.extract_modules(ws, driver_root, new_plan)
+                except frag_mod.DivideError as exc:
+                    plan_path.write_text(json.dumps(
+                        old_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                    frag_mod.extract_modules(ws, driver_root, old_plan)
+                    errors = [f"fragment extraction failed: {exc}"]
+            return rc, moves, new_plan, errors
+
+        from ..handoff import current_execution, run_task, TaskSpec
+        if current_execution() is not None:
+            rc, moves, new_plan, errs = run_task(
+                ws, TaskSpec(agent_task,
+                             materials=(plan_path, spath) if spath.exists()
+                             else (plan_path,),
+                             description="one dependency resolution session"),
+                _attempt,
+                success=lambda value: value[0] == 0 and value[1] is not None and
+                not value[3],
+                summary=lambda value: (
+                    f"Resolve provider rc={value[0]}; moves="
+                    f"{len(value[1] or [])}; errors={value[3]}."),
+                verification=lambda value: (
+                    "move validation, conservation, and extraction accepted"
+                    if not value[3] else "; ".join(value[3]),))
+        else:
+            rc, moves, new_plan, errs = _attempt()
         if moves is None:
             _log.console_line(f"[porter] P1R: 第 {rnd} 轮输出无法解析为 moves JSON"
                   f"（见 P1/logs/P1R_R{rnd}.log）")
             continue
-
-        old_plan = json.loads(plan_path.read_text(encoding="utf-8"))
-        new_plan, errs = _apply_moves(old_plan, moves)
         if errs:
             _log.console_line(f"[porter] P1R: 第 {rnd} 轮搬运校验未过：")
             for e in errs:
                 print(f"  - {e}")
-            continue
-        if not _conservation(old_plan, new_plan):
-            _log.console_line(f"[porter] P1R: 第 {rnd} 轮守恒校验失败（片段集变化）——丢弃")
-            continue
-        # 保存轮次审计 + 应用
-        (p1 / "reports" / f"P1D_plan_R{rnd}.json").write_text(
-            json.dumps(new_plan, ensure_ascii=False, indent=2),
-            encoding="utf-8")
-        plan_path.write_text(json.dumps(new_plan, ensure_ascii=False,
-                                        indent=2), encoding="utf-8")
-        try:
-            frag_mod.extract_modules(ws, driver_root, new_plan)
-        except frag_mod.DivideError as e:
-            _log.console_line(f"[porter] P1R: 搬运后重抽取失败（回滚本轮 plan）：\n{e}")
-            plan_path.write_text(json.dumps(old_plan, ensure_ascii=False,
-                                            indent=2), encoding="utf-8")
-            frag_mod.extract_modules(ws, driver_root, old_plan)
             continue
         history.append({"round": rnd, "moves": moves})
         _log.console_line(f"[porter] P1R: 第 {rnd} 轮应用 {len(moves)} 条搬运，"

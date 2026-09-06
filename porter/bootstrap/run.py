@@ -29,26 +29,41 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
             _log.console_line(f"[porter] P2: 缺少 {need}（先跑 p0/p1）")
             return 2
 
-    rc = mapping.run_map(ws, driver_root, target_os)
-    if rc == 2:
+    from ..divide import pruning
+    if pruning.require_ready(ws, driver_root):
         return 2
-    if rc == 1:
-        _log.console_line("[porter] P2: ⚠ 映射存在失败批（详见 mapping_report.md）——"
-              "骨架继续，失败批可断点重跑（幂等）")
 
-    rc = scaffold.run_scaffold(ws, target_os, device_ids)
+    from ..handoff import current_execution as _handoff_current
+    from ..handoff.integration import execute_phase as _handoff_phase
+
+    def _phase(task_id, deps, fn, artifacts):
+        if _handoff_current() is None:
+            return fn()
+        return _handoff_phase(
+            ws, task_id, deps, fn, materials=(ws / "project.json",),
+            artifacts=artifacts, description="P2 composite child task")
+
+    predecessor = "p1.prune" if (ws / "P1/scope.json").exists() else "p1.resolve"
+    rc = _phase("p2.map", (predecessor,),
+                lambda: mapping.run_map(ws, driver_root, target_os),
+                (ws / "P2" / "mapping.json",))
+    if rc != 0:
+        return rc
+
+    rc = _phase("p2.scaffold", ("p2.map",),
+                lambda: scaffold.run_scaffold(ws, target_os, device_ids),
+                (ws / "P2" / "reports" / "scaffold_manifest.json",))
     if rc != 0:
         return rc
 
     # 2c 探针预生成（贵且可复用的验证前置；失败不阻塞——缺口可
     # p2-probes 幂等补跑）
     from . import pregen
-    rc = pregen.run_pregen(ws, target_os)
-    if rc == 2:
-        return 2
+    rc = _phase("p2.probes", ("p2.scaffold",),
+                lambda: pregen.run_pregen(ws, target_os),
+                (ws / "P2" / "reports" / "pregen_report.md",))
     if rc != 0:
-        _log.console_line("[porter] P2: ⚠ 探针预生成存在失败（详见 "
-              "P2/reports/pregen_report.md）——可 p2-probes 断点补跑")
+        return rc
 
     # vcs：P2 阶段末——commit 面来自 scaffold manifest（骨架 + 接线 +
     # P2c 探针同步触碰面），工作区 commit（best-effort）

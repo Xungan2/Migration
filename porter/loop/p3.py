@@ -38,6 +38,19 @@ from .. import log as _log
 AGENT_TIMEOUT_SEC = 900
 
 
+def _provider_attempt(ws: Path, task_id: str, operation, accepted, summary,
+                      verification, *, materials=()):
+    """Make one provider session an independently terminal durable attempt."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return operation()
+    return run_task(
+        ws, TaskSpec(task_id, materials=tuple(materials),
+                     description="one validated P3 provider session"),
+        operation, success=accepted, summary=summary,
+        verification=verification)
+
+
 def _ctx(ws: Path, module: str) -> tuple[Path, Path, Path, dict] | None:
     proj_path = ws / "project.json"
     if not proj_path.exists():
@@ -158,13 +171,43 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
                                       domain, batch, locs, cat)
             got: list[dict] = []
             feedback = ""
+            batch_version = __import__("hashlib").sha256(
+                "\0".join(batch).encode("utf-8")).hexdigest()[:10]
+            attempt_task = (f"loop.module.{module}.p3.mapping."
+                            f"{__import__('re').sub(r'[^A-Za-z0-9_.-]+', '_', dom_key)}."
+                            f"{batch_version}")
             for attempt in range(1, MAX_TRIES + 1):
-                rc, out = agent.run_agent(
-                    base + feedback, workdir=target_os,
-                    log_stem=str(p3m / "logs" /
-                                 f"P3A_{dom_key}_R{attempt}"),
-                    timeout_sec=AGENT_TIMEOUT_SEC)
-                parsed = agent.extract_json(out) if rc == 0 else None
+                def _attempt():
+                    rc, out = agent.run_agent(
+                        base + feedback, workdir=target_os,
+                        log_stem=str(p3m / "logs" /
+                                     f"P3A_{dom_key}_R{attempt}"),
+                        timeout_sec=AGENT_TIMEOUT_SEC,
+                        task={"phase": "p3", "module": module,
+                              "step": "mapping", "attempt": attempt,
+                              "task_id": attempt_task})
+                    parsed = agent.extract_json(out) if rc == 0 else None
+                    candidate, errors = ([], ["missing entries JSON"])
+                    missing_now = list(batch)
+                    if parsed and isinstance(parsed.get("entries"), list):
+                        candidate, errors = _validate_entries(
+                            parsed["entries"], target_os, domain)
+                        covered = {e["linux_api"] for e in candidate}
+                        missing_now = [s for s in batch if s not in covered]
+                    return rc, parsed, candidate, errors, missing_now
+
+                rc, parsed, got, errs, missing_now = _provider_attempt(
+                    ws, attempt_task, _attempt,
+                    lambda value: (value[0] == 0 and bool(value[2]) and
+                                   not value[3] and not value[4]),
+                    lambda value: (f"P3 mapping batch rc={value[0]}; "
+                                   f"valid={len(value[2])}; errors={value[3]}; "
+                                   f"missing={value[4]}."),
+                    lambda value: ("_validate_entries and coverage accepted output"
+                                   if not value[3] and not value[4]
+                                   else "; ".join(value[3] + value[4])),
+                    materials=(ws / "P2" / "mapping.json",
+                               p3m / "reports" / "surface.json"))
                 if parsed and "entries" in parsed:
                     cons = parsed.get("kb_consulted")
                     if isinstance(cons, list):
@@ -174,10 +217,6 @@ def _step_missing_mapping(ws: Path, driver_root: Path, target_os: Path,
                         _cand.record_lessons(ws, parsed, f"P3A/{dom_key}")
                     except Exception:
                         pass
-                    got, errs = _validate_entries(parsed["entries"],
-                                                   target_os, domain)
-                    covered = {e["linux_api"] for e in got}
-                    missing_now = [s for s in batch if s not in covered]
                     if got and not missing_now and not errs:
                         break
                     fb = []
@@ -231,6 +270,42 @@ def _prompt_gap_classify(skill: str, driver_root: Path, target_os: Path,
             f"知识条目）。")
 
 
+def _validate_gap_candidate(parsed: dict | None, gaps: list[dict],
+                            target_os: Path) -> tuple[list[dict], list[str]]:
+    decisions: list[dict] = []
+    errs: list[str] = []
+    covered = set()
+    if not parsed or not isinstance(parsed.get("decisions"), list):
+        return [], ["provider output has no decisions array"]
+    known = {g["linux_api"] for g in gaps}
+    for d in parsed["decisions"]:
+        if not isinstance(d, dict):
+            errs.append("decision is not an object")
+            continue
+        api, strat = d.get("linux_api"), d.get("strategy")
+        if api not in known:
+            errs.append(f"未知符号 {api}")
+            continue
+        if strat not in ("bypass", "fill", "register-fill", "human"):
+            errs.append(f"{api}: strategy 非法 {strat}")
+            continue
+        if not str(d.get("instruction", "")).strip() and strat != "human":
+            errs.append(f"{api}: 非 human 须有 instruction")
+            continue
+        if strat == "fill" and not _check_evidence(
+                d.get("evidence", ""), target_os):
+            errs.append(f"{api}: fill 须有树内 evidence")
+            continue
+        covered.add(api)
+        decisions.append({"linux_api": api, "strategy": strat,
+                          "instruction": str(d.get("instruction", "")),
+                          "evidence": str(d.get("evidence", ""))})
+    missing = [g["linux_api"] for g in gaps if g["linux_api"] not in covered]
+    if missing:
+        errs.append("仍缺决策: " + ", ".join(missing))
+    return decisions, errs
+
+
 def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
                         surface: dict) -> int:
     dec_path = p3m / "reports" / "gap_decisions.json"
@@ -276,12 +351,28 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
                                 locs, cat)
     decisions: list[dict] = []
     feedback = ""
+    attempt_task = f"loop.module.{module}.p3.gap.agent"
     for attempt in range(1, MAX_TRIES + 1):
-        rc, out = agent.run_agent(
-            base + feedback, workdir=target_os,
-            log_stem=str(p3m / "logs" / f"P3G_R{attempt}"),
-            timeout_sec=AGENT_TIMEOUT_SEC)
-        parsed = agent.extract_json(out) if rc == 0 else None
+        def _attempt():
+            rc, out = agent.run_agent(
+                base + feedback, workdir=target_os,
+                log_stem=str(p3m / "logs" / f"P3G_R{attempt}"),
+                timeout_sec=AGENT_TIMEOUT_SEC,
+                task={"phase": "p3", "module": module, "step": "gap",
+                      "attempt": attempt, "task_id": attempt_task})
+            parsed = agent.extract_json(out) if rc == 0 else None
+            candidate, errors = _validate_gap_candidate(parsed, gaps, target_os)
+            return rc, parsed, candidate, errors
+
+        rc, parsed, decisions, errs = _provider_attempt(
+            ws, attempt_task, _attempt,
+            lambda value: value[0] == 0 and bool(value[2]) and not value[3],
+            lambda value: (f"Gap provider rc={value[0]}; "
+                           f"accepted={len(value[2])}; errors={value[3]}."),
+            lambda value: ("gap decision validation accepted output"
+                           if not value[3] else "; ".join(value[3])),
+            materials=(ws / "P2" / "mapping.json",
+                       p3m / "reports" / "surface.json"))
         if parsed and isinstance(parsed.get("decisions"), list):
             cons = parsed.get("kb_consulted")
             if isinstance(cons, list):
@@ -292,45 +383,10 @@ def _step_gap_decisions(ws: Path, target_os: Path, module: str, p3m: Path,
                                      f"P3G/{module}")
             except Exception:
                 pass
-            decisions = []
-            errs = []
-            covered = set()
-            for d in parsed["decisions"]:
-                if not isinstance(d, dict):
-                    continue
-                api, strat = d.get("linux_api"), d.get("strategy")
-                if api not in {g["linux_api"] for g in gaps}:
-                    errs.append(f"未知符号 {api}")
-                    continue
-                if strat not in ("bypass", "fill", "register-fill", "human"):
-                    errs.append(f"{api}: strategy 非法 {strat}")
-                    continue
-                if not str(d.get("instruction", "")).strip() and \
-                        strat != "human":
-                    errs.append(f"{api}: 非 human 须有 instruction")
-                    continue
-                if strat in ("fill", "register-fill") and \
-                        not _check_evidence(d.get("evidence", ""), target_os):
-                    # fill 证据在树内定位补齐点（register-fill 可空）
-                    if strat == "fill":
-                        errs.append(f"{api}: fill 须有树内 evidence")
-                        continue
-                covered.add(api)
-                decisions.append({"linux_api": api, "strategy": strat,
-                                  "instruction": str(d.get("instruction",
-                                                           "")),
-                                  "evidence": str(d.get("evidence", ""))})
-            missing = [g["linux_api"] for g in gaps
-                       if g["linux_api"] not in covered]
-            if not missing and not errs:
+            if decisions and not errs:
                 break
-            fb = []
-            if missing:
-                fb.append("仍缺决策：", ", ".join(missing))
-            if errs:
-                fb.append("问题：" + "; ".join(errs[:8]))
             feedback = ("\n\n---\n\n## 上一次输出的问题（修正后重输出完整 "
-                        "JSON）\n" + "\n".join(fb))
+                        "JSON）\n" + "; ".join(errs[:8]))
         else:
             feedback = ("\n\n---\n\n## 上一次输出的问题\n未见合法 JSON。只输出"
                         "一个紧凑 JSON 对象（一行）。")
@@ -415,10 +471,14 @@ def _strategy_row(ws: Path, module: str) -> str:
 
 
 def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
+    from ..divide.pruning import criteria_errors, module_context
     crit_path = p3m / "reports" / "criteria.json"
     if crit_path.exists():
-        _log.console_line(f"[porter] P3: {module} 判据已存在——复用")
-        return 0
+        existing = json.loads(crit_path.read_text(encoding="utf-8"))
+        if not criteria_errors(ws, module, existing.get("criteria", [])):
+            _log.console_line(f"[porter] P3: {module} 判据已存在——复用")
+            return 0
+        _log.console_line(f"[porter] P3: {module} 既有判据未覆盖裁剪处置，重新生成")
     row = _strategy_row(ws, module)
     skill = agent.load_skill("P3-criteria")
     st = surface["stats"]
@@ -433,15 +493,36 @@ def _step_criteria(ws: Path, module: str, p3m: Path, surface: dict) -> int:
               f"criteria 数组）。基线 compile/boot 由脚本自动附加，"
               f"无需输出。消费者依赖的可观测项给 deferred_by。")
     final: list[dict] = []
+    prompt += module_context(ws, module)
+    attempt_task = f"loop.module.{module}.p3.criteria.agent"
     for attempt in range(1, MAX_TRIES + 1):
-        rc, out = agent.run_agent(prompt, workdir=ws,
-                                  log_stem=str(p3m / "logs" /
-                                               f"P3C_R{attempt}"),
-                                  timeout_sec=AGENT_TIMEOUT_SEC)
-        parsed = agent.extract_json(out) if rc == 0 else None
+        def _attempt():
+            rc, out = agent.run_agent(
+                prompt, workdir=ws,
+                log_stem=str(p3m / "logs" / f"P3C_R{attempt}"),
+                timeout_sec=AGENT_TIMEOUT_SEC,
+                task={"phase": "p3", "module": module,
+                      "step": "criteria", "attempt": attempt,
+                      "task_id": attempt_task})
+            parsed = agent.extract_json(out) if rc == 0 else None
+            candidate, errors = ([], ["missing criteria JSON"])
+            if parsed and isinstance(parsed.get("criteria"), list):
+                candidate, errors = crit_mod.validate_criteria(
+                    parsed["criteria"], module)
+                errors += criteria_errors(ws, module, candidate)
+                if errors:
+                    candidate = []
+            return rc, parsed, candidate, errors
+
+        rc, parsed, final, errs = _provider_attempt(
+            ws, attempt_task, _attempt,
+            lambda value: value[0] == 0 and bool(value[2]) and not value[3],
+            lambda value: (f"Criteria provider rc={value[0]}; "
+                           f"accepted={len(value[2])}; errors={value[3]}."),
+            lambda value: ("validate_criteria accepted output" if not value[3]
+                           else "; ".join(value[3])),
+            materials=(p3m / "reports" / "surface.json",))
         if parsed and isinstance(parsed.get("criteria"), list):
-            final, errs = crit_mod.validate_criteria(parsed["criteria"],
-                                                     module)
             if final and not errs:
                 break
             if errs:
@@ -542,26 +623,78 @@ def run_p3(ws: Path, module: str, order: list[str]) -> int:
     if ctx is None:
         return 2
     driver_root, target_os, p3m, proj = ctx
+    from ..divide.pruning import require_ready
+    if require_ready(ws, driver_root):
+        return 2
 
-    surface, rc = surface_mod.extract_surface(ws, driver_root, module)
+    from ..handoff import current_execution, run_task, TaskSpec
+    from ..handoff.integration import (module_dependencies, module_failure_inputs,
+                                       module_task_id)
+    handoff_on = current_execution() is not None
+    phase_id = module_task_id(module, "p3")
+
+    def _value(task_id, deps, operation, success, summary, artifacts=(),
+               include_failures=()):
+        if not handoff_on:
+            return operation()
+        return run_task(
+            ws, TaskSpec(task_id, tuple(deps),
+                         (ws / "project.json", ws / "P1" / "modules" /
+                          "deps.json"), f"P3({module}) child task",
+                         tuple(include_failures)),
+            operation, success=success, summary=summary,
+            artifacts=artifacts,
+            verification=lambda value: (f"child acceptance result={value!r}"[:500],))
+
+    surface, rc = _value(
+        f"{phase_id}.surface", module_dependencies(ws, module, "p3"),
+        lambda: surface_mod.extract_surface(ws, driver_root, module),
+        lambda value: value[1] == 0,
+        lambda value: f"Usage surface extraction returned rc={value[1]}.",
+        (p3m / "reports" / "surface.json",),
+        module_failure_inputs(ws, module))
     if rc != 0:
         return rc
 
-    failed_batches = _step_missing_mapping(ws, driver_root, target_os,
-                                            module, p3m, surface)
+    failed_batches = _value(
+        f"{phase_id}.mapping", (f"{phase_id}.surface",),
+        lambda: _step_missing_mapping(ws, driver_root, target_os,
+                                      module, p3m, surface),
+        lambda value: not value,
+        lambda value: ("All missing mapping batches were accepted." if not value
+                       else f"Mapping batches failed: {value}"),
+        (ws / "P2" / "mapping.json",))
+    if failed_batches and handoff_on:
+        _refresh_drafts(ws)
+        return 1
 
-    rc = _step_gap_decisions(ws, target_os, module, p3m, surface)
+    rc = _value(
+        f"{phase_id}.gaps", (f"{phase_id}.mapping",),
+        lambda: _step_gap_decisions(ws, target_os, module, p3m, surface),
+        lambda value: value == 0,
+        lambda value: f"Gap decision validation returned rc={value}.",
+        (p3m / "reports" / "gap_decisions.json",))
     if rc != 0:
         _refresh_drafts(ws)     # H18：exit-3 路径也刷新（人工答案恰在此轮）
         return rc
 
-    rc = _step_criteria(ws, module, p3m, surface)
+    rc = _value(
+        f"{phase_id}.criteria", (f"{phase_id}.gaps",),
+        lambda: _step_criteria(ws, module, p3m, surface),
+        lambda value: value == 0,
+        lambda value: f"Criteria validation returned rc={value}.",
+        (p3m / "reports" / "criteria.json",))
     if rc != 0:
         _refresh_drafts(ws)     # 同 H18：失败路径不丢增量
         return rc
 
-    rc = _step_probes(ws, driver_root, target_os, module, p3m, proj,
-                      surface, order)
+    rc = _value(
+        f"{phase_id}.probes", (f"{phase_id}.criteria",),
+        lambda: _step_probes(ws, driver_root, target_os, module, p3m, proj,
+                             surface, order),
+        lambda value: value == 0,
+        lambda value: f"Probe lifecycle returned rc={value}.",
+        (p3m / "reports" / "probes.json",))
     if rc != 0:
         _refresh_drafts(ws)
         return rc

@@ -243,20 +243,48 @@ def _prompt_redesign(skill: str, driver_root: Path, target_os: Path) -> str:
             f"输出一个紧凑 JSON 块。")
 
 
-def _call_agent(prompt: str, target_os: Path, log_stem: Path) -> dict | None:
-    rc, out = agent.run_agent(prompt, workdir=target_os,
-                              log_stem=str(log_stem),
-                              timeout_sec=AGENT_TIMEOUT_SEC)
-    if rc != 0:
-        return None
-    parsed = agent.extract_json(out)
-    return parsed if isinstance(parsed, dict) else None
+def _call_agent(prompt: str, target_os: Path, log_stem: Path, *,
+                ws: Path | None = None, task_id: str = "",
+                dependencies: tuple[str, ...] = (), validator=None) -> dict | None:
+    def _operation():
+        rc, out = agent.run_agent(
+            prompt, workdir=target_os, log_stem=str(log_stem),
+            timeout_sec=AGENT_TIMEOUT_SEC,
+            task={"phase": "P2", "step": "mapping", "task_id": task_id})
+        parsed = agent.extract_json(out) if rc == 0 else None
+        return rc, parsed
+
+    from ..handoff import current_execution, run_task, TaskSpec
+    if ws is None or current_execution() is None:
+        rc, parsed = _operation()
+        return parsed if rc == 0 and isinstance(parsed, dict) else None
+    result = run_task(
+        ws, TaskSpec(task_id, dependencies,
+                     (ws / "P2" / "reports" / "spine_api.json",),
+                     "P2 mapping batch"),
+        _operation,
+        success=lambda value: (
+            value[0] == 0 and isinstance(value[1], dict) and
+            (validator(value[1]) if validator else True)),
+        summary=lambda value: (
+            f"Mapping batch provider rc={value[0]}; parsed="
+            f"{isinstance(value[1], dict)}; business validation="
+            f"{bool(isinstance(value[1], dict) and (validator(value[1]) if validator else True))}."),
+        verification=lambda value: (
+            "Caller-supplied mapping schema/coverage validator accepted output"
+            if (isinstance(value[1], dict) and
+                (validator(value[1]) if validator else True))
+            else "Mapping schema/coverage validator rejected output",))
+    return result[1] if result[0] == 0 and isinstance(result[1], dict) else None
 
 
 # ---------- 主流程 ----------
 
 def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     """返回 0=成功；1=存在失败批；2=前置缺失。幂等：已成条目自动跳过。"""
+    from ..divide import pruning
+    if pruning.require_ready(ws, driver_root):
+        return 2
     p2 = ws / "P2"
     spine_path = p2 / "reports" / "spine_api.json"
     if not spine_path.exists():
@@ -276,25 +304,53 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
     # （合并批的 agent 抄写会错标，2026-08-29 质检实证 152 例）
     sym_dom = {s: d for d, v in spine["domains"].items()
                for s in v["symbols"]}
+    previous_task = "p1.prune" if (ws / "P1/scope.json").exists() else "p1.resolve"
 
-    for domain, syms in _batches(spine):
+    for batch_no, (domain, syms) in enumerate(_batches(spine)):
         mods = (spine["domains"].get(domain, {})
                 .get("included_by_modules", []))
         dom_key = domain.split(",")[0]
         # 幂等：跳过全已成批
         have = {e["linux_api"] for e in mapping["entries"]}
         todo = [s for s in syms if s not in have]
+        symbol_version = __import__("hashlib").sha256(
+            "\0".join(syms).encode("utf-8")).hexdigest()[:10]
+        batch_task = ("p2.map.batch." +
+                      __import__("re").sub(r"[^A-Za-z0-9_.-]+", "_", dom_key)
+                      + f".{batch_no}.{symbol_version}")
         if not todo:
             _log.console_line(f"[porter] P2a: 批 {dom_key}（{len(syms)} 符号）已全映射——跳过")
+            from ..handoff import current_execution, run_task, TaskSpec
+            if current_execution() is not None:
+                run_task(
+                    ws, TaskSpec(batch_task, (previous_task,),
+                                 (p2 / "mapping.json",),
+                                 "revalidated existing P2 mapping batch"),
+                    lambda: 0,
+                    summary=f"Reused existing complete mapping batch {dom_key}.",
+                    artifacts=(p2 / "mapping.json",),
+                    verification=("Every batch symbol already exists in mapping.json.",))
+            previous_task = batch_task
             continue
         _log.console_line(f"[porter] P2a: 映射批 {dom_key}——{len(todo)}/{len(syms)} 待映射")
         feedback = ""
         base = _prompt_map(skill, driver_root, target_os, dom_key, todo,
                            mods, [s for s in syms if s in have][:10], cat)
         got: list[dict] = []
+        def _batch_valid(candidate):
+            if not isinstance(candidate.get("entries"), list):
+                return False
+            valid, errors = _validate_entries(candidate["entries"], target_os,
+                                              dom_key)
+            return (not errors and {e["linux_api"] for e in valid}
+                    >= set(todo))
         for attempt in range(1, MAX_TRIES + 1):
             parsed = _call_agent(base + feedback, target_os,
-                                 p2 / "logs" / f"P2A_{dom_key.replace('/', '_')}_R{attempt}")
+                                 p2 / "logs" /
+                                 f"P2A_{dom_key.replace('/', '_')}_B{batch_no}_R{attempt}",
+                                 ws=ws, task_id=batch_task,
+                                 dependencies=(previous_task,),
+                                 validator=_batch_valid)
             if parsed and "entries" in parsed:
                 cons = parsed.get("kb_consulted")
                 if isinstance(cons, list):
@@ -334,22 +390,31 @@ def run_map(ws: Path, driver_root: Path, target_os: Path) -> int:
         if [s for s in todo if s not in covered]:
             failed.append(dom_key)
             _log.console_line(f"[porter] P2a: 批 {dom_key} {MAX_TRIES} 次后仍有缺口——"
-                  f"登记失败，继续")
+                  f"登记失败，停止后续依赖批")
+            _save(mapping, p2)
+            return 1
         else:
             _log.console_line(f"[porter] P2a: 批 {dom_key} 完成（累计 "
                   f"{len(mapping['entries'])} 条）")
         _save(mapping, p2)      # 每批 checkpoint：中断重启不重付已完成批
+        if not [s for s in todo if s not in covered]:
+            previous_task = batch_task
 
     # 类型 B：换思路裁定（幂等：已存在则跳过；wiring 已退役——接线知识
     # 由 P2b 框架引导的施工单+三信号验证承载）
     if not mapping["redesigns"]:
         _log.console_line("[porter] P2a: 换思路裁定（类型 B）")
         parsed = None
+        redesign_task = "p2.map.redesign"
         for attempt in range(1, MAX_TRIES + 1):
             parsed = _call_agent(_prompt_redesign(skill, driver_root,
                                                   target_os),
                                  target_os,
-                                 p2 / "logs" / f"P2A_redesign_R{attempt}")
+                                 p2 / "logs" / f"P2A_redesign_R{attempt}",
+                                 ws=ws, task_id=redesign_task,
+                                 dependencies=(previous_task,),
+                                 validator=lambda value: isinstance(
+                                     value.get("redesigns"), list))
             if parsed and "redesigns" in parsed:
                 break
         if parsed:

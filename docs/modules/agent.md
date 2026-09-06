@@ -1,7 +1,11 @@
 # agent 调用模块（agent）
 
-> **定位**：非交互 agent 调用的统一接口层——在 `run_agent`（单发，
-> 原样保留）之上提供两种增强形态：`run_agent_structured`（单发 +
+> handoff 生命周期、依赖门控和失败恢复见
+> [`../sub-systems/handoff.md`](../sub-systems/handoff.md)。生产 agent 调用均在
+> 已 prepare 的 task execution 内运行。
+
+> **定位**：非交互 agent 调用的统一接口层——在 `run_agent`（单发）
+> 之上提供两种增强形态：`run_agent_structured`（单发 +
 > 结构化输出校验 + 反馈重试）与 `run_agent_seq`（**split_long_op**：
 > agent 段 × N + 外部静态段交织；长操作时间不吃 agent 预算；段间
 > opencode session 续接，无信息损失）。
@@ -26,9 +30,11 @@
    完整输出落盘 `<stem>_S<n>_static.log`（随 vcs agent 隔离点入库），
    消息只给 verdict + 文件绝对路径；agent 按需自读（tail/grep 自选
    窗口）。写盘失败降级回尾 40 行注入（防死指针）。
-4. **`run_agent` 一字节不动**（向后兼容铁律）：新函数是其增强版；
-   存量 19 处调用点（§4 覆盖地图）分批迁移，老 skill 文件零改动
-   （框架兼容老 `{"status":"done"|"blocked"}` 输出契约）。
+4. **统一 handoff 钩子**：`run_agent`、`run_agent_structured` 和
+   `run_agent_seq` 都读取当前 task execution；fresh session 先注入必读
+   handoff/materials，随后把实际投递版本和 provider 原始证据归档。
+   老 skill 文件不需要改输出格式（框架兼容
+   `{"status":"done"|"blocked"}` 契约）。
 5. **防打转用针对性机制，不设轮数上限**（定案）：同签名早退
    （连续 2 次静态失败规范化签名相同 = 零进展）+ 上下文保证
    （每段必带完整上下文，杜绝重复已做的事）；总时间预算兜底一切
@@ -104,6 +110,10 @@ schema_errs, static:{ok, sig, log}}], "parsed", "total_agent_sec"}`。
   尾 20 行）。
 - **续接消息**（主路径）：静态结果指针块 + 预算余量一行，仅此——
   任务/协议/历史全在会话里，天然零重发。
+- provider 非零退出、超时或中断会结束当前 task execution 并写
+  `handoff-fail.md`；session ID 只作诊断证据。下一次任务尝试使用新的
+  execution 与 fresh session，首轮会读到该失败文档。静态 build/test
+  失败仍可在同一个 `run_agent_seq` session 中把结果指针送回修复。
 
 ### 3.4 静态段与结果指针
 
@@ -136,8 +146,9 @@ schema_errs, static:{ok, sig, log}}], "parsed", "total_agent_sec"}`。
 ### 3.7 run_agent_structured（单发形态）
 
 `run_agent_structured(prompt, workdir, log_stem, *, gen_schema,
-max_tries=2) -> (rc, out, parsed)`：run_agent + done 协议 + schema
-校验 + 反馈重试。供单发+校验类调用点机械替换（§4 覆盖地图 🟡 类）。
+max_tries=2, validator=None) -> (rc, out, parsed)`：run_agent + done 协议 +
+schema/业务 validator 校验。每个 provider 重试各有独立 child execution；
+`blocked` 原样交还调用方，但该次 child 记为失败，不能提前发布成功。
 
 ## 4. 实现地图（改进参考）
 
@@ -154,33 +165,22 @@ max_tries=2) -> (rc, out, parsed)`：run_agent + done 协议 + schema
 | prompt 块 | `_seq_preamble`（禁令+协议）/ `_static_pointer_block`（指针）/ `_static_result_block`（降级尾块）/ `_transcript_block`（兜底轮次） |
 | 主入口 | `run_agent_seq` / `run_agent_structured` |
 
-**接线**：`loop/p4.py:_step_migrate`（2026-09-04 实装并真实验证）——
-老"agent→probe_build→err_info 手拼反馈重试"切片循环替换为一次
-`run_agent_seq`：static = probe_build + 只追加行数守卫复合（守卫违例
-= 静态失败 → 指针反馈修复，对应 2026-08-30 覆盖事故场景）；
-`final_static=True` 保留编排器终验；blocked/stalled 映射既有 panic
-关口；跨切片 sig_counts 与 slice-rework 知识钩子保留；预算
-`SEQ_BUDGET_SEC=2400`（老单段上限 ×2）。
+**接线范围**：P0 环境提取把 schema、runner 校验和三项 probe 放在同一
+provider-round child 内；P1 按源文件划分、解环与 pruning 单次方案独立记录；
+P2 mapping 按稳定符号集 ID 串接，scaffold/probe 也发布各自 handoff；P3
+mapping、gap、criteria、probe/rejudge/fix 都是可查询 child；P4 fill API 和
+每个源码切片独立记录，切片内部由 `run_agent_seq` 共享一次 execution；P5
+补探、P6 L4、errorloop 每轮、routing 与 review 辅助调用同样走该协议。
+phase/CLI execution 是聚合记录，不能代替这些 session 级 child。
 
-**老接口覆盖地图**（19 处 run_agent 调用点，2026-09-04 盘点）：
+probe generation/compile-fix/rejudge 的 schema 通过只发布 proposal。随后每轮
+host build、boot、日志 judge 由稳定 `probe.<owner>.validation` task 发布真实终态；
+失败 validation handoff 是下一 repair session 的显式输入。P4 fill 也使用独立的
+`.proposal` 与 `.validation` task，避免 provider `rc=0` 抢先声称补齐成功。
 
-| 级别 | 调用点 | 覆盖物 |
-|---|---|---|
-| ✅ 已接线（1） | P4 migrate 切片循环 | run_agent_seq（真实重迁 os-probe + P5 判据级 55/55 验证） |
-| ✅ 已接线（2026-09-05） | P2b scaffold（发现轮） | 直连 `_opencode_json_runner`：单 session 贯穿回炉轮（--session 续接只发证据指针）；recipe 走**文件输出**（agent 写裸 JSON 到编排器下发路径，消息只回"已写入"——免疫 stdout 提取的截断/围栏坑）；输出质量问题（缺文件/坏 JSON/校验缺陷）同轮微增量续接 ≤2 次不烧轮；session 解析不到 = 静态 panic（RuntimeError，非人工关口）；超时/非零 rc 先经部分事件抢救 session_id |
-| 🟢 原生场景（3） | P0 T3 环境提取（agent×探测交织）/ 探针 FAIL 回炉 / errorloop 求解轮（_prev_context 可被 session 续接替代；verdict 七动作词表需 gen_schema 适配） | run_agent_seq（各需把真实执行包成 static fn） |
-| 🟡 机械可换（9） | P0 T5 烟测反馈 / P1D 划分 / P1R 解环 / P2a 映射 / P3 增量映射+gap+判据（3 处）/ P4 fill / P5 补探 / P6 draft-l4 | run_agent_structured |
-| ⚪ 无必要（5） | P0 T2 类别 / P1S 策略 / routing 关口应答（2 处）/ CP5 分类 | 纯单发，老接口够用 |
-
-**接线前置缺口**（🟡/🟢 类做之前需补框架）：
-1. **通用 done 识别**（主缺口）：fill 的 `{patch_summary,...}`、
-   P5 补探的 `{cmd,...}` 都没有 phase/status 键，`_parse_phase` 会
-   误判不可解析——需 `done_key` 参数（"```json 块含此键即 done"）。
-2. **不可重试中止通道**（仅 fill 三重验证进 seq 时需要）：boot 日志
-   不可得今天是 exit 3 停车语义，静态段需能表达"infra 中止"而非
-   可重试失败。
-3. **多操作菜单（statics 集合）**：已与用户讨论（封闭菜单+窄参数
-   +禁令只覆盖菜单），2026-09-04 定案搁置待需求落地。
+P4 断点重跑只复用当前 artifact 指纹仍与既有成功 handoff 一致的 fill/切片；
+不会从 `migration.json` 单独推导成功。失败切片的新 session 同时读取前一切片
+成功 handoff 和自身最近失败 handoff。
 
 ## 5. 已知限制与定案记录
 
@@ -191,9 +191,9 @@ max_tries=2) -> (rc, out, parsed)`：run_agent + done 协议 + schema
   预算+有判定+有结果文件）+ 工具调用转录留档可审计。
 - 同签名槽只有连续两个（A→B→A 交替不触发早退，靠预算兜底）；
   agent 段空转（反复不可解析）无签名，纯靠预算。
-- 跨进程断点续跑未做（seq 中途崩溃重跑从切片重来；`<stem>.seq.json`
-  轮次账已为恢复留了数据基础）。
-- fill/P5/errorloop 接线前置缺口见 §4。
+- `run_agent_seq` 的 provider session 不跨进程恢复；宿主崩溃由 handoff
+  recovery 先补写失败文档，重试从新的 execution/session 开始。已经验收且
+  artifact 指纹一致的 P4 前序切片可通过自己的成功 handoff 复用。
 
 **设计定案记录**（2026-09-04 与用户逐点确认）：
 1. 先保底 split_long_op，包装成类似 run_agent 的一次函数调用，

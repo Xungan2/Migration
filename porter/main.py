@@ -325,6 +325,18 @@ def cmd_p1_import(args) -> int:
                           strategy_path=strategy)
 
 
+def cmd_p1_prune(args) -> int:
+    """裁剪后的驱动引用：机器扫描、agent 处置、补回后复核。"""
+    from porter.divide import pruning
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").is_file():
+        _log.console_line("[porter] p1-prune: 先运行 p0")
+        return 2
+    proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
+    _log_bind(ws, "p1")
+    return pruning.run_pruning(ws, Path(proj["linux_driver"]))
+
+
 def cmd_p1_divide(args) -> int:
     """P1 任务A：模块划分（agent 方案 × 脚本抽取/分析 × 修正循环）。"""
     ws = Path(args.output_dir).resolve()
@@ -825,6 +837,10 @@ def _write_p1_final_report(ws: Path) -> Path:
         *divide_lines, "",
         "## resolve 摘要", "",
         *resolve_lines, "",
+        "## 功能裁剪处置", "",
+        "- 实施与验证要求：P1/reports/pruning.json / pruning.md",
+        "- rewrite/remove_path 在 P3 通过 pruning_ids 绑定行为判据，P4 据此实施。",
+        "",
         "## 沉淀决策（人工）", "",
         "若认为本次策略有沉淀价值，执行：",
         "",
@@ -841,7 +857,7 @@ def _write_p1_final_report(ws: Path) -> Path:
 
 
 def cmd_p1(args) -> int:
-    """P1 全流程：strategy → divide → resolve（直通，末尾生成汇总报告）。"""
+    """P1 全流程：strategy → divide → resolve → pruning。"""
     ws = Path(args.output_dir).resolve()
     proj_path = ws / "project.json"
     if not proj_path.exists():
@@ -854,16 +870,43 @@ def cmd_p1(args) -> int:
         return 2
     from porter.loop import gates as _gates
     _gates.process_answered_gates(ws)
-    rc = p1s.run_strategy(ws, driver_root)
+    from porter.handoff import current_execution as _handoff_current
+    from porter.handoff.integration import execute_phase as _handoff_phase
+
+    def _phase(task_id, deps, fn, artifacts):
+        if _handoff_current() is None:
+            return fn()
+        return _handoff_phase(
+            ws, task_id, deps, fn, materials=(ws / "project.json",),
+            artifacts=artifacts, description="P1 composite child task")
+
+    strategy_artifacts = [ws / "P1" / "strategy.md"]
+    if (ws / "goals.md").exists():
+        strategy_artifacts.append(ws / "P1" / "scope.json")
+    rc = _phase("p1.strategy", ("p0",),
+                lambda: p1s.run_strategy(ws, driver_root),
+                tuple(strategy_artifacts))
     if rc != 0:
         return rc
     rc = _gates.strategy_checkpoint(ws)  # CP1：直通路径也必须过审（修 H5）
     if rc != 0:
         return rc
-    for step in (p1a.run_divide, p1r.run_resolve):
-        rc = step(ws, driver_root)   # resolve 第三参 strategy_path 缺省 None，兼容
-        if rc != 0:
-            return rc
+    rc = _phase("p1.divide", ("p1.strategy",),
+                lambda: p1a.run_divide(ws, driver_root),
+                (ws / "P1" / "reports" / "P1D_plan.json",))
+    if rc != 0:
+        return rc
+    rc = _phase("p1.resolve", ("p1.divide",),
+                lambda: p1r.run_resolve(ws, driver_root),
+                (ws / "P1" / "modules" / "deps.json",))
+    if rc != 0:
+        return rc
+    from porter.divide import pruning
+    rc = _phase("p1.prune", ("p1.resolve",),
+                lambda: pruning.run_pruning(ws, driver_root),
+                (ws / pruning.REPORT, ws / "P1/modules/deps.json"))
+    if rc != 0:
+        return rc
     rpt = _write_p1_final_report(ws)
     _log.console_line(f"[porter] P1: 全流程完成，报告 → {rpt}")
     try:                                # vcs：P1 阶段末 commit（best-effort）
@@ -1074,6 +1117,50 @@ def cmd_vcs(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_handoff(args) -> int:
+    """Inspect, import, or recover durable task handoffs."""
+    from porter.handoff import HandoffError, HandoffManager, NotReady
+    ws = Path(args.output_dir).resolve()
+    manager = HandoffManager(ws)
+    try:
+        if args.handoff_cmd == "inspect":
+            records = manager.inspect(args.task_id)
+            if args.json:
+                print(json.dumps(records, ensure_ascii=False, indent=2))
+            else:
+                for record in records:
+                    print(f"{record.get('task_id', '?'):<40} "
+                          f"{record.get('status', '?'):<8} "
+                          f"{record.get('execution_id', '?')} "
+                          f"{(record.get('document') or {}).get('path', '')}")
+            return 0
+        if args.handoff_cmd == "import":
+            if not args.task_id:
+                print("[porter] handoff: import requires --task-id")
+                return 2
+            path = manager.import_history(
+                args.task_id, summary=args.summary,
+                artifacts=[Path(p) for p in args.artifact],
+                verification=args.verification)
+            print(f"[porter] handoff: historical document created at {path}")
+            return 0
+        if args.handoff_cmd == "recover":
+            if not args.task_id:
+                print("[porter] handoff: recover requires --task-id")
+                return 2
+            paths = manager.recover_abandoned(
+                args.task_id, reason=args.reason, force=args.force)
+            if not paths:
+                print(f"[porter] handoff: no running execution for {args.task_id}")
+            for path in paths:
+                print(f"[porter] handoff: recovered failure at {path}")
+            return 0
+    except (HandoffError, NotReady) as exc:
+        print(f"[porter] handoff: {exc}")
+        return 1
+    return 2
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="porter",
@@ -1133,6 +1220,10 @@ def main(argv=None) -> int:
     p1r.add_argument("--strategy", default=None,
                      help="拆分策略文件路径（注入 agent prompt）；缺省 <P1>/strategy.md")
     p1r.set_defaults(func=cmd_p1_resolve)
+
+    p1c = sub.add_parser("p1-prune", help="P1 功能裁剪处置：引用扫描→agent 裁定→补回/改写计划")
+    p1c.add_argument("--output-dir", required=True)
+    p1c.set_defaults(func=cmd_p1_prune)
 
     p1i = sub.add_parser("p1-import", help="P1 外部交付物导入：plan 重建 modules/ + 图重算 + deps 对账（消费外部三件套）")
     p1i.add_argument("--output-dir", required=True, help="迁移工作区根目录（须先跑过 p0 或已有 project.json）")
@@ -1306,6 +1397,27 @@ def main(argv=None) -> int:
                         help="（import）导入后创建/切换的分支名")
     vcsgrp.set_defaults(func=cmd_vcs)
 
+    handoff = sub.add_parser(
+        "handoff", help="handoff records (inspect/import/recover)")
+    handoff.add_argument("--output-dir", required=True,
+                         help="migration workspace root")
+    handoff.add_argument("handoff_cmd", choices=["inspect", "import", "recover"])
+    handoff.add_argument("--task-id", default=None,
+                         help="stable logical task id (required for import/recover)")
+    handoff.add_argument("--json", action="store_true",
+                         help="emit inspect records as JSON")
+    handoff.add_argument("--summary", default="",
+                         help="historical import summary")
+    handoff.add_argument("--artifact", action="append", default=[],
+                         help="real historical artifact (repeatable)")
+    handoff.add_argument("--verification", action="append", default=[],
+                         help="historical verification fact (repeatable)")
+    handoff.add_argument("--reason", default="",
+                         help="explicit recovery reason")
+    handoff.add_argument("--force", action="store_true",
+                         help="recover an execution recorded on another host")
+    handoff.set_defaults(func=cmd_handoff)
+
     p7cmd = sub.add_parser("p7", help="P7 终态报告：聚合 + baseline diff + 补丁提案台账")
     p7cmd.add_argument("--output-dir", required=True, help="迁移工作区根目录")
     p7cmd.add_argument("--patch-register", default=None, metavar="GAP",
@@ -1321,7 +1433,13 @@ def main(argv=None) -> int:
     p7cmd.set_defaults(func=cmd_p7)
 
     args = ap.parse_args(argv)
-    return args.func(args)
+    from porter.handoff.integration import execute_cli as _execute_handoff
+    from porter.common.scope import ScopeError
+    try:
+        return _execute_handoff(args, lambda: args.func(args))
+    except ScopeError as e:
+        _log.console_line(f"[porter] 范围前置条件未满足：{e}")
+        return 2
 
 
 if __name__ == "__main__":

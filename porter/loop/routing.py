@@ -150,7 +150,7 @@ def load_repo_raw() -> dict:
         return {}
 
 
-def consult_policy(ws: Path, gate: dict) -> dict | None:
+def _consult_policy_impl(ws: Path, gate: dict) -> dict | None:
     """rules 层：policy.md 命中查询（agent 解释，1 次有界）。
 
     返回 {hit, rule_id, answer, confidence} 或 None（无 policy 文件 /
@@ -184,6 +184,26 @@ def consult_policy(ws: Path, gate: dict) -> dict | None:
     return parsed
 
 
+def consult_policy(ws: Path, gate: dict) -> dict | None:
+    """Consult policy in an independently recorded routing task."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None or not policy_path(ws).exists() \
+            or os.environ.get("PORTER_NO_AGENT"):
+        return _consult_policy_impl(ws, gate)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", gate.get("id", "gate"))
+    return run_task(
+        ws, TaskSpec(f"routing.policy.{safe}",
+                     materials=(policy_path(ws),),
+                     description="policy routing decision"),
+        lambda: _consult_policy_impl(ws, gate),
+        success=lambda value: value is not None,
+        summary=lambda value: (
+            f"Policy rule {value.get('rule_id')} matched." if value else
+            "No usable policy decision was produced; routing will fall through."),
+        verification=lambda value: (
+            "policy decision parsed" if value else "policy decision unavailable",))
+
+
 def _record_hit(ws: Path, rule_id: str, gate_id: str,
                 gate: dict | None = None) -> None:
     hp = Path(ws) / "policy_hits.json"
@@ -205,7 +225,7 @@ def _record_hit(ws: Path, rule_id: str, gate_id: str,
 
 # ---------- agent 层（gate-answer skill·决策型） ----------
 
-def agent_answer(ws: Path, gate: dict) -> dict | None:
+def _agent_answer_impl(ws: Path, gate: dict) -> dict | None:
     """agent 层：知识库检索 + 照表单作答。
 
     返回 {answer, confidence, rationale, kb_consulted?} 或 None。
@@ -267,6 +287,28 @@ def agent_answer(ws: Path, gate: dict) -> dict | None:
         except Exception:
             pass
     return parsed
+
+
+def agent_answer(ws: Path, gate: dict) -> dict | None:
+    """Answer one gate as a separately versioned auxiliary agent task."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None or os.environ.get("PORTER_NO_AGENT"):
+        return _agent_answer_impl(ws, gate)
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", gate.get("id", "gate"))
+    materials = tuple(Path(ws) / c for c in (gate.get("context_files") or [])
+                      if (Path(ws) / c).exists())
+    return run_task(
+        ws, TaskSpec(f"routing.answer.{safe}", materials=materials,
+                     description="gate answer decision",
+                     include_failures=(f"routing.policy.{safe}",)),
+        lambda: _agent_answer_impl(ws, gate),
+        success=lambda value: bool(value and value.get("answer")),
+        summary=lambda value: (
+            f"Gate answer produced with confidence={value.get('confidence')}."
+            if value else "No accepted gate answer was produced."),
+        verification=lambda value: (
+            "gate answer schema accepted" if value else
+            "gate answer schema not accepted",))
 
 
 def maybe_auto_answer(ws: Path, ledger, gate: dict) -> bool:

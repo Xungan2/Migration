@@ -114,8 +114,8 @@ def _refresh_runbook(ws: Path) -> None:
         _log.console_line(f"[porter] P5: ⚠️ runbook 草稿刷新失败（不影响主流程）：{e}")
 
 
-def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
-                      runner: dict) -> dict:
+def _ensure_unit_test_impl(ws: Path, target_os: Path, proj: dict,
+                           runner: dict) -> dict:
     """unit_test 节获取 + 第二道烟测（真跑驱动级命令机器复核）。
 
     - 已有且 verified=true：直接复用。
@@ -153,20 +153,47 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
               f"JSON 块。")
     ut = None
     for attempt in range(1, 4):
-        rc, out = agent.run_agent(prompt, workdir=target_os,
-                                  log_stem=str(ws / "P5" / "logs" /
-                                               f"unit_test_discover_R{attempt}"),
-                                  timeout_sec=900)
-        parsed = agent.extract_json(out) if rc == 0 else None
+        def _attempt():
+            rc, out = agent.run_agent(
+                prompt, workdir=target_os,
+                log_stem=str(ws / "P5" / "logs" /
+                             f"unit_test_discover_R{attempt}"),
+                timeout_sec=900,
+                task={"phase": "p5", "step": "unit-test-discovery",
+                      "attempt": attempt,
+                      "task_id": "p5.unit-test-discovery.agent"})
+            parsed = agent.extract_json(out) if rc == 0 else None
+            candidate = None
+            ok, detail, observed = False, "invalid provider output", ""
+            if parsed and "cmd" in parsed:
+                candidate = {k: parsed[k] for k in (
+                    "mechanism", "cmd", "timeout_sec", "success_pattern",
+                    "fail_pattern", "scope_hint", "smoke_cmd") if k in parsed}
+                ok, detail, observed = _smoke_verify_ut(
+                    ws, target_os, runner, candidate,
+                    f"unit_test_discover_smoke_R{attempt}")
+                candidate["verified"] = ok
+            return rc, parsed, candidate, ok, detail, observed
+
+        from ..handoff import current_execution, run_task, TaskSpec
+        if current_execution() is not None:
+            rc, parsed, candidate, ok, detail, observed = run_task(
+                ws, TaskSpec("p5.unit-test-discovery.agent",
+                             materials=(ws / "runner.json", target_os),
+                             description="one unit-test discovery and smoke round"),
+                _attempt,
+                success=lambda value: value[0] == 0 and value[2] is not None and
+                value[3],
+                summary=lambda value: (
+                    f"Unit-test discovery rc={value[0]}; smoke={value[3]}; "
+                    f"detail={value[4]}."),
+                verification=lambda value: (
+                    "unit-test discovery smoke passed" if value[3]
+                    else f"unit-test discovery smoke failed: {value[4]}",))
+        else:
+            rc, parsed, candidate, ok, detail, observed = _attempt()
         if parsed and "cmd" in parsed:
-            ut = {k: parsed[k] for k in ("mechanism", "cmd", "timeout_sec",
-                                         "success_pattern", "fail_pattern",
-                                         "scope_hint", "smoke_cmd")
-                  if k in parsed}
-            # 第二道烟测：真跑驱动级命令
-            ok, detail, observed = _smoke_verify_ut(
-                ws, target_os, runner, ut, f"unit_test_discover_smoke_R{attempt}")
-            ut["verified"] = ok
+            ut = candidate
             if ok:
                 break
             _log.console_line(f"[porter] P5: 烟测失败（第 {attempt} 次）：{detail}")
@@ -189,6 +216,26 @@ def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
         _log.console_line("[porter] P5: ⚠ 烟测未过——命令/特征不可信，验收将按此判定，"
               "建议人工核查 runner.json 的 unit_test 节")
     return ut
+
+
+def _ensure_unit_test(ws: Path, target_os: Path, proj: dict,
+                      runner: dict) -> dict:
+    """Discover/backfill unit-test support with its own durable handoff."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _ensure_unit_test_impl(ws, target_os, proj, runner)
+    return run_task(
+        ws, TaskSpec("p5.unit-test-discovery",
+                     materials=(ws / "runner.json", target_os),
+                     description="target OS unit-test mechanism discovery"),
+        lambda: _ensure_unit_test_impl(ws, target_os, proj, runner),
+        success=lambda value: bool(value.get("verified")),
+        summary=lambda value: (
+            f"Unit-test mechanism={value.get('mechanism')}; "
+            f"verified={value.get('verified')}."),
+        artifacts=(ws / "runner.json",),
+        verification=lambda value: (
+            f"unit-test smoke verified={value.get('verified')}",))
 
 
 def _run_unit_test(ws: Path, target_os: Path, runner: dict,

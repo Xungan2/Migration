@@ -1189,14 +1189,37 @@ def draft_l4(ws: Path, cfg: dict | None = None) -> int:
                       f"\n\n## 已知平台缺口（相关判据建议 park）\n{pp_block}"
                       f"\n\n## 任务\n产出全部条目的六字段草案（紧凑 JSON "
                       "数组）。{feedback}")
-            rc, out = agent_mod.run_agent(
-                prompt, workdir=ws, timeout_sec=900,
-                log_stem=str(ws / "P6" / "logs" / f"L4_draft_R{attempt}"))
-            parsed = agent_mod.extract_json(out) if rc == 0 else None
-            cand = parsed.get("criteria") if isinstance(parsed, dict) \
-                else parsed
-            ok_items, errs = validate_l4(cand if isinstance(cand, list)
-                                         else [])
+            def _attempt():
+                rc, out = agent_mod.run_agent(
+                    prompt, workdir=ws, timeout_sec=900,
+                    log_stem=str(ws / "P6" / "logs" /
+                                 f"L4_draft_R{attempt}"),
+                    task={"phase": "p6", "step": "l4-draft",
+                          "attempt": attempt,
+                          "task_id": "p6.l4.draft.agent"})
+                parsed = agent_mod.extract_json(out) if rc == 0 else None
+                cand = parsed.get("criteria") if isinstance(parsed, dict) else parsed
+                ok_items, errs = validate_l4(
+                    cand if isinstance(cand, list) else [])
+                return rc, cand, ok_items, errs
+
+            from ..handoff import current_execution, run_task, TaskSpec
+            if current_execution() is not None:
+                rc, cand, ok_items, errs = run_task(
+                    ws, TaskSpec("p6.l4.draft.agent",
+                                 materials=(ws / "project.json",),
+                                 description="one L4 draft provider session"),
+                    _attempt,
+                    success=lambda value: (value[0] == 0 and bool(value[1]) and
+                                           not value[3]),
+                    summary=lambda value: (
+                        f"L4 draft provider rc={value[0]}; "
+                        f"accepted={len(value[2])}; errors={value[3]}."),
+                    verification=lambda value: (
+                        "validate_l4 accepted the draft" if not value[3]
+                        else "; ".join(value[3]),))
+            else:
+                rc, cand, ok_items, errs = _attempt()
             if cand and not errs:
                 criteria = ok_items
                 agent_ok = True

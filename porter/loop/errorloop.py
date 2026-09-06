@@ -493,8 +493,8 @@ def _end_event(ws: Path, failure: dict, outcome: dict) -> None:
 
 # ---------- 主入口 ----------
 
-def run_solve_loop(ws: Path, failure: dict, verify,
-                   cfg: dict | None = None) -> dict:
+def _run_solve_loop_impl(ws: Path, failure: dict, verify,
+                         cfg: dict | None = None) -> dict:
     """知识辅助求解循环。返回 outcome：
 
     {"status": solved|unsolved|early-exit|escalated|parked|rehung|
@@ -539,6 +539,10 @@ def run_solve_loop(ws: Path, failure: dict, verify,
     except Exception:
         pass
 
+    task_subject = _safe_name(failure.get("subject"))
+    task_source = _safe_name(failure.get("source"))
+    agent_task = f"errorloop.{task_source}.{task_subject}.agent"
+
     for round_no in range(1, MAX_ROUNDS + 1):
         stem = f"{stem_base}_R{round_no}"
         prompt = _round_prompt(ws, round_no, failure, prev_ctx,
@@ -548,10 +552,57 @@ def run_solve_loop(ws: Path, failure: dict, verify,
                             intent=f"R{round_no}",
                             summary=f"求解第 {round_no}/{MAX_ROUNDS} 轮",
                             ws=ws, mount=failure.get("source"))
-        rc, out = agent.run_agent(
-            prompt, workdir=target_os, log_stem=str(stem),
-            timeout_sec=AGENT_TIMEOUT_SEC)
-        verdict = _parse_verdict(out) if rc == 0 else None
+        def _attempt():
+            rc, out = agent.run_agent(
+                prompt, workdir=target_os, log_stem=str(stem),
+                timeout_sec=AGENT_TIMEOUT_SEC,
+                task={"phase": "solve", "step": "diagnose",
+                      "attempt": round_no, "task_id": agent_task})
+            verdict = _parse_verdict(out) if rc == 0 else None
+            if not verdict:
+                return rc, out, None, [], None, False, None
+            applied, terminal = _apply_action(ws, failure, verdict)
+            if verdict.get("action") == "fix-code":
+                try:
+                    from ..common import vcs as _vcs
+                    _vcs.commit_target(
+                        ws, f"solve[{failure.get('source')}]: fix-code "
+                            f"{failure.get('subject')}", phase="solve")
+                except Exception:
+                    pass
+            if terminal is not None:
+                # Parking and re-hanging are accepted dispositions without a
+                # verification rerun. Escalation is a failed round so a future
+                # fresh session receives this handoff.
+                return rc, out, verdict, applied, terminal, None, None
+            try:
+                ok, new_fail = verify()
+            except Exception as ex:
+                ok, new_fail = False, {"detail": f"verify 异常：{ex}"}
+            return rc, out, verdict, applied, None, bool(ok), new_fail
+
+        from ..handoff import current_execution, run_task, TaskSpec
+        if current_execution() is not None:
+            round_value = run_task(
+                ws, TaskSpec(agent_task, materials=(ws / "project.json",),
+                             description="one diagnosed, applied, and verified repair round"),
+                _attempt,
+                success=lambda value: (value[0] == 0 and value[2] is not None and
+                                       (value[4] in ("parked", "rehung") or
+                                        value[5] is True)),
+                summary=lambda value: (
+                    f"Error diagnosis provider rc={value[0]}; "
+                    f"verdict parsed={value[2] is not None}; "
+                    f"terminal={value[4]}; verified={value[5]}."),
+                verification=lambda value: (
+                    ("repair round reached an accepted disposition"
+                     if value[4] in ("parked", "rehung") else
+                     "repair round passed host verification"
+                     if value[5] is True else
+                     "repair round did not pass host verification"),))
+        else:
+            round_value = _attempt()
+        rc, out, verdict, applied, terminal, ok, new_fail = round_value
         round_rec: dict = {"round": round_no, "rc": rc,
                            "run_id": str(stem)}
 
@@ -576,15 +627,6 @@ def run_solve_loop(ws: Path, failure: dict, verify,
         outcome["signature_candidates"] += \
             verdict.get("signature_candidates") or []
 
-        applied, terminal = _apply_action(ws, failure, verdict)
-        if verdict.get("action") == "fix-code":
-            try:                        # vcs：修码动作落 commit（每次修改）
-                from ..common import vcs as _vcs
-                _vcs.commit_target(
-                    ws, f"solve[{failure.get('source')}]: fix-code "
-                        f"{failure.get('subject')}", phase="solve")
-            except Exception:
-                pass
         round_rec.update({"action": verdict.get("action"),
                           "circuit": verdict.get("circuit"),
                           "applied": applied,
@@ -601,10 +643,6 @@ def run_solve_loop(ws: Path, failure: dict, verify,
             outcome["status"] = terminal
             break
 
-        try:
-            ok, new_fail = verify()
-        except Exception as ex:                    # 复验面异常不吞轨迹
-            ok, new_fail = False, {"detail": f"verify 异常：{ex}"}
         round_rec["verified"] = bool(ok)
         outcome["rounds"].append(round_rec)
 
@@ -639,3 +677,26 @@ def run_solve_loop(ws: Path, failure: dict, verify,
             _report(ws, failure, outcome, cfg)
     _end_event(ws, failure, outcome)
     return outcome
+
+
+def run_solve_loop(ws: Path, failure: dict, verify,
+                   cfg: dict | None = None) -> dict:
+    """Run an error solver as one task across its repair-round sessions."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _run_solve_loop_impl(ws, failure, verify, cfg)
+    subject = _safe_name(failure.get("subject"))
+    source = _safe_name(failure.get("source"))
+    task_id = f"errorloop.{source}.{subject}"
+    accepted = {"solved", "parked", "rehung", "bypass"}
+    return run_task(
+        ws, TaskSpec(task_id, materials=(ws / "project.json",),
+                     description="bounded error diagnosis and repair"),
+        lambda: _run_solve_loop_impl(ws, failure, verify, cfg),
+        success=lambda value: value.get("status") in accepted,
+        summary=lambda value: (
+            f"Error solver status={value.get('status')}; "
+            f"rounds={len(value.get('rounds') or [])}."),
+        verification=lambda value: (
+            f"solver terminal status={value.get('status')}",
+            f"report={value.get('report_path') or 'none'}"))

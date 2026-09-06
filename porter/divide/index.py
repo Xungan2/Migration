@@ -25,14 +25,15 @@ from pathlib import Path
 # ---------- 命中模式（plan §2.1 + 实测补充 typedef/union/unsigned/long/ ----------
 # irqreturn_t/netdev_tx_t：plan 模式漏掉 hw.h 顶层 typedef enum/union 定义）
 
+_REG_MACRO = r"(?:module_\w+|MODULE_\w+|EXPORT_\w+|[a-z_]+_initcall(?:_sync)?|__initcall)"
 _HIT_RE = re.compile(
-    r"^(?:#define\b|module_\w+\s*\(|MODULE_\w+\s*\(|EXPORT_\w+\s*\(|"
+    rf"^(?:#define\b|{_REG_MACRO}\s*\(|"
     r"DEFINE_\w+\s*\(|static\b|const\b|enum\b|struct\b|typedef\b|union\b|"
     r"s8\b|s16\b|s32\b|s64\b|u8\b|u16\b|u32\b|u64\b|int\b|void\b|char\b|"
     r"bool\b|unsigned\b|long\b|irqreturn_t\b|netdev_tx_t\b)"
 )
 
-_REG_RE = re.compile(r"^(module_\w+|MODULE_\w+|EXPORT_\w+)\s*\(")
+_REG_RE = re.compile(rf"^({_REG_MACRO})\s*\(")
 _DEFN_MACRO_RE = re.compile(r"^(DEFINE_\w+)\s*\(")
 _DEFINE_RE = re.compile(r"\s*#\s*define\s+([A-Za-z_]\w*)")
 _IDENT_RE = re.compile(r"[A-Za-z_]\w*")
@@ -210,12 +211,13 @@ def _extend_up(lines: list[str], hit: int, floor: int) -> int:
 
 # ---------- 索引构建 ----------
 
-def build_index(driver_root: Path) -> dict[str, list[Entry]]:
-    """扫描 driver_root（平铺目录）下全部 *.c/*.h，返回 {文件名: [Entry]}。
+def build_index(driver_root: Path, files: set[str] | None = None) -> dict[str, list[Entry]]:
+    """扫描驱动子树或文件白名单，返回 {相对路径: [Entry]}。
     Entry 按行序 tile 整个文件（start/end 无缝衔接）。"""
-    files = sorted(driver_root.glob("*.c")) + sorted(driver_root.glob("*.h"))
+    from ..common.scope import driver_files
+    paths = driver_files(driver_root, files)
     index: dict[str, list[Entry]] = {}
-    for f in files:
+    for f in paths:
         lines = f.read_text(encoding="utf-8", errors="replace").splitlines()
         entries: list[Entry] = []
         prev_hit = -1
@@ -232,7 +234,7 @@ def build_index(driver_root: Path) -> dict[str, list[Entry]]:
             a.end = b.start - 1
         if entries:
             entries[-1].end = len(lines)
-        index[f.name] = entries
+        index[f.relative_to(driver_root).as_posix()] = entries
     return index
 
 
@@ -444,7 +446,7 @@ def expand(file_index: dict[str, list[Entry]], decisions: dict[str, dict],
                       "symbol": (syms[0] + (f" 等{len(syms)}个符号"
                                             if len(syms) > 1 else ""))}
                      for s, t, syms in runs[mod][src]]
-            files.append({"dest": src, "src": src, "fragments": frags})
+            files.append({"dest": src.replace("/", "__"), "src": src, "fragments": frags})
         modules.append({"name": mod,
                         "function": module_desc.get(mod, mod),
                         "files": files})

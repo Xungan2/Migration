@@ -53,9 +53,8 @@ def _orig_defs(driver_root: Path,
     体系符号会污染 internal_cut/orig_tails 判定。
     """
     defs: set[str] = set()
-    for f in sorted(driver_root.glob("*.c")) + sorted(driver_root.glob("*.h")):
-        if scope is not None and f.name not in scope:
-            continue
+    from ..common.scope import driver_files
+    for f in driver_files(driver_root, scope):
         d, _r, _p = scan_file(f)
         defs |= set(d)
     return defs
@@ -172,6 +171,11 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
     alldefs = _all_module_defs(ws / "P1" / "modules")
     from ..common import scope as _scope
     orig = _orig_defs(driver_root, scope=_scope.load_scope(ws))
+    from ..divide.pruning import REPORT
+    pruning_doc = json.loads((ws / REPORT).read_text(encoding="utf-8")) \
+        if (ws / REPORT).exists() else {}
+    orig.update(c["symbol"] for c in pruning_doc.get("candidates", [])
+                if c["module"] == module)
     spine_path = ws / "P2" / "reports" / "spine_api.json"
     spine = (json.loads(spine_path.read_text(encoding="utf-8"))
              if spine_path.exists() else {})
@@ -227,6 +231,9 @@ def extract_surface(ws: Path, driver_root: Path, module: str,
             "noise": sum(len(v) for v in noise.values()),
         },
         "cross_module": cross_module,
+        "pruning_decisions": [d for d in pruning_doc.get("decisions", [])
+                              if d["id"] in {c["id"] for c in pruning_doc.get("candidates", [])
+                                             if c["module"] == module}],
         "noise": noise,
         "mapped_by_verdict": by_verdict,
         "gaps": gap_entries,

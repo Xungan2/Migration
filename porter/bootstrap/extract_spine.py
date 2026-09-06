@@ -105,9 +105,8 @@ def _orig_driver_defs(driver_root: Path,
     体系（如 drivers/md 下的 RAID/bcache）符号会污染内部符号基线。
     """
     defs: set[str] = set()
-    for f in sorted(driver_root.glob("*.c")) + sorted(driver_root.glob("*.h")):
-        if scope is not None and f.name not in scope:
-            continue
+    from ..common.scope import driver_files
+    for f in driver_files(driver_root, scope):
         d, _r, _p = scan_file(f)
         defs |= set(d)
     return defs
@@ -122,6 +121,9 @@ def run_extract(ws: Path, driver_root: Path) -> int:
         return 2
     p2 = ws / "P2"
     out_path = p2 / "reports" / "spine_api.json"
+    from ..divide import pruning
+    if pruning.require_ready(ws, driver_root):
+        return 2
     if out_path.exists():
         _log.console_line(f"[porter] P2a: 复用 {out_path}（如需重做请删除该文件）")
         return 0
@@ -151,6 +153,11 @@ def run_extract(ws: Path, driver_root: Path) -> int:
                       if s not in _KEYWORDS and len(s) >= 3)
     from ..common import scope as _scope
     orig_defs = _orig_driver_defs(driver_root, scope=_scope.load_scope(ws))
+    # References outside the file whitelist with an explicit P1 disposition are
+    # driver work for P4, not platform APIs for mapping.
+    dispositions = json.loads((ws / pruning.REPORT).read_text(encoding="utf-8")) \
+        if (ws / pruning.REPORT).exists() else {}
+    orig_defs.update(c["symbol"] for c in dispositions.get("candidates", []))
     kernel_root = _find_kernel_root(driver_root)
     if kernel_root is None:
         _log.console_line("[porter] P2a: 未定位到 Linux 内核树根"

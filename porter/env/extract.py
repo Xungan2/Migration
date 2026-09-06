@@ -154,8 +154,47 @@ def _run_probes(ws: Path, target_os: Path, runner: dict,
 
 # ---------- 主循环 ----------
 
-def extract_env(ws: Path, target_os: Path, materials: list[Path],
-                categories: list[str]) -> int:
+def _agent_attempt(ws: Path, p0: Path, target_os: Path,
+                   categories: list[str], prompt: str, stem: str,
+                   probe_round: int) -> tuple[int, dict | None, list[str], list[dict]]:
+    """Run one environment-agent session as one terminal handoff attempt."""
+    def _operation():
+        rc, out = agent.run_agent(
+            prompt, workdir=p0, log_stem=str(p0 / "logs" / stem),
+            timeout_sec=900,
+            task={"phase": "p0", "step": "environment",
+                  "task_id": "p0.environment.agent"})
+        parsed = agent.extract_json(out) if rc == 0 else None
+        defects = (validate_runner(parsed["runner"])
+                   if parsed and isinstance(parsed.get("runner"), dict) else
+                   ["agent output has no runner object"])
+        probes = (_run_probes(ws, target_os, parsed["runner"], categories,
+                              probe_round)
+                  if rc == 0 and parsed and not defects else [])
+        return rc, parsed, defects, probes
+
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _operation()
+    return run_task(
+        ws, TaskSpec("p0.environment.agent",
+                     materials=(ws / "project.json",),
+                     description="one environment extraction/revision session"),
+        _operation,
+        success=lambda value: (value[0] == 0 and bool(value[1]) and
+                               not value[2] and len(value[3]) == 3 and
+                               all(p.get("ok") for p in value[3])),
+        summary=lambda value: (
+            f"Environment agent rc={value[0]}; runner defects={value[2]}; "
+            f"probe pass={sum(bool(p.get('ok')) for p in value[3])}/3."),
+        verification=lambda value: (
+            "runner contract and all three environment probes accepted"
+            if not value[2] and len(value[3]) == 3 and
+            all(p.get("ok") for p in value[3])
+            else ("; ".join(value[2]) or "environment probes did not all pass"),))
+
+def _extract_env_impl(ws: Path, target_os: Path, materials: list[Path],
+                      categories: list[str]) -> int:
     """返回 0=成功（runner.json 已写）；3=需人工（问题已生成）；其他=失败。"""
     try:                                # 观测扩全（H12）：P0 相位埋桩
         from ..loop import events as _ev
@@ -209,18 +248,16 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
                 rounds_out.append(json.loads(p_out.read_text(encoding="utf-8")))
                 rounds_probes.append(json.loads(
                     p_pr.read_text(encoding="utf-8")) if p_pr.exists() else [])
-        rc, out = agent.run_agent(
+        rc, parsed, defects, probes = _agent_attempt(
+            ws, p0, target_os, categories,
             _prompt_answers(skill, rounds_out, rounds_probes, answer_text),
-            workdir=p0, log_stem=str(p0 / "logs" / "T3_R4"), timeout_sec=900)
-        parsed = agent.extract_json(out) if rc == 0 else None
+            "T3_R4", 4)
         if not parsed or not parsed.get("runner"):
             _log.console_line("[porter] T3: R4 输出无法解析——请检查 answers.md 后重跑")
             return 1
-        defects = validate_runner(parsed["runner"])
         if defects:
             _log.console_line(f"[porter] T3: R4 runner 仍有契约缺陷: {defects}")
             return 1
-        probes = _run_probes(ws, target_os, parsed["runner"], categories, 4)
         if all(p["ok"] for p in probes):
             _finish(ws, parsed, probes)
             return 0
@@ -241,10 +278,9 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
         else:
             prompt = _prompt_fix(skill, round_no, rounds_out[-1],
                                 rounds_probes[-1], prev_defects)
-        rc, out = agent.run_agent(
-            prompt, workdir=p0,
-            log_stem=str(p0 / "logs" / f"T3_R{round_no}"), timeout_sec=900)
-        parsed = agent.extract_json(out) if rc == 0 else None
+        rc, parsed, attempt_defects, probes = _agent_attempt(
+            ws, p0, target_os, categories, prompt, f"T3_R{round_no}",
+            round_no)
         if not parsed or not parsed.get("runner"):
             parsed = {"runner": {}, "missing": [{"field": "（输出无法解析）",
                        "why_hard": f"R{round_no} agent 输出不含 runner",
@@ -253,7 +289,7 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             rounds_out.append(parsed)
             rounds_probes.append([])
             continue
-        prev_defects = validate_runner(parsed["runner"])
+        prev_defects = attempt_defects
         rounds_out.append(parsed)
         (p0 / "reports").mkdir(exist_ok=True)
         (p0 / "reports" / f"T3_R{round_no}.json").write_text(
@@ -264,7 +300,6 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
                   f"{prev_defects}")
             rounds_probes.append([])
             continue
-        probes = _run_probes(ws, target_os, parsed["runner"], categories, round_no)
         rounds_probes.append(probes)
         all_ok = len(probes) == 3 and all(p["ok"] for p in probes)
         _log.console_line(f"[porter] T3: R{round_no} 探测 "
@@ -324,3 +359,20 @@ def _finish(ws: Path, parsed: dict, probes: list[dict]) -> None:
                                      "不确定项（P0/reports/memo.md）")
         except Exception:
             pass
+
+
+def extract_env(ws: Path, target_os: Path, materials: list[Path],
+                categories: list[str]) -> int:
+    """Run T3 as one durable task; repair rounds share its work record."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _extract_env_impl(ws, target_os, materials, categories)
+    required = (ws / "project.json", target_os, *materials)
+    return run_task(
+        ws, TaskSpec("p0.environment", materials=required,
+                     description="environment extraction and probe validation"),
+        lambda: _extract_env_impl(ws, target_os, materials, categories),
+        summary=lambda value: f"Environment extraction ended with rc={value}.",
+        artifacts=(ws / "runner.json",),
+        verification=lambda value: (
+            f"T3 extraction/probe business result rc={value}.",))

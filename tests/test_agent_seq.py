@@ -495,7 +495,7 @@ class TestTimeoutSalvage(unittest.TestCase):
         self.assertIn("ses_TO", Path(str(ws / "TO") + ".log")
                       .read_text(encoding="utf-8"))   # 部分事件完整落盘
 
-    def test_seq_nonzero_rc_salvages_session(self):
+    def test_seq_nonzero_rc_is_terminal_and_session_is_diagnostic_only(self):
         ws, stem = self._ws()
         fn, calls = _static_fn(True, "BUILD OK")
         r = Runner([
@@ -508,10 +508,10 @@ class TestTimeoutSalvage(unittest.TestCase):
             out = agent.run_agent_seq(
                 "T", ws, stem, static={"describe": "编译", "fn": fn},
                 gen_schema={"files": "list"}, agent_budget_sec=600)
-        self.assertEqual(out["status"], "done")
-        self.assertEqual(out["session_id"], "ses_TO2")   # rc=-1 也会话存活
-        self.assertEqual(r.calls[1]["session_id"], "ses_TO2")
-        self.assertEqual(len(calls), 1)
+        self.assertEqual(out["status"], "failed")
+        self.assertEqual(out["session_id"], "ses_TO2")
+        self.assertEqual(len(r.calls), 1)       # failed session is never resumed
+        self.assertEqual(len(calls), 0)
 
 
 class TestStdinChannel(unittest.TestCase):

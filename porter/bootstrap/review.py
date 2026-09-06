@@ -165,7 +165,7 @@ _CLASSIFY_PROMPT = """你是驱动迁移工具的知识库管理员。以下是�
 """
 
 
-def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
+def _classify_candidates_impl(ws: Path, ids: list[str] | None = None) -> int:
     """agent 批量归类（写回 suggested_class + history）。返回 0/1。
 
     PORTER_NO_AGENT=1 → 打印提示返回 0（人工经 promote --to 定案）。
@@ -230,6 +230,20 @@ def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
     _log.console_line(f"[porter] kb classify: 归类完成（改判 {changed}/{len(led)} 条）"
           "——定案仍在 promote（--to 可覆盖）")
     return 0
+
+
+def classify_candidates(ws: Path, ids: list[str] | None = None) -> int:
+    """Classify the candidate batch with an independent handoff record."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None or agent_lib_no_agent():
+        return _classify_candidates_impl(ws, ids)
+    return run_task(
+        ws, TaskSpec("kb.classify", materials=(ws / "project.json",),
+                     description="knowledge candidate classification"),
+        lambda: _classify_candidates_impl(ws, ids),
+        summary=lambda value: f"Knowledge classification returned rc={value}.",
+        verification=lambda value: (
+            f"candidate classification business result rc={value}",))
 
 
 def agent_lib_no_agent() -> bool:

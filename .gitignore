@@ -6,3 +6,9 @@ knowledge/temp/*
 !knowledge/temp/README.md
 # hits 旁车（运行时遥测计数，晋升时折叠回 INDEX）——不弄脏跟踪中的 corpus
 knowledge/*/.hits.json
+
+.agents/
+.codex/
+dm-zero-manual/
+*.tar
+*.json

@@ -16,10 +16,23 @@ schema（P1D_plan 风格的简化版；分组仅参考，P1D 照常自行划分�
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 from pathlib import Path
 
 from .. import log as _log
+
+
+class ScopeError(ValueError):
+    """A declared migration scope is missing, invalid, or stale."""
+
+
+def driver_files(driver_root: Path, files: set[str] | None = None) -> list[Path]:
+    """Source inventory, with paths relative to the driver root throughout."""
+    paths = ((driver_root / f for f in files) if files is not None
+             else driver_root.rglob("*"))
+    return sorted((p for p in paths if p.is_file() and p.suffix in (".c", ".h")),
+                  key=lambda p: p.relative_to(driver_root).as_posix())
 
 
 def split_strategy_output(text: str) -> tuple[str, dict | None]:
@@ -51,29 +64,36 @@ def scope_files(scope: dict) -> set[str]:
     return files
 
 
-def load_scope(ws: Path) -> set[str] | None:
-    """读 <ws>/P1/scope.json → 文件集合；不存在/不可解析 → None（=全目录）。"""
+def load_scope(ws: Path, driver_root: Path | None = None) -> set[str] | None:
+    """Only legacy unscoped workspaces return None; invalid scope stops work."""
     p = Path(ws) / "P1" / "scope.json"
+    proj_path = Path(ws) / "project.json"
+    proj = json.loads(proj_path.read_text(encoding="utf-8")) \
+        if proj_path.exists() else {}
+    if driver_root is None and proj.get("linux_driver"):
+        driver_root = Path(proj["linux_driver"])
     if not p.exists():
+        if (Path(ws) / "goals.md").exists() or proj.get("intent_file"):
+            raise ScopeError("迁移意图已声明，但 P1/scope.json 缺失；先运行 p1-strategy")
         return None
     try:
         scope = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    files = scope_files(scope)
-    return files or None
+    except (OSError, json.JSONDecodeError) as e:
+        raise ScopeError(f"P1/scope.json 无法读取：{e}") from e
+    clean, defects = _normalize(scope, driver_root)
+    if defects:
+        raise ScopeError("P1/scope.json 非法：" + "；".join(defects))
+    return scope_files(clean)
 
 
-def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str]:
-    """校验 scope 并把规范化版本写回 <ws>/P1/scope.json。
-
-    返回缺陷清单（空 = 合法且已回写规范化版）。非法时**不落盘**——
-    避免坏白名单进入下游；调用方决定如何呈现。
-    """
+def _normalize(scope: dict, driver_root: Path | None) -> tuple[dict, list[str]]:
+    """Normalize functional metadata and file paths without changing artifacts."""
     defects: list[str] = []
+    if not isinstance(scope, dict):
+        return {}, ["scope 顶层须为对象"]
     mods = scope.get("modules")
     if not isinstance(mods, list) or not mods:
-        return ["modules 缺失或为空"]
+        return {}, ["modules 缺失或为空"]
 
     clean: list[dict] = []
     for i, mod in enumerate(mods):
@@ -94,16 +114,22 @@ def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str
                 defects.append(f"模块 {name}: files 含非字符串/空项")
                 continue
             rel = f.strip()
-            resolved = (driver_root / rel).resolve()
-            try:
-                resolved.relative_to(driver_root.resolve())
-            except ValueError:
+            if Path(rel).is_absolute() or ".." in Path(rel).parts:
                 defects.append(f"模块 {name}: 文件越出驱动目录 {rel}"
                                "（公共头是参考资料，不进迁移对象）")
                 continue
-            if not resolved.is_file():
-                defects.append(f"模块 {name}: 文件不存在 {rel}")
+            rel = Path(rel).as_posix()
+            if Path(rel).suffix not in (".c", ".h"):
+                defects.append(f"模块 {name}: 迁移文件须为 .c/.h：{rel}")
                 continue
+            if driver_root is not None:
+                resolved = (driver_root / rel).resolve()
+                if not resolved.is_relative_to(driver_root.resolve()):
+                    defects.append(f"模块 {name}: 文件越出驱动目录 {rel}")
+                    continue
+                if not resolved.is_file():
+                    defects.append(f"模块 {name}: 文件不存在 {rel}")
+                    continue
             seen.add(rel)
         if seen:
             clean.append({"name": name.strip(),
@@ -114,17 +140,61 @@ def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str
     if union and not any(f.endswith(".c") for f in union):
         defects.append("文件并集不含任何 .c 文件")
 
+    clean.sort(key=lambda m: m["name"])
+    normalized = {"modules": clean}
+    if "features" in scope:
+        features = scope["features"]
+        if not isinstance(features, dict):
+            defects.append("features 须为对象（include/exclude/constraints 字符串列表）")
+        else:
+            for key in ("include", "exclude", "constraints"):
+                values = features.get(key, [])
+                if not isinstance(values, list) or any(
+                        not isinstance(v, str) or not v.strip() for v in values):
+                    defects.append(f"features.{key} 须为非空字符串组成的列表")
+            if not any(d.startswith("features.") for d in defects):
+                normalized["features"] = {
+                    k: list(dict.fromkeys(v.strip() for v in features.get(k, [])))
+                    for k in ("include", "exclude", "constraints")}
+    return normalized, defects
+
+
+def validate_and_normalize(scope: dict, driver_root: Path, ws: Path) -> list[str]:
+    """Validate before publishing; preserve optional functional scope metadata."""
+    normalized, defects = _normalize(scope, driver_root)
     if defects:
         return defects
-
-    clean.sort(key=lambda m: m["name"])
     out = ws / "P1" / "scope.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps({"modules": clean}, ensure_ascii=False, indent=2)
+    out.write_text(json.dumps(normalized, ensure_ascii=False, indent=2)
                    + "\n", encoding="utf-8")
     _log.console_line(f"[porter] scope: 已规范化落盘 {out}"
-                      f"（{len(clean)} 模块 / {len(union)} 文件白名单）")
+                      f"（{len(normalized['modules'])} 模块 / "
+                      f"{len(scope_files(normalized))} 文件白名单）")
     return []
+
+
+def input_fingerprint(ws: Path, driver_root: Path) -> str:
+    """Hash scope decisions and source bytes so resume cannot reuse stale plans."""
+    files = load_scope(ws, driver_root)
+    h = hashlib.sha256()
+    for name in ("goals.md", "P1/strategy.md", "P1/scope.json"):
+        p = ws / name
+        h.update(name.encode())
+        h.update(p.read_bytes() if p.exists() else b"<absent>")
+    for p in driver_files(driver_root, files):
+        h.update(p.relative_to(driver_root).as_posix().encode())
+        h.update(hashlib.sha256(p.read_bytes()).digest())
+    return h.hexdigest()
+
+
+def validate_plan_scope(ws: Path, driver_root: Path, plan: dict) -> None:
+    files = load_scope(ws, driver_root)
+    if files is not None:
+        used = {f["src"] for m in plan["modules"] for f in m["files"]}
+        outside = used - files
+        if outside:
+            raise ScopeError("plan 超出已审范围：" + ", ".join(sorted(outside)))
 
 
 def cross_check(scope_set: set[str], driver_root: Path) -> list[str]:

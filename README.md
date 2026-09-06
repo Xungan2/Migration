@@ -38,7 +38,7 @@
 
 | 变量 | 默认 | 作用 |
 |---|---|---|
-| `PORTER_MODEL` | `zhipu-ai/glm-5.2` | agent 模型 |
+| `PORTER_MODEL` | `porter/config.json` 的 `model`（缺省 `zhipu-ai/glm-5.2`） | agent 模型 |
 | `PORTER_LOG_LEVEL` | `info` | console 行级别阈值（debug/info/warn/error） |
 | `PORTER_NO_AGENT` | 未设 | `=1` 关 agent 兜底（测试/守护闸门；错误处理降级档） |
 | `PORTER_SELF_DIAGNOSIS` | 未设 | `=1` 强制开错误处理求解循环（测试惯例） |
@@ -152,6 +152,16 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 
 **规范**：[`docs/sub-systems/log.md`](./docs/sub-systems/log.md)（五类文件格式/kind 注册表/命名/体积纪律/兼容策略）。
 
+### handoff 子系统（跨任务交接）
+
+所有流水线任务执行前严格读取直接前置 handoff 与原必读材料；缺失、损坏或依赖
+版本过期会在 agent 启动前返回 not-ready。成功、失败、崩溃恢复分别落不可覆盖的
+execution 文档，fresh session 的实际投递版本另有 receipt；P2 批次、P3 步骤、
+P4 fill/切片、probe/errorloop/routing 等辅助任务也使用同一协议。
+
+**规范**：[`docs/sub-systems/handoff.md`](./docs/sub-systems/handoff.md)。旧工作区
+必须用 `porter handoff import` 基于真实产物与验收证据补建，不能只凭产物继续。
+
 ### 知识子系统（kb）
 
 **目标**：把"每次迁移从零摸索"变成"站在上次迁移的肩膀上"——经验自动收集
@@ -213,6 +223,44 @@ transcript；静态结果指针化——完整输出落盘随 vcs 隔离 commit 
 ---
 
 ## 详细用法
+
+### 只迁移驱动的部分功能
+
+用 P0 的 --intent-file 声明要保留、排除的行为及兼容性约束。P1 的
+scope.json 同时记录 features（include/exclude/constraints）和文件白名单；
+文件内的功能裁剪由 strategy 和逐符号分配执行。子目录使用相对驱动根
+目录的路径，公共内核头仍只作规格参考。旧版仅含 modules 的 scope 兼容。
+
+P1 全流程现在是 strategy → 人工范围审阅 → divide → resolve → prune。
+prune 会扫描保留代码对驱动自有符号的引用，包括文件白名单外的定义，
+并提前展开潜在补回依赖到 P1/reports/pruning_context.json。一次 agent
+任务统一决定补回源码、等价改写、移除范围外路径或排除词法误判，
+包括所选补回引入的依赖；不分批重判，也不自动进入下一轮。
+机器在临时目录应用方案并校验依赖闭包与无环性。遗漏、依赖环或无效
+输出会停止并保留原因，原计划与模块保持不变；通过后才更新产物并将
+pruning.json 标记为 ready。它表示实施计划已就绪，其余实施与验证要求
+传给 P3/P4，实际功能仍需后续编译和行为验收。
+
+分步运行或导入外部计划后，运行：
+
+    python3 porter/main.py p1-prune --output-dir <工作区>
+
+声明意图后缺失/损坏的 scope 不会退回全目录；修改意图、策略、范围
+或源码后，旧拆分计划会被拒绝复用，应另建工作区重新推导。裁剪处置
+同样绑定输入指纹，过期时 P2/P3/P4 会要求重跑 p1-prune。
+有范围声明但缺少源码指纹的旧计划须重新生成，或经 p1-import 校验导入；
+仅含 modules 的旧 scope 格式仍然有效。
+
+dm-zero → Asterinas 的功能意图示例见 examples/dm-zero-intent.md；
+脚本可以指定它并使用独立工作区：
+
+    PORTER_INTENT_FILE=examples/dm-zero-intent.md \
+    PORTER_OUTPUT_DIR=migrations/dm-zero-port \
+    ./scripts/dm-run-all.sh
+
+本例验证使用 Linux v5.10.265（提交 2a3da1f4966798b0b48ce302944ad356b2c98b5d）。
+dm-zero-manual 是拆分思路的参考，自动生成结果以当前源码和 Asterinas
+意图为准，不要求固定文件数、模块名或唯一拓扑序。
 
 ### 子命令速查
 

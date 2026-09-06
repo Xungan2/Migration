@@ -2,7 +2,7 @@
 
 设计约定（来自 driver-migration 实验的既定原则）：
 - agent 只承担"判断性"动作（类别识别/文档翻译/检索），确定性动作一律走脚本
-- 模型经 PORTER_MODEL 环境变量配置，默认 zhipu-ai/glm-5.2
+- 模型优先 PORTER_MODEL，其次 porter/config.json 的 model，默认 zhipu-ai/glm-5.2
 - 每次调用的完整输出落盘日志，供人工审核与成本归因
 - SKILL 文件是行为指令的唯一来源：调用方组装 prompt = SKILL 正文 + 任务数据
 """
@@ -15,11 +15,17 @@ import os
 import re
 import subprocess
 import time
+import uuid
 from pathlib import Path
 
 DEFAULT_MODEL = "zhipu-ai/glm-5.2"
 TOOL_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILLS_DIR = TOOL_ROOT / "skills"
+try:
+    DEFAULT_MODEL = json.loads((TOOL_ROOT / "porter/config.json").read_text(
+        encoding="utf-8")).get("model") or DEFAULT_MODEL
+except (OSError, json.JSONDecodeError, AttributeError):
+    pass
 
 # opencode 将每步 max_output_tokens 静默钳到 min(model.limit.output, 32000)
 # （anomalyco/opencode#29363）。推理模型的思考与输出共享该预算，大调用
@@ -62,6 +68,15 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
     （v1.1 结构字段）。vcs 隔离：调用前后各一个工作区 commit
     （pre-agent/agent 成对），diff 即该次调用的 ws 侧产物。
     """
+    # Every public task entry binds a handoff execution.  The transport remains
+    # usable in isolation for its own low-level tests, but production callers get
+    # the exact required handoff documents in every fresh provider session.
+    invocation_id = uuid.uuid4().hex
+    try:
+        from ..handoff import prepare_agent_prompt as _handoff_prompt
+        prompt = _handoff_prompt(prompt, new_session=True)
+    except ImportError:
+        pass
     vws = _bound_ws()                    # vcs 隔离点的工作区（可能 None）
     if vws is not None:
         try:
@@ -141,48 +156,59 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
             _vcs.agent_post(vws, str(log_stem), rc)
     except Exception:
         pass
+    try:
+        from ..handoff import current_execution as _handoff_current
+    except ImportError:
+        _handoff_current = lambda: None
+    _execution = _handoff_current()
+    if _execution is not None:
+        # Provider evidence is part of the durable task protocol.  If it cannot
+        # be archived, the active execution must fail closed.
+        _execution.record_provider(
+            invocation_id=invocation_id, provider="opencode",
+            session_id=None, rc=rc, log_path=log_path,
+            prompt_path=prompt_path, output=out,
+            logical_task_id=str((task or {}).get("task_id") or
+                                f"{_execution.spec.task_id}:agent:"
+                                f"{Path(str(log_stem)).name}"))
     return rc, out
 
 
-def extract_json(out: str) -> dict | None:
-    """从 agent 输出中提取 moves JSON 并解析。
-
-    优先取 ```json 代码块（SKILL 约定）；兜底容忍裸 JSON：以最后一个
-    "moves" 为锚点做配平括号搜索（opencode run 的输出混有工具转录，
-    不能全文贪婪匹配）。失败返回 None。
-    """
-    blocks = re.findall(r"```json\s*(.*?)```", out, re.DOTALL)
-    if not blocks:
-        blocks = re.findall(r"```\s*(\{.*?\})\s*```", out, re.DOTALL)
-    for block in blocks:
+def _response_objects(text: str):
+    """Decode complete objects without treating fences inside strings as syntax."""
+    decoder = json.JSONDecoder()
+    fences = (list(re.finditer(r"```json\s*(?=\{)", text))
+              or list(re.finditer(r"```\s*(?=\{)", text)))
+    starts = [m.end() for m in fences]
+    # opencode can print a bare final object followed by tool transcripts.
+    leading = len(text) - len(text.lstrip())
+    if text[leading:leading + 1] == "{":
+        starts.append(leading)
+    for start in starts:
         try:
-            obj = json.loads(block.strip())
-            if isinstance(obj, dict):
-                return obj
+            obj, _end = decoder.raw_decode(text, start)
         except json.JSONDecodeError:
             continue
-    # 兜底：裸 JSON（无围栏）。从 "moves" 锚点向前找配平的 { ... }
+        if isinstance(obj, dict):
+            yield obj
+
+
+def extract_json(out: str) -> dict | None:
+    """Extract a fenced or leading JSON object; retain legacy moves fallback."""
+    for obj in _response_objects(out):
+        return obj
+    decoder = json.JSONDecoder()
+    # Legacy resolve output may place prose before an unfenced moves object.
     anchor = out.rfind('"moves"')
     while anchor >= 0:
         start = out.rfind("{", 0, anchor)
         while start >= 0:
-            depth = 0
-            end = -1
-            for k in range(start, len(out)):
-                if out[k] == "{":
-                    depth += 1
-                elif out[k] == "}":
-                    depth -= 1
-                    if depth == 0:
-                        end = k
-                        break
-            if end > 0:
-                try:
-                    obj = json.loads(out[start:end + 1])
-                    if isinstance(obj, dict) and "moves" in obj:
-                        return obj
-                except json.JSONDecodeError:
-                    pass
+            try:
+                obj, _end = decoder.raw_decode(out, start)
+                if isinstance(obj, dict) and "moves" in obj:
+                    return obj
+            except json.JSONDecodeError:
+                pass
             start = out.rfind("{", 0, start)
         anchor = out.rfind('"moves"', 0, anchor)
     return None
@@ -265,6 +291,12 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
     （供 _parse_events）、可续接会话、message 为增量消息（续接时不再
     重发任务全文）。
     """
+    invocation_id = uuid.uuid4().hex
+    try:
+        from ..handoff import prepare_agent_prompt as _handoff_prompt
+        message = _handoff_prompt(message, new_session=session_id is None)
+    except ImportError:
+        pass
     vws = _bound_ws()                    # vcs 隔离点的工作区（可能 None）
     if vws is not None:
         try:
@@ -343,6 +375,21 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
             _vcs.agent_post(vws, str(log_stem), rc)
     except Exception:
         pass
+    try:
+        from ..handoff import current_execution as _handoff_current
+    except ImportError:
+        _handoff_current = lambda: None
+    _execution = _handoff_current()
+    if _execution is not None:
+        _events = _parse_events(out) or {}
+        _execution.record_provider(
+            invocation_id=invocation_id, provider="opencode",
+            session_id=_events.get("session_id") or session_id,
+            rc=rc, log_path=log_path, prompt_path=prompt_path,
+            output=_events.get("text") or out,
+            logical_task_id=str((task or {}).get("task_id") or
+                                f"{_execution.spec.task_id}:agent:"
+                                f"{Path(str(log_stem)).name}"))
     return rc, out
 
 
@@ -390,21 +437,10 @@ def _parse_phase(text: str) -> dict | None:
             return {**obj, "phase": "done"}
         return None
 
-    blocks = re.findall(r"```json\s*(.*?)```", text, re.DOTALL) \
-        or re.findall(r"```\s*(\{.*?\})\s*```", text, re.DOTALL)
-    for b in blocks:
-        try:
-            hit = _ok(json.loads(b.strip()))
-        except json.JSONDecodeError:
-            continue
+    for obj in _response_objects(text):
+        hit = _ok(obj)
         if hit:
             return hit
-    t = text.strip()
-    if t.startswith("{"):
-        try:
-            return _ok(json.loads(t))
-        except json.JSONDecodeError:
-            pass
     return None
 
 
@@ -520,7 +556,8 @@ def run_agent_structured(prompt: str, workdir, log_stem: str, *,
                          max_tries: int = 2,
                          model: str | None = None,
                          timeout_sec: int = 600,
-                         task: dict | None = None) -> tuple[int, str,
+                         task: dict | None = None,
+                         validator=None) -> tuple[int, str,
                                                             dict | None]:
     """单次结构化调用：run_agent + done 协议 + schema 校验 + 反馈重试。
 
@@ -535,14 +572,51 @@ def run_agent_structured(prompt: str, workdir, log_stem: str, *,
     for attempt in range(1, max(1, max_tries) + 1):
         stem = str(log_stem) if max_tries <= 1 \
             else f"{log_stem}_R{attempt}"
-        rc, out = run_agent(msg, workdir=Path(workdir), log_stem=stem,
-                            model=model, timeout_sec=timeout_sec,
-                            task=task)
-        obj = _parse_phase(out) if rc == 0 else None
+        task_id = str((task or {}).get("task_id") or "")
+
+        def _attempt():
+            rc, out = run_agent(msg, workdir=Path(workdir), log_stem=stem,
+                                model=model, timeout_sec=timeout_sec,
+                                task=task)
+            obj = _parse_phase(out) if rc == 0 else None
+            errs = []
+            if obj and obj.get("phase") == "done" and \
+                    obj.get("status") != "blocked":
+                errs = _validate_schema(obj, gen_schema)
+                if not errs and validator is not None:
+                    errs = list(validator(obj) or [])
+            elif obj and obj.get("status") == "blocked":
+                errs = ["provider reported blocked"]
+            else:
+                errs = ["missing done phase JSON"]
+            return rc, out, obj, errs
+
+        try:
+            from ..handoff import current_execution, run_task, TaskSpec
+        except ImportError:
+            current_execution = lambda: None
+        parent = current_execution()
+        if parent is not None:
+            if not task_id:
+                task_id = (f"{parent.spec.task_id}.structured."
+                           f"{Path(str(log_stem)).name}")
+            rc, out, obj, attempt_errs = run_task(
+                parent.manager.workspace,
+                TaskSpec(task_id, description="one structured provider attempt"),
+                _attempt,
+                success=lambda value: (value[0] == 0 and value[2] is not None and
+                                       not value[3]),
+                summary=lambda value: (
+                    f"Structured provider rc={value[0]}; errors={value[3]}."),
+                verification=lambda value: (
+                    "structured response accepted" if not value[3]
+                    else "; ".join(value[3]),))
+        else:
+            rc, out, obj, attempt_errs = _attempt()
         if obj and obj.get("phase") == "done":
             if obj.get("status") == "blocked":
                 return rc, out, obj      # 停车信号交还调用方（不校验 schema）
-            errs = _validate_schema(obj, gen_schema)
+            errs = attempt_errs
             if not errs:
                 return rc, out, obj
             feedback = ("---\n\n## 上一次输出的问题\n"
@@ -641,8 +715,9 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             break
         used += elapsed
         outcome["total_agent_sec"] = round(used, 1)
-        # rc≠0（含超时）也尝试解析事件流：session_id 能救则救（超时/
-        # 被杀的会话凭部分事件仍可续接；救不回由后续轮次自然兜底）
+        # rc≠0（含超时）仍解析 session id 供诊断，但该 provider session
+        # 已终态失败，绝不续接。外层先落 handoff-fail；下一任务 execution
+        # 从 fresh session 重启。
         parsed_ev = _parse_events(out)
         if parsed_ev and parsed_ev.get("session_id"):
             session_id = parsed_ev["session_id"]
@@ -655,6 +730,11 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                            "elapsed_sec": round(elapsed, 1),
                            "phase": (phase_obj or {}).get("phase"),
                            "schema_errs": [], "static": None}
+        if rc != 0:
+            outcome["status"] = "failed"
+            outcome["rounds"].append(round_rec)
+            _journal()
+            break
 
         # ---- 静态段执行（run_static 请求 / final_static 终验共用） ----
         def _run_static() -> None:

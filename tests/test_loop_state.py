@@ -344,7 +344,7 @@ class TestProbeLifecycle(unittest.TestCase):
                     '{"name": "p_b", "rust": "fn p_b() { }", "claim": "api_b"}'
                     ']}\n```')
 
-        def fake_run_agent(prompt, workdir, log_stem, timeout_sec=0):
+        def fake_run_agent(prompt, workdir, log_stem, timeout_sec=0, **_kwargs):
             if "待探针的映射条目" in prompt:
                 return 0, gen_json
             return 0, "junk"    # 改判轮无可解析输出 → _rejudge_failed False

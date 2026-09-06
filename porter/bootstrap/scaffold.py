@@ -397,7 +397,14 @@ def run_scaffold(ws: Path, target_os: Path,
                 message, workdir=target_os, log_stem=stem,
                 timeout_sec=AGENT_TIMEOUT_SEC, session_id=session_id,
                 task={"phase": "P2", "step": "scaffold", "attempt": rnd})
-            ev = agent._parse_events(out)   # rc≠0 也试：先抢救 session_id
+            ev = agent._parse_events(out)   # rc≠0 的 id 仅留诊断，禁止续接
+            if rc != 0:
+                failed_sid = (ev or {}).get("session_id")
+                raise RuntimeError(
+                    f"P2b: provider session ended rc={rc}"
+                    + (f" session={failed_sid}" if failed_sid else "")
+                    + f"; log={stem}.log. The task execution must fail before "
+                      "a fresh session is started.")
             if ev and ev.get("session_id"):
                 session_id = ev["session_id"]
             if session_id is None:

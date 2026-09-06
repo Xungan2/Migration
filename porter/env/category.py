@@ -16,8 +16,8 @@ from ..common import agent
 from .. import log as _log
 
 
-def identify_category(linux_driver: Path, workdir: Path,
-                      override: str | None = None) -> dict:
+def _identify_category_impl(linux_driver: Path, workdir: Path,
+                            override: str | None = None) -> dict:
     """返回类别识别结果 dict（categories/confidence/evidence/...）。
 
     override 非空时跳过 agent，直接采用人工指定。
@@ -86,6 +86,23 @@ def identify_category(linux_driver: Path, workdir: Path,
     _log.console_line(f"[porter] T2: categories={parsed['categories']} "
           f"confidence={conf} subsystems={parsed.get('subsystems')}")
     return parsed
+
+
+def identify_category(linux_driver: Path, workdir: Path,
+                      override: str | None = None) -> dict:
+    """Identify category as an independently handed-off auxiliary task."""
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _identify_category_impl(linux_driver, workdir, override)
+    return run_task(
+        workdir, TaskSpec("p0.category", materials=(linux_driver,),
+                          description="driver category decision"),
+        lambda: _identify_category_impl(linux_driver, workdir, override),
+        success=lambda value: bool(value.get("categories")),
+        summary=lambda value: (f"Category decision: {value.get('categories')}; "
+                               f"confidence={value.get('confidence')}."),
+        verification=lambda value: (
+            "Category result contains a non-empty categories list.",))
 
 
 def write_result(ws: Path, result: dict) -> None:
