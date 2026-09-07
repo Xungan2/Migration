@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import time
 from datetime import datetime
@@ -267,9 +268,10 @@ def _run_ut(exp_dir: Path, target_os: Path, runner: dict,
     if not tpl:
         return False, "runner 缺单测命令（driver_scope_cmd 与 cmd 均无）", \
             exp_dir / "logs" / f"{label}.log"
-    cmd = (str(tpl)
-           .replace("{PORTER_TARGET_OS_ROOT}", str(target_os.resolve()))
-           .replace("{PORTER_DRIVER_HOME}", driver_home_rel))
+    cmd = re.sub(r"(?<!\$)\{PORTER_TARGET_OS_ROOT\}",
+                 lambda _m: str(target_os.resolve()), str(tpl))
+    cmd = re.sub(r"(?<!\$)\{PORTER_DRIVER_HOME\}",
+                 lambda _m: driver_home_rel, cmd)
     env = {**os.environ,
            "PORTER_TARGET_OS_ROOT": str(target_os.resolve()),
            "PORTER_DRIVER_HOME": driver_home_rel,

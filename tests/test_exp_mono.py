@@ -538,6 +538,24 @@ class TestExpMonoUnits(unittest.TestCase):
         self.assertEqual(calls[0]["cmd"], f"run {tmp / 'tree'} home/drv-x")
         self.assertEqual(calls[0]["env"]["PORTER_DRIVER_HOME"], "home/drv-x")
 
+    def test_run_ut_shell_form_preserved(self):
+        # 命令模板里的 shell 形态 ${PORTER_TARGET_OS_ROOT} 必须原样保留
+        # （由 env 展开），不能被单花括号占位符替换咬坏
+        tmp = Path(tempfile.mkdtemp(prefix="exp_mono_ut2_"))
+        (tmp / "tree").mkdir()
+        runner = {"unit_test": {
+            "cmd": "echo ${PORTER_TARGET_OS_ROOT}/x UT-DONE",
+            "timeout_sec": 5,
+            "success_pattern": "UT-DONE", "fail_pattern": "UT-BAD"}}
+        ok, detail, log_path = mono_mod._run_ut(
+            tmp, tmp / "tree", runner, "home/drv-x", "ut_full",
+            which="full")
+        self.assertTrue(ok)
+        body = Path(log_path).read_text(encoding="utf-8")
+        # shell 形态经 env 正确展开（无 "$/…" 咬坏痕迹）
+        self.assertIn(f"{tmp / 'tree'}/x UT-DONE", body)
+        self.assertNotIn("${", body)
+
 
 if __name__ == "__main__":
     unittest.main()
