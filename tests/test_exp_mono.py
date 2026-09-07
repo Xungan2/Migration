@@ -470,6 +470,26 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
                          "pass")
 
+    def test_resume_legacy_entry_baseline(self):
+        # 旧式条目（无 snap_base/snap_end，仅 marker_delta）→ marker
+        # 基线保守取 0、代码基线不可知 → 增量守卫跳过
+        _write_module_product(self.fx["home"], "fx_a_logic")
+        led_p = self.fx["ws"] / "exp-mono" / "ledger.json"
+        led_p.parent.mkdir(parents=True, exist_ok=True)
+        led_p.write_text(json.dumps(
+            {"modules": {"fx-a": {"status": "decl-mismatch",
+                                  "marker_delta": 1}}}), encoding="utf-8")
+
+        def work(module):
+            if module != "fx-a":
+                _write_module_product(self.fx["home"],
+                                      module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work=work, session="ses_prev")
+        self.assertEqual(r["rc"], 0)
+        self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
+                         "pass")
+
     def test_preconditions_rc2(self):
         (self.fx["ws"] / "P1" / "modules" / "deps.json").unlink()
         self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 2)

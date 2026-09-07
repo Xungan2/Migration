@@ -503,13 +503,14 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
     base_marker: int | None = None
     if session_override and prev.get("status") not in (None, "pass"):
         sb = prev.get("snap_base") or {}
-        se = prev.get("snap_end") or {}
+        if sb.get("marker") is not None:
+            base_marker = sb["marker"]      # 新式条目：精确基线
+        elif prev.get("marker_delta") is not None:
+            base_marker = 0     # 旧式条目：绝对基线不可知——保守取 0
+            #（方向安全：宁可高估 delta 也不误杀；骨架自带 marker 的
+            #  少许膨胀由记账完备性另一侧约束）
         if sb.get("code_lines") is not None:
             base_code = sb["code_lines"]
-            base_marker = sb.get("marker")
-        elif (se.get("marker") is not None
-              and prev.get("marker_delta") is not None):
-            base_marker = se["marker"] - prev["marker_delta"]
     snap = {"code_lines": base_code if base_code is not None else cur_code,
             "marker": base_marker if base_marker is not None else cur_marker,
             "growth_guard": base_code is not None or not session_override,
