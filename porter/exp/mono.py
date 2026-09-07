@@ -199,14 +199,18 @@ def _guard_products(home: Path, driver_home_rel: str, manifest: dict,
     """① 产物守卫：代码增量 + 构建单元登记 + 改动范围。"""
     problems: list[str] = []
     ext = manifest.get("source_ext") or None
-    now_lines = _count_code(home, ext)
-    need = max(8, loc // 20)
-    grew = now_lines - snap["code_lines"]
-    if grew < need:
-        problems.append(
-            f"① 产物守卫：driver_home 非注释代码增量 {grew} 行 < 阈值 "
-            f"{need} 行（模块源 {loc} 行的 5%，下限 8）——真实迁移尚未"
-            "发生，先完成代码翻译再请求验证")
+    if not snap.get("growth_guard", True):
+        _log.console_line("[porter] exp-mono: 续跑无代码基线——本轮跳过"
+                          "增量守卫（build/单测/记账照常）")
+    else:
+        now_lines = _count_code(home, ext)
+        need = max(8, loc // 20)
+        grew = now_lines - snap["code_lines"]
+        if grew < need:
+            problems.append(
+                f"① 产物守卫：driver_home 非注释代码增量 {grew} 行 < 阈值 "
+                f"{need} 行（模块源 {loc} 行的 5%，下限 8）——真实迁移尚未"
+                "发生，先完成代码翻译再请求验证")
     integ = manifest.get("integration") or {}
     list_file, entry_template = integ.get("list_file"), \
         integ.get("entry_template")
@@ -487,8 +491,28 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
     parking_path = exp_dir / "parking.md"
     notes_before = _text_lines(notes_path)
     budget = int(budget_override) if budget_override else _budget_sec(loc)
-    snap = {"code_lines": _count_code(home, ext),
-            "marker": _count_marker(home, ext, marker),
+    prev = (ledger.get("modules") or {}).get(module) or {}
+    # 续跑基线重建：delta 语义跨调用累计——基线应回溯到**首次**开始该
+    # 模块时的快照（存于上次 ledger 条目），而非本次调用起点（否则
+    # resume 时已完成工作被当零点，增量/marker 守卫全部误杀）。
+    # 旧条目无 snap_base 时：marker 可由 snap_end-marker_delta 反推；
+    # 代码基线不可知 → 本轮禁用增量守卫（build/ut/记账仍守）。
+    cur_code = _count_code(home, ext)
+    cur_marker = _count_marker(home, ext, marker)
+    base_code: int | None = None
+    base_marker: int | None = None
+    if session_override and prev.get("status") not in (None, "pass"):
+        sb = prev.get("snap_base") or {}
+        se = prev.get("snap_end") or {}
+        if sb.get("code_lines") is not None:
+            base_code = sb["code_lines"]
+            base_marker = sb.get("marker")
+        elif (se.get("marker") is not None
+              and prev.get("marker_delta") is not None):
+            base_marker = se["marker"] - prev["marker_delta"]
+    snap = {"code_lines": base_code if base_code is not None else cur_code,
+            "marker": base_marker if base_marker is not None else cur_marker,
+            "growth_guard": base_code is not None or not session_override,
             "status": _git_status(target_os)}
     prompt = _module_prompt(
         ws, exp_dir, module, mod_json,
@@ -497,7 +521,6 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
         notes_path.read_text(encoding="utf-8", errors="replace"),
         parking_path.read_text(encoding="utf-8", errors="replace"))
     if session_override:
-        prev = (ledger.get("modules") or {}).get(module) or {}
         if prev.get("status") not in (None, "pass"):
             resume_bits = [f"- 上次状态：{prev.get('status')}"]
             if prev.get("decl_problems"):
@@ -561,6 +584,11 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
              "time": datetime.now().isoformat(timespec="seconds")}
     if decl_probs:
         entry["decl_problems"] = decl_probs
+    entry["snap_base"] = {"code_lines": snap["code_lines"],
+                          "marker": snap["marker"]}
+    entry["snap_end"] = {"code_lines": _count_code(home, ext),
+                         "marker": _count_marker(home, ext, marker)
+                         if marker else None}
     if blocked:
         entry["notes"] = str(parsed.get("notes", ""))[:400]
         _log.console_line(f"[porter] exp-mono: {module} 被 agent 报 blocked："

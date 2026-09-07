@@ -160,7 +160,7 @@ class _FakeSeq:
 
 
 def _run_with_fakes(test, fx, work, *, build_ok=True, boot_ok=True,
-                    decl=None):
+                    decl=None, session=None):
     """通用环境：patch seq/build/ut 执行器/commit/boot 后跑全 loop。"""
     seq = _FakeSeq(work, decl=decl)
     ut_calls = []
@@ -189,7 +189,7 @@ def _run_with_fakes(test, fx, work, *, build_ok=True, boot_ok=True,
                 mono_mod.probe_mod, "probe_boot",
                 return_value={"item": "final_boot", "ok": boot_ok,
                               "detail": "rc=0"}):
-        rc = mono_mod.run_exp_mono(fx["ws"])
+        rc = mono_mod.run_exp_mono(fx["ws"], session=session)
     return {"rc": rc, "seq": seq, "commits": commits, "ut_calls": ut_calls}
 
 
@@ -444,6 +444,31 @@ class TestExpMonoLoop(unittest.TestCase):
         entry = self._ledger()["modules"]["fx-a"]
         self.assertEqual(entry["budget_sec"], 1800)
         self.assertEqual(entry["session_id"], "ses_fx")
+
+    def test_resume_baseline_cumulative(self):
+        # 续跑基线重建：上次已交付产物 + snap_base 在 ledger——本轮
+        # 零新增代码也必须过增量守卫（累计 delta 语义），不误杀
+        _write_module_product(self.fx["home"], "fx_a_logic")
+        led_p = self.fx["ws"] / "exp-mono" / "ledger.json"
+        led_p.parent.mkdir(parents=True, exist_ok=True)
+        led = {"modules": {}} if not led_p.exists() else \
+            json.loads(led_p.read_text(encoding="utf-8"))
+        led["modules"]["fx-a"] = {
+            "status": "decl-mismatch",
+            "snap_base": {"code_lines": 0, "marker": 0},
+            "snap_end": {"code_lines": 12, "marker": 1}}
+        led_p.write_text(json.dumps(led), encoding="utf-8")
+
+        def work(module):
+            if module != "fx-a":     # fx-a 测零新增续跑；fx-b 正常交付
+                _write_module_product(self.fx["home"],
+                                      module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work=work,
+                            session="ses_prev")
+        self.assertEqual(r["rc"], 0)
+        self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
+                         "pass")
 
     def test_preconditions_rc2(self):
         (self.fx["ws"] / "P1" / "modules" / "deps.json").unlink()
