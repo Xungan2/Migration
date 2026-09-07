@@ -496,6 +496,22 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
         target_os, driver_home_rel, deps.get(module) or [],
         notes_path.read_text(encoding="utf-8", errors="replace"),
         parking_path.read_text(encoding="utf-8", errors="replace"))
+    if session_override:
+        prev = (ledger.get("modules") or {}).get(module) or {}
+        if prev.get("status") not in (None, "pass"):
+            resume_bits = [f"- 上次状态：{prev.get('status')}"]
+            if prev.get("decl_problems"):
+                resume_bits.append(
+                    "- 上次 done 的声明面核对未通过（须补全记账或补测试）："
+                    + "；".join(prev["decl_problems"]))
+            if prev.get("notes"):
+                resume_bits.append(f"- 上次 notes：{prev['notes']}")
+            prompt += ("\n\n---\n\n## 续跑指令（同会话续接，产物已在树中）\n"
+                       + "\n".join(resume_bits)
+                       + "\n请在此基础上修复/补全（**不要重做已完成的"
+                       "工作**；词典/登记/测试已就位的直接复用），按运行"
+                       "协议输出完整 done JSON（六字段：status/files/notes/"
+                       "migrated_functions/tests/untested）。")
     _log.console_line(f"[porter] exp-mono: 迁移模块 {module}"
                       f"（源 {loc} 行，预算 {budget}s，起始测试标记 "
                       f"{snap['marker']}）")
@@ -543,6 +559,8 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
              "session_id": outcome.get("session_id"),
              "seq_status": outcome.get("status"),
              "time": datetime.now().isoformat(timespec="seconds")}
+    if decl_probs:
+        entry["decl_problems"] = decl_probs
     if blocked:
         entry["notes"] = str(parsed.get("notes", ""))[:400]
         _log.console_line(f"[porter] exp-mono: {module} 被 agent 报 blocked："
@@ -651,15 +669,18 @@ def run_exp_mono(ws: Path, module: str | None = None,
         targets = [module]
     else:
         targets = list(order)
-    for m in targets:
+    first_session = session          # 会话续接只作用于本次实际运行的
+    for m in targets:                # 首个模块（后续模块各自新会话）
         if (ledger["modules"].get(m) or {}).get("status") == "pass":
             _log.console_line(f"[porter] exp-mono: {m} 已 pass——跳过")
             continue
         if _run_module(ws, exp_dir, m, proj, runner, manifest, edges,
                        ledger, budget_override=budget,
-                       session_override=session) != 0:
+                       session_override=first_session) != 0:
+            first_session = None
             _write_report(ws, exp_dir, ledger, order, proj, manifest)
             return 1
+        first_session = None
     terminal = None
     if all((ledger["modules"].get(m) or {}).get("status") == "pass"
            for m in order):
