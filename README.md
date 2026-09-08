@@ -334,6 +334,13 @@ python3 porter/main.py log --output-dir <ws> timeline [--module M]
 # exp-mono 单体迁移 loop（实验形态；详见「exp-mono」节）
 python3 porter/main.py exp-mono --output-dir <ws> [--module M]
                                 [--budget SEC] [--session ID]
+
+# exp-accept 整驱动系统验收（实验形态；详见「exp-accept」节）
+python3 porter/main.py exp-accept --output-dir <ws>   # 断点续跑（按状态路由）
+python3 porter/main.py exp-accept --output-dir <ws> --draft [--budget SEC] [--session ID]
+python3 porter/main.py exp-accept --output-dir <ws> --execute [--budget SEC] [--session ID]
+python3 porter/main.py exp-accept --output-dir <ws> --diagnose --session ID
+python3 porter/main.py exp-accept --output-dir <ws> --redraft
 ```
 
 ### exp-mono：单体模块迁移 loop（实验形态）
@@ -364,6 +371,45 @@ runner/manifest 数据即可跨目标复用）。
   理由）供人审——覆盖质量归人，不归计数器。
 - 工作区产物：`exp-mono/{ledger.json, mapping-notes.md（JIT 词典接力）,
   parking.md, logs/, report.md}`。
+
+### exp-accept：整驱动系统验收（实验形态，接 exp-mono 终态）
+
+模块都绿 ≠ 驱动作为系统工作（模块级 gate 有结构性盲区：整机集成
+约束只有真启动才暴露）。本流程回答四层：**L1 编译 / L2 全量单测 /
+L3 设备+驱动启动（驱动对设备参数有真实反应）/ L4 端到端**，外加
+差分、负向与回归。平台事实 100% 走工作区数据面，工具零目标 OS /
+驱动假设（跨目标复用同 exp-mono 哲学）。
+
+- **判据来源三分**：L1/L2 与 L3 执行命令**机械绑定** runner 键
+  （origin=frozen，agent 不可改）；L3 驱动反应锚点由 agent 从迁移
+  产物代码**引用**（`cite.tree` 带 file:line/quote，工具 grep 核实，
+  反幻觉）；L4 端到端全部 agent 生成——两处均须**人审放行**
+  （gates 审批关口 + 方案指纹冻结；改动即失效）。
+- **`--draft`**：P2b 直连形态（文件即信号 + 同 session 增量续接 +
+  同轮 schema 微反馈不烧轮 + 静态证据核查回炉 ≤4 轮，零启动消耗）
+  → 合并冻结判据 → `review.md`（frozen/proposed 分标）→ exit 3 待审。
+- **人审**：answers.md 写 `## @exp-accept.plan` + `verdict: approve`
+  （或 `gate answer` CLI）；作答与放行双点验指纹。
+- **`--execute`**（断点续跑，ledger 记每单元结果+树头，绿且树未变
+  即跳过）：幂等 prepare（脚手架落树 + wiring_cmd 接线 + 独立
+  commit，脚手架内容此后冻结）→ 成本升序执行（L1 → L3 裸/注入 →
+  L4 模板单元；红集汇总后才跑 L2 全量单测殿后）→ 每单元日志即
+  快照归档、纯判定核心机械核对 → 红项先过 infra 分类（rc≠0 ∧ 日志
+  缺失/空 → 重试 1 次）→ **自动修环**。
+- **修环**（`run_agent_seq`，静态段=只重跑受影响单元+重判；改动守卫
+  = git status ⊆ driver_home ∪ 登记接线文件；脚手架漂移自动还原）：
+  agent 按 EXP-accept-fix 归责（infra/criteria/migration/platform），
+  修好自动 commit 续跑；未解/数据面缺陷 → parking + `--redraft`
+  人工环路。
+- **诚实闸门**：收据必须内容派生（`expect.literal` 或
+  `fill_sha256{byte,length}` 通用数学原语，"读什么"的语义活在数据
+  里）；工作负载首行运行证明；跨单元 must-not（防日志串判/收据
+  泄漏）；差分对（载荷锚 hit ∧ 无载荷基线 miss）。
+- 工作区产物：`exp-accept/{acceptance.json, review.md, ledger.json,
+  report.md, parking.md, logs/}`。
+- 前置：exp-mono ledger 全 pass（本流程只接迁移终态）。新驱动
+  （如块/网络/闪存类）跑完 exp-mono 后即插即用——判据/负载/脚手架
+  全由 draft agent 按该驱动的可观测面设计。
 
 #### 新目标机最小上手清单（如 UDK/HarmonyOS）
 
