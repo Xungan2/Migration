@@ -35,7 +35,7 @@ from ..env import probe as probe_mod
 from .. import log as _log
 
 SKILL_NAME = "EXP-mono-migrate"
-GATE_DESC = "三段复合静态检查（① 产物守卫 ② 构建 ③ 单测）"
+GATE_DESC = "四段复合静态检查（① 产物守卫 ② 构建 ③ 启动 ④ 单测）"
 _COMMENT_PREFIXES = ("//", "/*", "*", "*/", "#")
 
 
@@ -311,12 +311,21 @@ def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
             build_log = exp_dir / "logs" / f"exp_{module}_build.log"
             return False, (f"② 构建 FAIL：{b.get('detail', '')}"
                            f"（全文：{build_log}）")
+        # ③ 启动（阻断）：带上目标树当前全部已迁移代码（每模块 pass 即
+        # commit），全树构建后 QEMU 启动自检。比单测便宜，先行短路。
+        boot = probe_mod.probe_boot(exp_dir, target_os, runner,
+                                    label=f"exp_{module}_boot")
+        if not boot.get("ok"):
+            boot_log = exp_dir / "logs" / f"T3_exp_{module}_boot.log"
+            return False, (f"③ 启动 FAIL：{boot.get('detail', '')}"
+                           f"（全文：{boot_log}；排 panic 看 qemu-serial.log）")
         ut_ok, ut_detail, _lp = _run_ut(exp_dir, target_os, runner,
                                         driver_home_rel,
                                         label=f"exp_{module}_ut")
         if not ut_ok:
-            return False, f"③ 单测 FAIL：{ut_detail}"
-        return True, ("三段全绿：产物守卫通过；构建成功；单测通过"
+            return False, f"④ 单测 FAIL：{ut_detail}"
+        return True, ("四段全绿：产物守卫通过；构建成功；启动成功"
+                      "（含全部已迁移代码）；单测通过"
                       "（测试记账完备性在 done 后由编排器核对声明面）")
 
     return {"describe": GATE_DESC, "fn": _fn}

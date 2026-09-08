@@ -276,15 +276,40 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertFalse(r["seq"].static_results[0]["ok"])
         self.assertIn("产物守卫", r["seq"].static_results[0]["out"])
 
+    def test_gate_boot_fail_short_circuits_ut(self):
+        # 四段 gate ③ 启动失败 → 单测不执行（build 后短路），模块不 pass
+        def work(module):
+            _write_module_product(self.fx["home"], module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work, boot_ok=False)
+        self.assertEqual(r["rc"], 1)
+        self.assertEqual(r["ut_calls"], [])          # ④ 单测未触达
+        self.assertFalse(r["seq"].static_results[0]["ok"])
+        self.assertIn("③ 启动 FAIL", r["seq"].static_results[0]["out"])
+        self.assertEqual(r["commits"], [])
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertNotEqual(led["status"], "pass")
+
+    def test_gate_four_stage_all_green(self):
+        # 全绿路径：gate 描述为四段（产物/构建/启动/单测）
+        def work(module):
+            _write_module_product(self.fx["home"], module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work)
+        self.assertEqual(r["rc"], 0)
+        self.assertTrue(r["seq"].static_results[0]["ok"])
+        self.assertIn("四段全绿", r["seq"].static_results[0]["out"])
+        self.assertIn("启动成功", r["seq"].static_results[0]["out"])
+
     def test_decl_marker_consistency(self):
-        # 声明了 1 个测试但产物零标记（三段 gate 全过）→ 声明面判败
+        # 声明了 1 个测试但产物零标记（四段 gate 全过）→ 声明面判败
         def work(module):
             _write_module_product(self.fx["home"], module.replace("-", "_"),
                                   marker=False)
 
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 1)
-        # 三段 gate 在 session 内全绿（build/ut 都跑了），败在记账核对
+        # 四段 gate 在 session 内全绿（build/boot/ut 都跑了），败在记账核对
         self.assertEqual(len(r["ut_calls"]), 1)
         self.assertTrue(r["seq"].static_results[0]["ok"])
         self.assertEqual(r["commits"], [])
