@@ -177,12 +177,13 @@ def stage_hints(ws: Path, proj_path: Path, hints_dir: Path) -> None:
     以最高权重注入。幂等：无记录 → 拷+记；有记录：缺失恢复、一致跳过、
     不一致警告不覆盖（同 backfill_intent 语义）。非能力命名文件警告忽略。
     """
-    from .extract import CAPS            # 单一真值源：能力名与 T3 对齐
+    from .extract import CAPS
+    hint_caps = (*CAPS, "inject")  # 旧 inject.md 合入 boot loop
     if not hints_dir.is_dir():
         raise InputError(f"hints-dir 路径不存在或不是目录: {hints_dir}")
     dest_dir = ws / "P0" / "inputs" / "hints"
     staged: list[str] = []
-    for cap in CAPS:
+    for cap in hint_caps:
         src = hints_dir / f"{cap}.md"
         if not src.is_file():
             continue
@@ -194,7 +195,7 @@ def stage_hints(ws: Path, proj_path: Path, hints_dir: Path) -> None:
         if not dest.exists() or dest.read_bytes() != src.read_bytes():
             shutil.copyfile(src, dest)
         staged.append(cap)
-    known = {f"{c}.md" for c in CAPS}
+    known = {f"{c}.md" for c in hint_caps}
     stray = [p.name for p in sorted(hints_dir.iterdir())
              if p.is_file() and p.name not in known
              and not p.name.startswith(".")]

@@ -217,6 +217,12 @@ def cmd_p0(args) -> int:
         _gates.process_answered_gates(ws)
     except Exception:
         pass
+    from porter.bootstrap import scaffold
+    rc = scaffold.run_scaffold(
+        ws, target_os, _parse_device_ids(getattr(args, "device_ids", None)),
+        prepare_only=True)
+    if rc != 0:
+        return rc
     rc = t3.extract_env(ws, target_os, materials, cats)
     if rc != 0:
         return rc        # 3=需人工（按表单作答后重跑）；1=失败
@@ -1177,9 +1183,11 @@ def main(argv=None) -> int:
     except Exception:
         pass
 
-    p0 = sub.add_parser("p0", help="P0：开发环境门禁（输入解析→类别→探测→脚手架→门禁）")
+    p0 = sub.add_parser("p0", help="P0：开发环境门禁（输入解析→类别→骨架→三个验证 loop→门禁）")
     p0.add_argument("--linux-driver", required=True)
     p0.add_argument("--target-os", required=True)
+    p0.add_argument("--device-ids", default=None, metavar="KEY[,KEY...]",
+                    help="骨架设备认领键；省略时从 Linux 源码与迁移意图发现")
     p0.add_argument("--materials", action="append", default=None,
                     metavar="PATH",
                     help="开发者资料（可多次：文档/笔记/目录，形态不限；可省略）")

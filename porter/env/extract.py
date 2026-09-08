@@ -1,41 +1,8 @@
-"""extract.py — T3 环境信息提取 v2（4-session 流水线，2026-09-05 定案）。
+"""P0 three-loop environment discovery: build → boot/injection → unit test.
 
-架构（用户定案；背景与消费侧改造清单见 TODO #17）：
-
-    T3 = 4 个顺序 session：build → boot → inject_device → unit_test
-    每 session = P2b 式直连循环（_opencode_json_runner + --session 续接；
-    文件即信号，无 phase 协议）：
-      - 输入三级：① 用户提示（P0/inputs/hints/<cap>.md，可选，最高权重）
-        ② materials ③ 目标树（prompt 明示尽量在前两层解决）
-      - 两类禁跑（prompt 级，原因/边界见 skill）：本能力类命令（验证
-        权在静态脚本，结果才被采信且不烧 agent 预算）/ 前序 session
-        已收敛命令（编排器已验证锁定，按只读材料参考）
-      - 测试请求协议：agent 写 {"cmd", "timeout_sec"?}（裸 JSON）→
-        静态脚本执行（probe._run，时长在 agent 预算之外）→ 完整结果
-        落文件 → 续接消息只给一行结论 + 文件指针（agent 自读）
-      - md 随做随记：备选/坑史/依据/不确定项绑事件写（skill 纪律）
-      - 完成 = 片段过机器校验（节契约 + md 锚点）且该能力
-        probe 真跑 PASS（终验只跑本能力，不重验前序——依赖定案）
-      - 质量失败不烧轮：文件缺失/坏 JSON/锚点缺 → 同会话微
-        增量续接 ≤QUALITY_TRIES 次 → 仍败 RuntimeError（静态 panic，
-        程序错误类不进人工关口）
-    资源（三独立上限，同签名检测不做——定案）：测试/终验轮数、
-        agent 段总时、墙钟总时
-    耗尽 → 人工环（A 类）：同 session 续接一次总结请求（agent 写
-        已完成/未完成/给开发者的问题；不可得则编排器拼装兜底）→
-        panic 关口 p0.t3.<cap>（exit 3）→ 人答 answers.md @节 →
-        账本 → 重跑：新 session 种子 = 总结指针 + 答案全文（最高
-        权重）+ 小额资源。session_id 跨进程续接 = TODO（opencode
-        会话持久化），本轮总结文件即记忆载体。
-    收官：4 对片段拼装 ws/runner.json + ws/runner.md（md 与节 JSON 的
-    扩充关系是软性写作指引——skill 产出契约，不配机械等值检查）→
-    冻结指纹入 project.json
-        ["t3_frozen"]；T3_development.json / memo.md 照旧产出
-        （T5/CP0 消费方零改动）。
-
-对外兼容：validate_runner 保留（gate.py 消费）；probe 函数零改动；
-老 R1-R3/R4 循环、runbook 目录注入位（后续由 kb runner 域接替，见
-TODO #17）一并退役；exit 0=成功 / 3=需人工。
+Skeleton application precedes discovery. Each session publishes a checked JSON
+fragment and runbook, then the orchestrator executes its acceptance checks.
+Budgets, evidence feedback and human-resume gates are shared across the loops.
 """
 
 from __future__ import annotations
@@ -53,21 +20,18 @@ from .. import log as _log
 
 # ---------- 能力与常量 ----------
 
-CAPS = ("build", "boot", "inject", "unit_test")       # 顺序依赖
+CAPS = ("build", "boot", "unit_test")       # 顺序依赖
 SECTION_KEY = {"build": "build", "boot": "boot",
                "inject": "inject_device", "unit_test": "unit_test"}
-CAP_TITLE = {"build": "构建（build）", "boot": "启动（boot）",
+CAP_TITLE = {"build": "构建（build）", "boot": "启动/设备注入（boot + inject_device）",
              "inject": "设备注入（inject_device）",
              "unit_test": "单元测试（unit_test）"}
 
 MAX_ROUNDS = 5                  # 每 session 测试/终验轮上限（定案：比老 3 放宽）
 QUALITY_TRIES = 2               # 连续无有效产出的段数上限（P2b 惯例）
-AGENT_BUDGET_SEC = {"build": 1800, "boot": 1200,
-                    "inject": 1200, "unit_test": 1200}
-WALL_BUDGET_SEC = {"build": 5400, "boot": 1800,
-                   "inject": 1800, "unit_test": 1800}
-TEST_TIMEOUT_DEFAULT = {"build": 3600, "boot": 900,
-                        "inject": 900, "unit_test": 1800}
+AGENT_BUDGET_SEC = {"build": 1800, "boot": 2400, "unit_test": 1200}
+WALL_BUDGET_SEC = {"build": 5400, "boot": 3600, "unit_test": 1800}
+TEST_TIMEOUT_DEFAULT = {"build": 3600, "boot": 1800, "unit_test": 1800}
 SUMMARY_BUDGET_SEC = 300        # 耗尽后的总结请求小预算
 RESUME_ROUNDS = 2               # 人工续跑小额资源（定案）
 RESUME_AGENT_SEC = 600
@@ -91,7 +55,7 @@ CAP_ANCHORS = {
 
 
 def _required_anchors(cap: str) -> tuple[str, ...]:
-    return COMMON_ANCHORS + CAP_ANCHORS.get(cap, ())
+    return COMMON_ANCHORS + CAP_ANCHORS.get(cap, ()) + (CAP_ANCHORS["inject"] if cap == "boot" else ())
 
 
 def _now_iso() -> str:
@@ -192,6 +156,62 @@ def validate_runner(r: dict) -> list[str]:
     return defects
 
 
+def _check_p0_section(cap: str, section: dict) -> list[str]:
+    if cap == "boot":
+        if set(section) != {"boot", "inject_device"}:
+            return ["boot loop 片段只能包含 boot 与 inject_device 两节"]
+        bo = section.get("boot")
+        inj = section.get("inject_device")
+        if not isinstance(bo, dict) or not isinstance(inj, dict):
+            return ["boot loop 片段须同时包含 boot 与 inject_device 对象"]
+        carrier = inj.get("env")
+        if inj.get("mechanism") == "env" and (not isinstance(carrier, dict)
+                or not all(isinstance(k, str) and isinstance(v, str) for k, v in carrier.items())):
+            return ["inject_device.env 须为字符串到字符串的对象"]
+        examples = inj.get("example_args")
+        if not isinstance(examples, dict) or not examples or not all(
+                isinstance(k, str) and isinstance(v, str) and v.strip() for k, v in examples.items()):
+            return ["inject_device.example_args 须为非空类别到设备参数的对象"]
+        defects = _check_boot(bo) + _check_inject(inj)
+        for key in ("cmd", "success_pattern", "panic_pattern"):
+            if not isinstance(bo.get(key), str) or not bo[key].strip():
+                defects.append(f"boot.{key} 须为非空字符串")
+        if inj.get("mechanism") == "cmd" and not isinstance(inj.get("cmd_suffix"), str):
+            defects.append("inject_device.cmd_suffix 须为字符串")
+        interaction = bo.get("interaction") or {}
+        if not isinstance(interaction, dict):
+            return defects + ["boot.interaction 须为对象"]
+        for key in ("prompt_pattern", "shutdown_cmd"):
+            if not isinstance(interaction.get(key), str) or not interaction[key].strip():
+                defects.append(f"boot.interaction.{key} 缺失")
+        try:
+            re.compile(interaction.get("prompt_pattern", ""))
+        except (re.error, TypeError):
+            defects.append("boot.interaction.prompt_pattern 正则无效")
+        if not inj.get("driver_success_pattern"):
+            defects.append("inject_device.driver_success_pattern 必須证明骨架认领设备")
+        return defects
+    defects = _SECTION_CHECKS[cap](section)
+    if cap == "build":
+        for key in ("cmd", "module_cmd", "scope_cmd"):
+            if not isinstance(section.get(key), str) or not section[key].strip():
+                defects.append(f"build.{key} 缺失")
+        for key in ("module_artifacts", "image_artifacts"):
+            paths = section.get(key)
+            if not isinstance(paths, list) or not paths or not all(isinstance(p, str) and p.strip() for p in paths):
+                defects.append(f"build.{key} 须为非空产物路径列表")
+    else:
+        if section.get("mechanism") == "none":
+            defects.append("P0 必须实际运行骨架单测，mechanism=none 不通过")
+        names = section.get("test_names")
+        if not isinstance(names, list) or not names or not all(isinstance(n, str) and n.strip() for n in names):
+            defects.append("unit_test.test_names 须列出骨架最小测试的名称")
+        for key in ("cmd", "smoke_cmd", "scope"):
+            if not isinstance(section.get(key), str) or not section[key].strip():
+                defects.append(f"unit_test.{key} 缺失（骨架所属模块）")
+    return defects
+
+
 # ---------- 状态 / 路径 ----------
 
 def _out_dir(p0: Path) -> Path:
@@ -205,12 +225,28 @@ def _load_state(p0: Path) -> dict:
     if p.exists():
         try:
             state = json.loads(p.read_text(encoding="utf-8"))
-            if isinstance(state.get("caps"), dict):
-                state.setdefault("version", 2)
+            if isinstance(state.get("caps"), dict) and state.get("version") == 3:
                 return state
         except (OSError, json.JSONDecodeError):
             pass
-    return {"version": 2, "caps": {c: _new_cap_state() for c in CAPS}}
+    return {"version": 3, "caps": {c: _new_cap_state() for c in CAPS}}
+
+
+def _fragment_fingerprint(p0: Path, cap: str) -> str | None:
+    paths = [_out_dir(p0) / f"{cap}.{suffix}" for suffix in ("json", "md")]
+    if not all(p.is_file() for p in paths):
+        return None
+    return hashlib.sha256(b"\0".join(p.read_bytes() for p in paths)).hexdigest()
+
+
+def _converged_inputs_current(ws: Path, p0: Path, target_os: Path, state: dict) -> bool:
+    from ..bootstrap import scaffold
+    fingerprint = scaffold.source_fingerprint(ws, target_os)
+    return all(st.get("source_sha256") == fingerprint
+               and st.get("fragment_sha256") is not None
+               and st["fragment_sha256"] == _fragment_fingerprint(p0, cap)
+               for cap, st in state["caps"].items()
+               if cap in CAPS and st["status"] == "converged")
 
 
 def _new_cap_state() -> dict:
@@ -236,10 +272,11 @@ def _hints_text(ws: Path, cap: str) -> str:
     p = ws / "P0" / "inputs" / "hints" / f"{cap}.md"
     try:
         if p.exists():
-            return p.read_text(encoding="utf-8").strip()
+            text = p.read_text(encoding="utf-8").strip()
+            return text + ("\n" + _hints_text(ws, "inject") if cap == "boot" else "")
     except OSError:
         pass
-    return ""
+    return _hints_text(ws, "inject") if cap == "boot" else ""
 
 
 def _capability_prompt(skill: str, cap: str, target_os: Path,
@@ -253,6 +290,9 @@ def _capability_prompt(skill: str, cap: str, target_os: Path,
         "  （无——仅凭源码树）"
     lines = [f"{skill}", "", "---", "",
              f"## 任务数据（本次 session：{CAP_TITLE[cap]}）", "",
+             "- 骨架已施工。先读 manifest/recipe；验证范围必须覆盖它。",
+             "- 可依据失败证据修正骨架与接线；源码改变会使前序验收失效并重验。",
+             "- boot loop 的 JSON 同时包含 boot 与 inject_device；其他 loop 写单节。",
              "- 你只负责本能力的探明与产出；完成后编排器会验证并锁定，",
              "  后续能力在别的 session 接力。", "",
              "输入（权重降序，冲突时高权重优先，但与真实探测结果矛盾时",
@@ -389,74 +429,47 @@ def _final_verify(ws: Path, p0: Path, cap: str, section: dict,
     """
     label = f"T3_{cap}_verify_r{seq}"
     t0 = time.time()
+    from ..bootstrap import scaffold
+    manifest = scaffold.load_manifest(ws) or {}
     if cap == "build":
-        r = probe_mod.probe_build(p0, target_os, {"build": section},
-                                  label=label)
-        r = {"item": "build", "ok": r["ok"], "detail": r["detail"]}
+        sources = [p for p in manifest.get("created", [])
+                   if Path(p).suffix in (".rs", ".c", ".h", ".cc", ".cpp", ".S", ".s")]
+        r = probe_mod.probe_scaffold_build(
+            p0, target_os, {"build": section}, sources, label)
     elif cap == "boot":
-        r = probe_mod.probe_boot(p0, target_os, {"boot": section},
-                                 label=label)
-        r = {"item": "boot", "ok": r["ok"], "detail": r["detail"]}
-    elif cap == "inject":
-        boot = _converged_section(p0, "boot")
-        runner_stub = {"boot": boot, "inject_device": section}
         r = probe_mod.probe_boot_with_device(
-            p0, target_os, runner_stub, categories,
-            label=label, check_driver=True)
-        r = {"item": "boot_with_device", "ok": r["ok"],
-             "detail": r["detail"]}
-        # 差分证据：注入轮日志（此刻 qemu.log=注入 boot 的最后写入）
-        lf = boot.get("log_file")
-        if not boot.get("log_is_stdout") and lf:
-            lp = Path(lf) if Path(lf).is_absolute() else target_os / lf
-            log_inj = _read_text(lp) or ""
-            (p0 / "logs" / f"{label}.bootlog.injected").write_text(
-                log_inj, encoding="utf-8")
-            bare = probe_mod.probe_boot(p0, target_os, {"boot": boot},
-                                        label=f"{label}_bare")
-            log_bare = _read_text(lp) or ""
-            (p0 / "logs" / f"{label}.bootlog.bare").write_text(
-                log_bare, encoding="utf-8")
-            if not bare.get("ok"):
-                r["ok"] = False
-                r["detail"] += " bare-boot=FAIL（裸 boot 基线异常）"
-            else:
-                ok4, note = _injection_evidence_check(
-                    section, log_inj, log_bare)
-                r["detail"] += (f" injection-evidence={'PASS' if ok4 else 'FAIL'}"
-                                + (f"（{note}）" if note else ""))
-                if not ok4:
-                    r["ok"] = False
+            p0, target_os, section, categories, label=label,
+            check_driver=True, interact=True,
+            acceptance_patterns=manifest.get("acceptance_log_patterns", []))
+        r["item"] = "boot_with_device"
+        if r["ok"]:
+            injected = (p0 / "logs" / f"{label}.bootlog").read_text()
+            bare, bare_log = probe_mod._boot_once(
+                p0, target_os, section, label=f"{label}_bare", interact=True)
+            evidence_ok, note = _injection_evidence_check(
+                section["inject_device"], injected, bare_log)
+            r["ok"] = bool(bare["ok"] and evidence_ok)
+            r["detail"] += f" bare={bare['ok']} injection-evidence={evidence_ok} ({note})"
+            (p0 / "logs" / f"{label}_bare.bootlog").write_text(bare_log)
+    else:
+        from ..loop.ut_verify import run_and_verify
+        if section.get("scope") != manifest.get("driver_home"):
+            r = {"item": "unit_test", "ok": False,
+                 "detail": "unit_test.scope 必须等于骨架 driver_home"}
         else:
-            r["detail"] += (" injection-evidence=skip"
-                            "（stdout 模式无独立判定日志——差分判据"
-                            "不适用，依赖驱动特征单轮判定与人工审阅）")
-    else:                                   # unit_test
-        if section.get("mechanism") == "none":
-            r = {"item": "unit_test", "ok": True,
-                 "detail": "mechanism=none（目标 OS 无内核单测机制，"
-                           "显式结论，不探测）"}
-        else:
-            from ..loop.ut_verify import run_and_verify
-            cmd = section.get("smoke_cmd") or section["cmd"]
-            ok, detail, _o = run_and_verify(
-                cmd, cwd=target_os,
+            ok, detail, output = run_and_verify(
+                section["smoke_cmd"], cwd=target_os,
                 env=probe_mod._base_env(target_os, {}),
-                timeout_sec=int(section.get("timeout_sec", 1800)),
+                timeout_sec=int(section["timeout_sec"]),
                 log_path=p0 / "logs" / f"{label}.log",
-                success_pattern=section.get("success_pattern"),
+                success_pattern=section["success_pattern"],
                 fail_pattern=section.get("fail_pattern"))
-            r = {"item": "unit_test", "ok": bool(ok), "detail": detail}
-    # 裸 boot 判定日志副本（boot 能力终验留档；inject 的双份在其分支内）
-    if cap == "boot":
-        bo = section
-        lf = bo.get("log_file")
-        if lf and not bo.get("log_is_stdout"):
-            src = Path(lf) if Path(lf).is_absolute() else target_os / lf
-            content = _read_text(src)
-            if content is not None:
-                (p0 / "logs" / f"{label}.bootlog").write_text(
-                    content, encoding="utf-8")
+            source = "\n".join((target_os / p).read_text(errors="replace")
+                               for p in manifest.get("created", []) if (target_os / p).is_file())
+            names = section["test_names"]
+            named = all(name in source and name in output for name in names)
+            r = {"item": "unit_test", "ok": bool(ok and named),
+                 "detail": detail + f" scaffold_tests={named}", "test_names": names}
     elapsed = time.time() - t0
     ev_path = p0 / "logs" / f"{label}.evidence.json"
     ev_path.write_text(json.dumps(r, ensure_ascii=False, indent=2),
@@ -487,7 +500,7 @@ def _parse_section(raw: str, cap: str) -> tuple[dict | None, str]:
         obj = json.loads(raw)
     except json.JSONDecodeError as ex:
         return None, f"JSON 解析失败: {ex}"
-    if isinstance(obj, dict) and isinstance(obj.get(SECTION_KEY[cap]), dict) \
+    if cap != "boot" and isinstance(obj, dict) and isinstance(obj.get(SECTION_KEY[cap]), dict) \
             and set(obj.keys()) == {SECTION_KEY[cap]}:
         obj = obj[SECTION_KEY[cap]]
     if not isinstance(obj, dict):
@@ -511,7 +524,7 @@ def _anchor_body_empty(md_text: str, anchor: str) -> bool:
 
 
 def _frag_quality_defects(cap: str, section: dict, md_text: str) -> list[str]:
-    defects = list(_SECTION_CHECKS[cap](section))
+    defects = _check_p0_section(cap, section)
     if not md_text.strip():
         defects.append("调用手册片段（.md）缺失或为空")
         return defects
@@ -570,7 +583,7 @@ def _exhaustion_summary_fallback(p0: Path, cap: str, st: dict,
 def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
                      materials: list[Path], categories: list[str],
                      state: dict, resume_ctx: dict | None) -> str:
-    """跑一个能力的 session。返回 "converged" | "exhausted"。
+    """跑一个能力的 session。返回 "converged" | "exhausted" | "invalidated"。
 
     质量失败（无有效产出/契约缺陷）→ 同会话微增量 ≤QUALITY_TRIES 次
     → RuntimeError；session 不可得 → RuntimeError（P2b 惯例：程序
@@ -599,6 +612,9 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
     seen = {"test": "", "frag": ""}
     stem_base = str(p0 / "logs" / f"T3_{cap}")
     bl = _budget_line(rounds, rounds_limit, agent_budget, wall_budget)
+    from ..bootstrap import scaffold
+    materials = [*materials, ws.joinpath(*scaffold.MANIFEST_NAME),
+                 ws.joinpath(*scaffold.RECIPE_NAME)]
     message = _capability_prompt(skill, cap, target_os, materials,
                                  categories, _hints_text(ws, cap),
                                  prior_caps, resume_ctx, out, bl)
@@ -637,6 +653,9 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
         return "present", jcontent, mcontent
 
     while True:
+        if not _converged_inputs_current(ws, p0, target_os, state):
+            _sync_state("pending")
+            return "invalidated"
         if rounds >= rounds_limit or agent_used >= agent_budget \
                 or wall_used >= wall_budget:
             break
@@ -664,6 +683,11 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
         _sync_state("running")
         bl = _budget_line(rounds, rounds_limit, agent_budget - agent_used,
                           wall_budget - wall_used)
+
+        # A boot/test repair must rebuild before probing the old image again.
+        if not _converged_inputs_current(ws, p0, target_os, state):
+            _sync_state("pending")
+            return "invalidated"
 
         # ---- 1) 最终片段优先 ----
         fstate, jcontent, mcontent = _consume_pair(frag_json, frag_md, "frag")
@@ -909,7 +933,10 @@ def _assemble_and_freeze(ws: Path, p0: Path, state: dict,
         section, err = _read_section(out / f"{cap}.json", cap)
         if section is None:                 # 收敛后的片段必然在场
             raise RuntimeError(f"T3 收官：{cap} 片段不可用（{err}）")
-        sections[SECTION_KEY[cap]] = section
+        if cap == "boot":
+            sections.update(section)
+        else:
+            sections[SECTION_KEY[cap]] = section
         md = (out / f"{cap}.md").read_text(encoding="utf-8").strip()
         md_parts.append(md)
         uncertain += _extract_uncertain(md)
@@ -929,16 +956,14 @@ def _assemble_and_freeze(ws: Path, p0: Path, state: dict,
         encoding="utf-8")
 
     # T3_development.json（T5 门禁消费；三行结论来自各节终验）
-    dev_results = [state["caps"]["build"]["verify_result"],
-                   state["caps"]["boot"]["verify_result"],
-                   state["caps"]["inject"]["verify_result"]]
+    dev_results = [state["caps"][cap]["verify_result"] for cap in CAPS]
     for r in dev_results:
         if not r:
             raise RuntimeError("T3 收官：verify_result 缺失（状态损坏）")
     (p0 / "reports").mkdir(exist_ok=True)
     (p0 / "reports" / "T3_development.json").write_text(
         json.dumps({"kind": "development", "results": dev_results,
-                    "hard_gate_pass": True}, ensure_ascii=False, indent=2),
+                    "hard_gate_pass": True, "version": 3}, ensure_ascii=False, indent=2),
         encoding="utf-8")
 
     # memo.md（CP0 引用；不确定项 = 非阻塞确认，H20 备忘语义）
@@ -956,17 +981,20 @@ def _assemble_and_freeze(ws: Path, p0: Path, state: dict,
         except Exception:
             pass
 
+    from ..bootstrap import scaffold
+    scaffold.accept_p0(ws, target_os, dev_results)
+
     # 冻结指纹
     proj_path = ws / "project.json"
     proj = json.loads(proj_path.read_text(encoding="utf-8"))
     proj["t3_frozen"] = {
         "runner_sha256": _sha256_file(ws / "runner.json"),
         "runner_md_sha256": _sha256_file(ws / "runner.md"),
-        "frozen_at": _now_iso()}
+        "frozen_at": _now_iso(), "version": 3}
     proj_path.write_text(json.dumps(proj, ensure_ascii=False, indent=2),
                          encoding="utf-8")
     _log.console_line("[porter] T3: runner.json + runner.md 就绪并冻结"
-                      "（reviewed=false）+ 四节终验全绿")
+                      "（reviewed=false）+ 三个 loop 终验全绿")
 
 
 # ---------- 主入口 ----------
@@ -984,14 +1012,42 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     (p0 / "reports").mkdir(exist_ok=True)
     _out_dir(p0)
     runner_path = ws / "runner.json"
+    from ..bootstrap import scaffold
+    manifest = scaffold.load_manifest(ws)
+    if not manifest:
+        _log.console_line("[porter] T3: 缺少骨架；先跑 p0 完成施工")
+        return 2
     if runner_path.exists():
-        _log.console_line(f"[porter] T3: 复用 {runner_path}")
-        return 0
+        proj = json.loads((ws / "project.json").read_text())
+        frozen = proj.get("t3_frozen") or {}
+        if (frozen.get("version") == 3 and manifest.get("status") == "verified"
+                and manifest.get("source_sha256") == scaffold.source_fingerprint(ws, target_os)
+                and frozen.get("runner_sha256") == _sha256_file(runner_path)
+                and (ws / "runner.md").exists()
+                and frozen.get("runner_md_sha256") == _sha256_file(ws / "runner.md")):
+            _log.console_line(f"[porter] T3: 复用已验证 {runner_path}")
+            return 0
+        # _load_state rejects v2 evidence; preserve any v3 partial progress so
+        # an old runner does not erase exhausted-loop answers on every resume.
 
+    manifest["status"] = "applied"
+    ws.joinpath(*scaffold.MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
     state = _load_state(p0)
-    for cap in CAPS:
+    restarts = 0
+    cap_index = 0
+    while cap_index < len(CAPS):
+        cap = CAPS[cap_index]
+        if not _converged_inputs_current(ws, p0, target_os, state):
+            restarts += 1
+            if restarts > MAX_ROUNDS:
+                raise RuntimeError("P0: 骨架持续修改，前序验证反复失效；检查 loop 修正范围")
+            state = {"version": 3, "caps": {c: _new_cap_state() for c in CAPS}}
+            _save_state(p0, state)
+            cap_index = 0
+            continue
         st = state["caps"].setdefault(cap, _new_cap_state())
         if st["status"] == "converged":
+            cap_index += 1
             continue
         resume_ctx = None
         if st["status"] == "exhausted":
@@ -1014,10 +1070,20 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
                           + ("（续跑）" if resume_ctx else ""))
         outcome = _run_cap_session(ws, p0, cap, target_os, materials,
                                    categories, state, resume_ctx)
+        if outcome == "invalidated":
+            continue
         if outcome == "exhausted":
             _log.console_line(f"[porter] T3: {cap} session 资源耗尽 → "
                               f"人工关口 p0.t3.{cap}（exit 3）")
             return 3
-        # converged（状态与片段已由 session 内落盘）
+        st["source_sha256"] = scaffold.source_fingerprint(ws, target_os)
+        st["fragment_sha256"] = _fragment_fingerprint(p0, cap)
+        _save_state(p0, state)
+        # Re-enter through the freshness check, including after the last loop.
+        if cap_index == len(CAPS) - 1:
+            if _converged_inputs_current(ws, p0, target_os, state):
+                break
+        else:
+            cap_index += 1
     _assemble_and_freeze(ws, p0, state, target_os)
     return 0

@@ -110,7 +110,8 @@ def store_mounted() -> str | None:
 def _boot_once(ws: Path, target_os: Path, runner: dict,
                extra_env: dict | None = None,
                cmd_suffix: str | None = None,
-               label: str = "boot") -> tuple[dict, str]:
+               label: str = "boot",
+               interact: bool = False) -> tuple[dict, str]:
     """跑一次 boot + 内核级三信号判定（rc + success_pattern + 无 panic）。
 
     返回 (结果 dict, 去 ANSI 的 boot 日志全文)——日志供调用方做追加判定
@@ -124,10 +125,15 @@ def _boot_once(ws: Path, target_os: Path, runner: dict,
             log_path.unlink()      # 清旧日志防串判
         except FileNotFoundError:
             pass
-    rc, out = _run(cmd, cwd=target_os,
-                   env=_base_env(target_os, runner, extra_env),
-                   timeout_sec=int(bo["timeout_sec"]),
-                   log_path=ws / "logs" / f"T3_{label}.log")
+    interaction_ok = None
+    kwargs = dict(cwd=target_os, env=_base_env(target_os, runner, extra_env),
+                  timeout_sec=int(bo["timeout_sec"]),
+                  log_path=ws / "logs" / f"T3_{label}.log")
+    if interact:
+        rc, out, interaction_ok = _run_interactive(
+            cmd, **kwargs, guest_log=log_path, interaction=bo["interaction"])
+    else:
+        rc, out = _run(cmd, **kwargs)
     bo_log = ""
     if mode == "stdout":
         bo_log = _strip_ansi(out)
@@ -141,7 +147,7 @@ def _boot_once(ws: Path, target_os: Path, runner: dict,
     success = bo["success_pattern"] in bo_log
     panic = bo["panic_pattern"].lower() in bo_log.lower()
     log_state = mode if bo_log else f"{mode}:missing_or_empty"
-    boot_ok = (rc == 0) and success and not panic
+    boot_ok = (rc == 0) and success and not panic and (not interact or interaction_ok)
     try:                                    # judge 证据流（boot 双信号）
         _log.judge(label, boot_ok,
                    detail=f"rc={rc} success_pattern="
@@ -156,6 +162,7 @@ def _boot_once(ws: Path, target_os: Path, runner: dict,
             "detail": (f"rc={rc} success_pattern="
                        f"{'hit' if success else 'MISS'} "
                        f"panic={'yes' if panic else 'no'} log={log_state}"),
+            "interaction_ok": interaction_ok,
             "log_empty": not bo_log}, bo_log
 
 
@@ -213,7 +220,9 @@ def _judge_driver(r: dict, bo_log: str, runner: dict, label: str) -> dict:
 def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
                            categories: list[str],
                            label: str = "boot_with_device",
-                           check_driver: bool = False) -> dict:
+                           check_driver: bool = False,
+                           interact: bool = False,
+                           acceptance_patterns: list[str] | None = None) -> dict:
     """设备注入 boot（内核三信号 + 可选驱动级判定）。
 
     check_driver=True（P0 专用）：内核信号之后用同一次 boot 的日志追判
@@ -237,13 +246,19 @@ def probe_boot_with_device(ws: Path, target_os: Path, runner: dict,
         extra = {k: v.replace("<DEVICE_ARGS>", dev_args)
                  for k, v in (inj.get("env") or {}).items()}
         r, bo_log = _boot_once(ws, target_os, runner, extra_env=extra,
-                               label=label)
+                               label=label, interact=interact)
     else:
         suffix = (inj.get("cmd_suffix") or "").replace("<DEVICE_ARGS>", dev_args)
         r, bo_log = _boot_once(ws, target_os, runner, cmd_suffix=suffix,
-                               label=label)
+                               label=label, interact=interact)
     if check_driver:
         r = _judge_driver(r, bo_log, runner, label)
+    if interact:
+        (ws / "logs" / f"{label}.bootlog").write_text(bo_log, encoding="utf-8")
+    if acceptance_patterns is not None:
+        r["patterns"] = {p: bo_log.count(p) for p in acceptance_patterns}
+        r["ok"] = bool(r["ok"] and r["patterns"] and all(r["patterns"].values()))
+        r["detail"] += f" patterns={r['patterns']} interaction={r.get('interaction_ok')}"
     r.update({"device_category": cat, "device_args": dev_args, "mechanism": mech})
     return r
 
@@ -276,3 +291,124 @@ def probe_development(ws: Path, target_os: Path, runner: dict,
         except Exception:
             pass
     return report
+
+
+def probe_scaffold_build(ws: Path, target_os: Path, runner: dict,
+                         source_files: list[str], label: str) -> dict:
+    """Module-only build + compiler scope evidence, then the complete image."""
+    b = runner["build"]
+    images = [target_os / p for p in b["image_artifacts"]]
+    modules = [target_os / p for p in b["module_artifacts"]]
+
+    def stamps(paths):
+        return [(p.stat().st_mtime_ns, p.stat().st_size) if p.is_file() else None
+                for p in paths]
+
+    source_time = max(((target_os / p).stat().st_mtime_ns for p in source_files
+                       if (target_os / p).is_file()), default=0)
+    before = stamps(images)
+    module_runner = {**runner, "build": {**b, "cmd": b["module_cmd"],
+                                        "success_pattern": None}}
+    module = probe_build(ws, target_os, module_runner, label=f"{label}_module")
+    artifacts = all(p.is_file() and p.stat().st_size > 0
+                    and p.stat().st_mtime_ns >= source_time for p in modules)
+    rc, scope = _run(b["scope_cmd"], cwd=target_os,
+                     env=_base_env(target_os, runner),
+                     timeout_sec=int(b["timeout_inc_sec"]),
+                     log_path=ws / "logs" / f"{label}_scope.log")
+    # scope_cmd reads compiler dependency/build metadata; paths must be exact
+    # lines, not a prose claim or a substring of a different source filename.
+    compiled = {line.strip() for line in scope.splitlines()}
+    missing = [p for p in source_files
+               if p not in compiled and str((target_os / p).resolve()) not in compiled]
+    unchanged = before == stamps(images)
+    scope_ok = rc == 0 and bool(source_files) and not missing
+    detail = (f"module={module['detail']} artifacts={artifacts} "
+              f"no_image={unchanged} scope={scope_ok} missing={missing}")
+    ok = module["ok"] and artifacts and unchanged and scope_ok
+    full = None
+    if ok:
+        full = probe_build(ws, target_os, runner, label=f"{label}_full")
+        ok = full["ok"] and all(p.is_file() and p.stat().st_size > 0
+                                   and p.stat().st_mtime_ns >= source_time for p in images)
+        detail += f" full={full['detail']} images={ok}"
+    return {"item": "build", "ok": bool(ok), "detail": detail,
+            "module": module, "scope_ok": scope_ok,
+            "module_artifacts": artifacts, "no_image": unchanged, "full": full}
+
+
+def _run_interactive(cmd: str, cwd: Path, env: dict, timeout_sec: int,
+                     log_path: Path, guest_log: Path | None,
+                     interaction: dict) -> tuple[int, str, bool]:
+    """Drive guest stdin; require a fresh, standalone response after its prompt."""
+    import selectors
+    import signal
+    import uuid
+
+    nonce = uuid.uuid4().hex
+    marker = "PORTER_" + nonce
+    prompt = re.compile(interaction["prompt_pattern"])
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    proc = subprocess.Popen(["bash", "-c", cmd], cwd=cwd, env=env,
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, start_new_session=True)
+    output = bytearray()
+    sent = False
+    replied = False
+    offset = 0
+    deadline = time.monotonic() + timeout_sec
+    rc = -1
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        try:
+            while time.monotonic() < deadline:
+                for key, _ in selector.select(timeout=0.05):
+                    chunk = os.read(key.fileobj.fileno(), 65536)
+                    if chunk:
+                        output.extend(chunk)
+                    else:
+                        selector.unregister(key.fileobj)
+                text = output.decode("utf-8", errors="replace")
+                if guest_log is not None:
+                    try:
+                        text = guest_log.read_text(encoding="utf-8", errors="replace")
+                    except FileNotFoundError:
+                        text = ""
+                text = _strip_ansi(text).replace("\r", "")
+                if not sent and prompt.search(text):
+                    offset = len(text)
+                    # Splitting the marker prevents terminal command echo from
+                    # satisfying the response check.
+                    proc.stdin.write(f"printf '%s%s\\n' PORTER_ {nonce}\n".encode())
+                    proc.stdin.flush()
+                    sent = True
+                if sent and not replied and marker in text[offset:].splitlines():
+                    replied = True
+                    proc.stdin.write((interaction["shutdown_cmd"] + "\n").encode())
+                    proc.stdin.flush()
+                if proc.poll() is not None and not selector.get_map():
+                    rc = proc.returncode
+                    break
+        except BrokenPipeError:
+            rc = proc.poll() if proc.poll() is not None else -1
+        finally:
+            # Clean the complete launched process group, including timeout paths.
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=2)
+            except ProcessLookupError:
+                pass
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            proc.stdin.close()
+            proc.stdout.close()
+    out = output.decode("utf-8", errors="replace")
+    log_path.write_text(out, encoding="utf-8")
+    log_path.with_suffix(".interaction.json").write_text(json.dumps(
+        {"marker": marker, "sent": sent, "replied": replied, "rc": rc}))
+    return rc, out, replied

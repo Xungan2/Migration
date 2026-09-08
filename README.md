@@ -31,8 +31,29 @@
 - **docker** / **QEMU** 等：构建/启动/测试命令由 P0 agent 从开发者资料+
   目标 OS 源码树提取，写进工作区 `runner.json`，后续相位数据驱动消费。
   工具本体不硬编码任何 docker/QEMU 命令。
-- **目标 OS 源码树**（可写）：P2b 骨架 + P4 迁移会写入目标树。
-- **Linux 驱动源码树**（只读）：P1 切分 / P2a spine 提取的输入。
+- **目标 OS 源码树**（可写）：P0 骨架 + P4 迁移会写入目标树。
+- **Linux 驱动源码树**（只读）：P1 切分 / 手动 P2a spine 提取的输入。
+
+### 本地源码与目标 OS 构建
+
+仓库通过子模块固定 Linux 和 Asterinas 的源码提交：
+
+```bash
+git submodule update --init --depth 1 linux-5.10 asterinas
+docker pull "asterinas/dev:$(cat asterinas/DOCKER_IMAGE_VERSION)"
+docker run --rm --device /dev/kvm \
+  -v "$PWD/asterinas:/root/asterinas" \
+  "asterinas/dev:$(cat asterinas/DOCKER_IMAGE_VERSION)" make kernel LOG_LEVEL=info
+```
+
+`linux-5.10/` 是 Linux v5.10.265，提供驱动源码和公共内核头，无须为迁移
+工具编译或安装 Linux 内核。`asterinas/` 是可写的目标 OS 树，构建在其
+指定的官方容器中进行；容器版本以 `DOCKER_IMAGE_VERSION` 为准。
+本地已验证的产物、命令和日志索引见
+[`docs/local-environment.md`](docs/local-environment.md)。
+
+已确认的 P0 骨架前置与三个验证 loop 设计见
+[`docs/p0-three-loops.md`](docs/p0-three-loops.md)（待编排实现）。
 
 ### 环境变量
 
@@ -50,7 +71,7 @@
 ## 总体流程框架
 
 ```
-P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直循环(×N 模块) → P6 系统验收 → P7 终态报告
+P0  骨架+三个验证 loop → P1 拆分策略 → P2 探针预生成 → P3-P5 垂直循环(×N 模块) → P6 系统验收 → P7 终态报告
 ```
 
 全程**幂等断点重入**：产物存在即跳过，失败可重跑同命令从断点继续。
@@ -61,9 +82,9 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 
 | 阶段 | 目标 | 解决什么问题 | 核心产物 |
 |---|---|---|---|
-| **P0** | 开发能力硬门禁 | 目标 OS 能否构建/启动/挂设备？单测机制是什么？ | `project.json` / `runner.json` / `P0/reports/` |
+| **P0** | 骨架及开发能力硬门禁 | 骨架能否局部/完整构建、认领设备并交互、通过单测？ | `project.json` / `runner.json` / `P0/reports/` |
 | **P1** | 拆分策略+模块划分 | 驱动源码怎么切分成可逐步迁移的模块？依赖序是什么？ | `P1/strategy.md` / `P1/modules/deps.json` |
-| **P2** | 引导映射+全局骨架 | Linux API→目标 OS 映射表；零功能骨架入住目标树 | `P2/mapping.json` / 目标树 crate / `P2/reports/` |
+| **P2** | 探针预生成 | 复用 P0 骨架，验证已有映射中的风险主张 | `P2/mapping.json` / 目标树 crate / `P2/reports/` |
 | **P3-P5** | 垂直循环 ×N | 逐模块：分析→生产→验收 | `P3|P4|P5/<M>/reports/` / `loop_state.json` |
 | **P6** | 系统验收 | 全局收口：聚合健康 / 执行重测 / L4 定稿 / 缺陷账本 | `P6/reports/health.json` / `defects.json` |
 | **P7** | 终态报告 | 全产物聚合 + baseline diff + 补丁台账 | `P7/reports/final_report.json/.md` |
@@ -79,12 +100,14 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
   `--t1-only`：输入层即止（跳过 T2/T3/T5，零 agent）——分步测试用。
 - **T2 类别识别**（agent）：识别 pci/net/... 标签（选模板开关；`--category`
   人工覆盖；不可判定回落通用模板+警告）。
-- **T3 环境提取 v2**（四 session 直连流水线 build→boot→inject→unit_test）：
-  从资料+目标树提取 `runner.json`+`runner.md`（各节 JSON 的扩充手册）。
-  每能力终验 probe 双信号 PASS 才过；资源耗尽 → exit 3（agent 总结 →
-  p0.t3.\<cap\> 关口 → 人答 → 新 session 种子续跑）。
-- **T5 门禁**（脚本）：project.json 完整 + runner 校验 + T3 三项全 PASS +
-  unit_test 烟测。
+- **骨架施工**（原 P2b）：发现目标 OS 的构建/注册/设备认领/测试先例，
+  先生成零功能骨架；此时不依赖 runner，不标记验证通过。
+- **T3 三个 loop**：编译 → 启动/设备注入 → 单测。编译先验证局部模块及
+  编译范围，再生成完整镜像；启动要求设备认领及随机标记的 shell 往返；
+  单测只运行骨架所属模块的最小测试，可使用专用测试内核。
+  失败带证据回炉，源码修正使前序结果失效；资源耗尽后按关口回答续跑。
+- **T5 门禁**（脚本）：检查三个 loop 结果、骨架状态及源码/runner 指纹，
+  不重复执行单测。详细契约见 [P0 三个 loop](docs/p0-three-loops.md)。
 
 #### P1 拆分策略
 
@@ -99,15 +122,15 @@ P0  环境门禁 → P1 拆分策略 → P2 引导映射+骨架 → P3-P5 垂直
 - **p1-resolve**（agent × ≤3 轮 + 脚本）：符号扫描→依赖图→环检测→agent
   搬运循环（守恒校验）→拓扑序 `deps.json`（循环输入）。3 轮败 → exit 3。
 
-#### P2 引导映射+骨架
+#### P2 探针预生成
 
-- **2a 引导映射**（agent 分批 + 机器校验）：主轴外部 API 提取→按域分批
-  agent 映射→9 字段校验 + evidence 路径真实存在→增量合并 `mapping.json`。
-- **2b 全局骨架**（脚本，目标 OS 专属模板）：在目标树新建 crate（no_std +
-  deny(unsafe_code)）+ 空 probe + 探针宿舍 + ktest 位 + 栈接线桩。零驱动功能。
-- **2c 探针预生成**（agent + 探测）：风险主张前置验证，住骨架 `probes.rs`
-  （每次启动重跑=回归哨网）。P3 探针步骤退化为补新。
-- **验收**：runner 双信号 + 组件日志特征 + 无 PROBE FAIL。
+- 默认暂停 **P2a 主轴提取和批量映射**；保留手动 `p2-map` 与已有映射数据。
+  缺少映射表时初始化空表，后续 P3 按实际模块使用面增量映射。
+- 复用 **P0 已验证骨架**，不重复施工/验收。骨架接口记录保存在 manifest，
+  已有映射可获得验证批注。
+- **P2c 探针预生成**：对已有映射中的风险主张前置验证；P3 按需补充。
+- 为保持后续探针和迁移消费者兼容，骨架 recipe/manifest/journal 暂保留
+  `P2/reports/scaffold_*` 路径；生产阶段已提前到 P0。
 
 #### P3-P5 垂直循环（×N 模块，拓扑序）
 

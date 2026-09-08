@@ -1,10 +1,4 @@
-"""run.py — P2 入口编排：2a 引导映射 → 2b 框架引导（发现式骨架）→ 2c
-探针预生成 → vcs commit + CP2 映射审。
-
-P2b 自带三信号验收（build / boot_with_device + 验收特征 / 单测 smoke，
-scaffold.py 内化——独立 _acceptance 步骤已退役）；P2c 预生成自带
-build+boot 判定生命周期。本模块只做编排与阶段末收尾。
-"""
+"""P2 复用 P0 骨架并预生成探针；P2a 默认暂停，手动 p2-map 保留。"""
 
 from __future__ import annotations
 
@@ -44,22 +38,21 @@ def run_p2(ws: Path, driver_root: Path, target_os: Path,
             artifacts=artifacts, description="P2 composite child task")
 
     predecessor = "p1.prune" if (ws / "P1/scope.json").exists() else "p1.resolve"
-    rc = _phase("p2.map", (predecessor,),
-                lambda: mapping.run_map(ws, driver_root, target_os),
-                (ws / "P2" / "mapping.json",))
-    if rc != 0:
-        return rc
-
-    rc = _phase("p2.scaffold", ("p2.map",),
-                lambda: scaffold.run_scaffold(ws, target_os, device_ids),
-                (ws / "P2" / "reports" / "scaffold_manifest.json",))
-    if rc != 0:
-        return rc
+    manifest = scaffold.load_manifest(ws)
+    if not manifest or manifest.get("status") != "verified" or not manifest.get("source_sha256"):
+        _log.console_line("[porter] P2: 缺少 P0 已验证骨架（先跑 p0）")
+        return 2
+    # P2a 暂停；保留已有映射，空表让 P3 按实际模块使用面增量补齐。
+    p2 = ws / "P2"
+    p2.mkdir(exist_ok=True)
+    if not (p2 / "mapping.json").exists():
+        mapping._save(mapping._load_mapping(p2), p2)
+    _log.console_line("[porter] P2: 默认跳过 P2a；复用 P0 骨架")
 
     # 2c 探针预生成（贵且可复用的验证前置；失败不阻塞——缺口可
     # p2-probes 幂等补跑）
     from . import pregen
-    rc = _phase("p2.probes", ("p2.scaffold",),
+    rc = _phase("p2.probes", ("p0", predecessor),
                 lambda: pregen.run_pregen(ws, target_os),
                 (ws / "P2" / "reports" / "pregen_report.md",))
     if rc != 0:

@@ -1,5 +1,5 @@
-"""porter/env/probe.py 驱动级判定（check_driver）单元测试 + T3 v2
-（4-session 流水线）session 循环测试。
+"""porter/env/probe.py 驱动级判定（check_driver）单元测试 + T3 三个 loop
+（3-loop 流水线）session 循环测试。
 
 无 agent / 无网络 / 无 docker。覆盖：
 A. 四态判定：unconfigured / hit / MISS / fail_pattern 命中（+ fail-only）
@@ -7,7 +7,7 @@ B. check_driver=False（P2+ 共享方默认）：行为与旧版一致（无 dri
 C. judge 证据流：驱动级独立一行（<label>:driver），与内核级行分开归因
 D. validate_runner 可选字段：null/缺省合法；空串/非字符串为缺陷
 E. T5 门禁：未配置 → ⚠ 告警行但不拦；已配置 → 已配置行
-F. T3 v2 session 循环（全 stub）：成功流/终验回炉/耗尽→总结→关口→
+F. T3 三个 loop session 循环（全 stub）：成功流/终验回炉/耗尽→总结→关口→
    答案→续跑/质量 panic/session 丢失 panic/幂等/原样重提交防重放/
    锚点缺失不烧轮/断点续跑（converged 跳过）/ut mechanism=none
 """
@@ -212,23 +212,22 @@ class GateDriverRowTest(unittest.TestCase):
         self._prime(_runner())
         with redirect_stdout(io.StringIO()):
             passed = run_gate(self.ws)
-        ok("E1 未配置 → 门禁仍过", passed is True)
+        ok("E1 缺骨架认领判据 → 门禁拒绝", passed is False)
         report = (self.ws / "P0" / "reports" / "p0_report.md") \
             .read_text(encoding="utf-8")
-        ok("E2 报告含 ⚠ 告警行", "⚠ 未配置 driver_success_pattern" in report)
+        ok("E2 报告要求骨架认领判据", "driver_success_pattern" in report)
 
     def test_e2_configured_row(self):
         self._prime(_runner(driver_success_pattern="e1000 eth0"))
         with redirect_stdout(io.StringIO()):
             passed = run_gate(self.ws)
-        ok("E3 已配置 → 门禁过", passed is True)
+        ok("E3 旧三行报告仍缺单测与骨架验收 → 拒绝", passed is False)
         report = (self.ws / "P0" / "reports" / "p0_report.md") \
             .read_text(encoding="utf-8")
-        ok("E4 报告含已配置行", "已配置" in report
-           and "e1000 eth0" in report)
+        ok("E4 报告指出缺少单测", "unit_test" in report)
 
 
-# ---------- F. T3 v2 session 循环（全 stub，零真实 agent/probe） ----------
+# ---------- F. T3 三个 loop session 循环（全 stub，零真实 agent/probe） ----------
 
 def _ev_jsonl(session: str, text: str) -> str:
     """opencode --format json 风格最小事件流（含 sessionID）。"""
@@ -239,7 +238,9 @@ def _ev_jsonl(session: str, text: str) -> str:
 
 def _sec_build(**kw):
     d = {"cmd": "make all", "timeout_full_sec": 100,
-         "timeout_inc_sec": 50, "success_pattern": "done"}
+         "timeout_inc_sec": 50, "success_pattern": "done",
+         "module_cmd": "make module", "scope_cmd": "read-depfiles",
+         "module_artifacts": ["module.rlib"], "image_artifacts": ["os.iso"]}
     d.update(kw)
     return d
 
@@ -247,7 +248,8 @@ def _sec_build(**kw):
 def _sec_boot(**kw):
     d = {"cmd": "runit", "timeout_sec": 60, "log_is_stdout": True,
          "log_file": None, "success_pattern": "BOOTED",
-         "panic_pattern": "panic"}
+         "panic_pattern": "panic",
+         "interaction": {"prompt_pattern": "# ", "shutdown_cmd": "poweroff"}}
     d.update(kw)
     return d
 
@@ -255,13 +257,15 @@ def _sec_boot(**kw):
 def _sec_inject(**kw):
     d = {"mechanism": "env", "env": {"DEV_ARGS": "<DEVICE_ARGS>"},
          "cmd_suffix": None, "example_args": {"net": "netdev1"},
-         "driver_success_pattern": None, "driver_fail_pattern": None}
+         "driver_success_pattern": "claimed", "driver_fail_pattern": None}
     d.update(kw)
     return d
 
 
-def _sec_ut_none():
-    return {"mechanism": "none"}
+def _sec_ut():
+    return {"mechanism": "native", "cmd": "test-module", "smoke_cmd": "test-module",
+            "scope": "driver", "test_names": ["skeleton_test"],
+            "timeout_sec": 60, "success_pattern": "passed"}
 
 
 def _md_for(cap: str, section: dict, drop_anchor: str = "",
@@ -318,7 +322,7 @@ class _FakeAgent:
 
 
 class ExtractSessionTest(unittest.TestCase):
-    """F：4-session 流水线（agent/probe 全 stub）。"""
+    """F：3-loop 流水线（agent/probe 全 stub）。"""
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="porter_t3v2_t_"))
@@ -332,6 +336,18 @@ class ExtractSessionTest(unittest.TestCase):
         EV.unbind()
         LOG.core._CTX.clear()
         self.out = self.ws / "P0" / "reports" / "out"
+        reports = self.ws / "P2/reports"
+        reports.mkdir(parents=True)
+        (self.os / "driver").mkdir()
+        (self.os / "driver/lib.rs").write_text("fn skeleton_test() {}")
+        (reports / "scaffold_manifest.json").write_text(json.dumps({
+            "driver": "test", "driver_home": "driver", "status": "applied",
+            "created": ["driver/lib.rs"], "commit_paths": ["driver/lib.rs"],
+            "acceptance_log_patterns": ["claimed"]}))
+        for name in ("porter.bootstrap.candidates.record_candidate", "porter.common.vcs.commit_target"):
+            patcher = mock.patch(name)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def tearDown(self):
         EV.unbind()
@@ -354,13 +370,21 @@ class ExtractSessionTest(unittest.TestCase):
             lambda cmd, cwd, env, timeout_sec, log_path: (
                 Path(log_path).write_text("stub output\n",
                                           encoding="utf-8"), (0, "stub"))[1]
-        p1 = mock.patch.object(PB, "probe_build", b)
-        p2 = mock.patch.object(PB, "probe_boot", bo)
-        p3 = mock.patch.object(PB, "probe_boot_with_device", inj)
+        def verify(ws, p0, cap, section, categories, seq, target_os):
+            if cap == "build":
+                result = b()
+            elif cap == "boot":
+                result = inj()
+            else:
+                result = {"ok": True, "detail": "passed"}
+            result = {**result, "item": "boot_with_device" if cap == "boot" else cap}
+            (p0 / "logs" / f"T3_{cap}_verify_r{seq}.evidence.json").write_text(json.dumps(result))
+            return result, 0.0
+        p1 = mock.patch.object(EX, "_final_verify", side_effect=verify)
         p4 = mock.patch.object(PB, "_run", run)
-        for p in (p1, p2, p3, p4):
-            p.start()
-        self.addCleanup(lambda: [p.stop() for p in (p1, p2, p3, p4)])
+        for patcher in (p1, p4):
+            patcher.start()
+            self.addCleanup(patcher.stop)
         return {"build": b, "boot": bo, "inject": inj, "run": run}
 
     def _agent(self, script):
@@ -371,7 +395,7 @@ class ExtractSessionTest(unittest.TestCase):
         return fake
 
     def _script_full(self):
-        """四能力一次通过：每能力 测试请求×1 + 片段×1。"""
+        """三个 loop一次通过：每能力 测试请求×1 + 片段×1。"""
         o = self.out
         s = []
         s.append({"do": "test", "req": str(o / "build_test.json"),
@@ -383,13 +407,10 @@ class ExtractSessionTest(unittest.TestCase):
                   "body": {"cmd": "runit"}})
         s.append({"do": "frag", "cap": "boot",
                   "json": str(o / "boot.json"), "md": str(o / "boot.md"),
-                  "section": _sec_boot()})
-        s.append({"do": "frag", "cap": "inject",
-                  "json": str(o / "inject.json"), "md": str(o / "inject.md"),
-                  "section": _sec_inject()})
+                  "section": {"boot": _sec_boot(), "inject_device": _sec_inject()}})
         s.append({"do": "frag", "cap": "unit_test",
                   "json": str(o / "unit_test.json"),
-                  "md": str(o / "unit_test.md"), "section": _sec_ut_none()})
+                  "md": str(o / "unit_test.md"), "section": _sec_ut()})
         return s
 
     def _run(self):
@@ -399,7 +420,7 @@ class ExtractSessionTest(unittest.TestCase):
     # ---- 用例 ----
 
     def test_f1_full_success(self):
-        """四能力全过：双产物 + 冻结指纹 + T3_development + memo。"""
+        """三个 loop全过：双产物 + 冻结指纹 + T3_development + memo。"""
         self._probes()
         fake = self._agent(self._script_full())
         rc = self._run()
@@ -417,7 +438,7 @@ class ExtractSessionTest(unittest.TestCase):
                           "T3_development.json").read_text())
         items = {r["item"] for r in dev["results"]}
         ok("F6 T3_development 三行",
-           items == {"build", "boot", "boot_with_device"})
+           items == {"build", "boot_with_device", "unit_test"})
         ok("F7 memo.md 在场", (self.ws / "P0" / "reports" /
                                "memo.md").exists())
         ok("F8 session 语义（每能力各起一段新会话、段内续接）",
@@ -457,6 +478,7 @@ class ExtractSessionTest(unittest.TestCase):
         s.append({"do": "summary", "path": str(o / "build_summary.md"),
                   "text": "# 总结\n\n## 给开发者的问题\nQ1: 用什么命令？"})
         fake = self._agent(s)
+        (self.ws / "runner.json").write_text("{}")  # An old runner must not erase partial v3 progress.
         rc = self._run()
         ok("F13 耗尽 rc=3", rc == 3)
         ok("F14 总结文件在场", (o / "build_summary.md").exists())
@@ -508,11 +530,13 @@ class ExtractSessionTest(unittest.TestCase):
             self._run()
 
     def test_f6_idempotent_reuse(self):
-        """runner.json 存在 → 复用 rc 0，零 agent 调用。"""
-        (self.ws / "runner.json").write_text("{}", encoding="utf-8")
+        """Only a verified, unchanged runner and skeleton may be reused."""
+        self._probes()
+        self._agent(self._script_full())
+        self.assertEqual(self._run(), 0)
         fake = self._agent([])
-        rc = self._run()
-        ok("F23 复用 rc=0 且零调用", rc == 0 and fake.calls == [])
+        self.assertEqual(self._run(), 0)
+        self.assertEqual(fake.calls, [])
 
     def test_f7_unchanged_resubmit_no_replay(self):
         """原样重提交被拒（不重跑终验），修订后才重验。"""
@@ -569,16 +593,8 @@ class ExtractSessionTest(unittest.TestCase):
            (self.ws / "runner.json").exists()
            and (self.ws / "runner.md").exists())
 
-    def test_f10_ut_none_no_probe(self):
-        """ut mechanism=none：合法显式结论，不探测即收敛（合入 F1）。"""
-        self._probes()
-        self._agent(self._script_full())
-        rc = self._run()
-        state = json.loads((self.ws / "P0" / "reports" /
-                            "t3_state.json").read_text())
-        ok("F32 ut verify_result 为 none 结论",
-           rc == 0 and state["caps"]["unit_test"]["verify_result"]["ok"]
-           is True)
+    def test_f10_ut_none_rejected(self):
+        self.assertTrue(EX._check_p0_section("unit_test", {"mechanism": "none"}))
 
     def test_f11_wrapped_subset_ok(self):
         """无尾块也能收敛 + .json 包装形态解包（2026-09-06 定案：
@@ -592,14 +608,11 @@ class ExtractSessionTest(unittest.TestCase):
         # boot 片段同样用包装形态落盘：验 inject 终验的前序节读取解包
         s += [{"do": "frag", "cap": "boot", "json": str(o / "boot.json"),
                "md": str(o / "boot.md"),
-               "section": {EX.SECTION_KEY["boot"]: _sec_boot()},
+               "section": {"boot": _sec_boot(), "inject_device": _sec_inject()},
                "md_text": _md_for("boot", _sec_boot())},
-              {"do": "frag", "cap": "inject",
-               "json": str(o / "inject.json"), "md": str(o / "inject.md"),
-               "section": _sec_inject()},
               {"do": "frag", "cap": "unit_test",
                "json": str(o / "unit_test.json"),
-               "md": str(o / "unit_test.md"), "section": _sec_ut_none()}]
+               "md": str(o / "unit_test.md"), "section": _sec_ut()}]
         self._probes()
         self._agent(s)
         rc = self._run()
@@ -645,7 +658,7 @@ class ExtractSessionTest(unittest.TestCase):
         ok("F38 裸轮也命中 → 打回",
            (not ok2) and "与注入无关" in n2)
         # ③ 轮 5 绕法：model= token 单侧伪造（注入轮=裸轮）→ 打回
-        inj3 = _sec_inject(example_args={
+        inj3 = _sec_inject(driver_success_pattern=None, example_args={
             "net": "-netdev user,id=e1 -net nic,model=e1000,netdev=e1"})
         ok3, n3 = EX._injection_evidence_check(inj3, bare, bare)
         ok("F39 无差分 token → 打回",

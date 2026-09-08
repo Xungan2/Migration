@@ -1,6 +1,7 @@
-"""scaffold.py — P2b 框架引导（发现式骨架，替换旧硬编码 skeleton）。
+"""scaffold.py — P0 骨架施工（prepare_only）与手动 P2b 校准（发现式骨架，替换旧硬编码 skeleton）。
 
-闭环（用户定案 2026-09-05；同日 session 化改造）：
+P0 使用 prepare_only 先施工，三个 loop 通过后 accept_p0 收尾。
+下列旧闭环仅供手动 p2-scaffold 校准：
   ① 方案：agent 读目标树 → 产出施工单 recipe（骨架代码 + 幂等接线编辑
      + 验收特征 + 探针底座契约 + api_claims join 键）——**写文件而非
      消息正文**（编排器下发输出路径，裸 JSON 禁围栏；消息只回"已写入"，
@@ -25,6 +26,7 @@ mapping.json 存在则注入 redesigns（可选输入）；kb 血统（pitfalls/
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
@@ -83,10 +85,10 @@ def _prompt(skill: str, target_os: Path, driver: str, categories: list[str],
     else:
         dev_line = ("- 设备匹配说明：未提供——认领键依总线/框架而定"
                     "（PCI vendor:device / USB idVendor:idProduct / "
-                    "SPI compatible 字符串等），从 runner 注入配置与"
+                    "SPI compatible 字符串等），从 Linux 输入/迁移意图与"
                     "目标树同类先例自行收敛；纯软件驱动（无硬件设备，"
-                    "如 device-mapper 类框架）可无设备注入，boot 验证"
-                    "退化为注册/认领特征")
+                    "如 device-mapper 类框架）自行收敛逻辑设备/实例注入，"
+                    "验证其实际认领特征")
     return (f"{skill}\n\n---\n\n## 任务数据\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
             f"- 驱动名：`{driver}`（Linux 侧仅作设备行为参考；"
@@ -275,8 +277,8 @@ def _annotate_mapping(ws: Path, recipe: dict) -> int:
     return n
 
 
-def _finalize(ws: Path, target_os: Path, proj: dict, recipe: dict,
-              res: dict, verdict: dict, rnd: int) -> None:
+def _write_manifest(ws: Path, proj: dict, recipe: dict,
+                    res: dict, verdict: dict, rnd: int) -> dict:
     driver = _scope.driver_name_of(proj)
     home = str(recipe["driver_home"])
     pc = recipe.get("probe_channel") or {}
@@ -295,16 +297,28 @@ def _finalize(ws: Path, target_os: Path, proj: dict, recipe: dict,
         "acceptance_log_patterns": recipe.get("acceptance_patterns") or [],
         "probe_channel": pc,
         "test_substrate": recipe.get("test_substrate") or {},
-        "verified": {"build": True,
+        "status": "verified" if verdict.get("ok") else "applied",
+        "api_claims": recipe.get("api_claims") or [],
+        "verified": {"build": bool(verdict.get("ok")),
                      "boot_with_device": verdict.get("boot_ok"),
                      "patterns": verdict.get("patterns"),
                      "unit_smoke": verdict.get("ut_detail")},
         "attempts": rnd,
         "commit_paths": commit_paths,
+        "source_paths": sorted({*res["created"], *{e["file"] for e in recipe.get("edits", [])}}),
     }
     ws.joinpath(*MANIFEST_NAME).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8")
+    return manifest
+
+
+def _finalize(ws: Path, target_os: Path, proj: dict, recipe: dict,
+              res: dict, verdict: dict, rnd: int) -> None:
+    manifest = _write_manifest(ws, proj, recipe, res, verdict, rnd)
+    driver = manifest["driver"]
+    home = manifest["driver_home"]
+    commit_paths = manifest["commit_paths"]
     n_anno = _annotate_mapping(ws, recipe)
     _log.console_line(
         f"[porter] P2b: 框架引导 PASS（{rnd} 轮）——新建 {len(res['created'])} 文件，"
@@ -334,20 +348,24 @@ def _finalize(ws: Path, target_os: Path, proj: dict, recipe: dict,
 # ---------- 主入口 ----------
 
 def run_scaffold(ws: Path, target_os: Path,
-                 device_ids: list[str] | None = None) -> int:
+                 device_ids: list[str] | None = None, *,
+                 prepare_only: bool = False) -> int:
     """返回 0=成功；2=前置缺失；3=需人工（回炉耗尽/infra 关口）。幂等。"""
     p2 = ws / "P2"
     if ws.joinpath(*MANIFEST_NAME).exists():
         _log.console_line(f"[porter] P2b: 复用框架（scaffold_manifest 存在；"
                           f"如需重做请删除该文件并回滚目标树施工改动）")
         return 0
-    for need, name in ((ws / "project.json", "project.json"),
-                       (ws / "runner.json", "runner.json")):
+    needs = [(ws / "project.json", "project.json")]
+    if not prepare_only:
+        needs.append((ws / "runner.json", "runner.json"))
+    for need, name in needs:
         if not need.exists():
             _log.console_line(f"[porter] P2b: 缺少 {name}（先跑 p0）")
             return 2
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
-    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
+    runner = ({} if prepare_only else
+              json.loads((ws / "runner.json").read_text(encoding="utf-8")))
     driver = _scope.driver_name_of(proj)
     if not proj.get("driver_name"):
         _log.console_line(f"[porter] P2b: ⚠️ project.json 无 driver_name"
@@ -379,6 +397,12 @@ def run_scaffold(ws: Path, target_os: Path,
     base_prompt = _prompt(skill, target_os, driver, categories, ids,
                           hints, redesigns,
                           ws.joinpath(*OUT_DIR) / "scaffold_r1.json")
+    base_prompt += (f"\n- Linux 输入（只读）：`{proj.get('linux_driver')}`"
+                    f"\n- 迁移意图（若存在先读）：`{ws / 'goals.md'}`")
+    if prepare_only:
+        base_prompt += ("\n本次属于 P0：先施工，runner 尚未生成。设备认领键从"
+                        "Linux 输入和迁移意图发现。随后由三个 loop 验证；"
+                        "本次落盘不代表验证通过。")
     session_id: str | None = None
     feedback = ""                # 回炉轮续接消息（证据指针）
     last_stem = ""
@@ -401,7 +425,8 @@ def run_scaffold(ws: Path, target_os: Path,
             rc, out = agent._opencode_json_runner(
                 message, workdir=target_os, log_stem=stem,
                 timeout_sec=AGENT_TIMEOUT_SEC, session_id=session_id,
-                task={"phase": "P2", "step": "scaffold", "attempt": rnd})
+                task={"phase": "P0" if prepare_only else "P2",
+                      "step": "scaffold", "attempt": rnd})
             ev = agent._parse_events(out)   # rc≠0 的 id 仅留诊断，禁止续接
             if rc != 0:
                 failed_sid = (ev or {}).get("session_id")
@@ -446,6 +471,10 @@ def run_scaffold(ws: Path, target_os: Path,
 
         recipe_apply.rollback(target_os, journal_path)   # 清上一轮残留
         res = recipe_apply.apply_recipe(target_os, recipe, journal_path)
+        if prepare_only:
+            _write_manifest(ws, proj, recipe, res, {}, rnd)
+            _log.console_line("[porter] P0: 骨架已施工，等待三个 loop 验证")
+            return 0
         verdict = _verify(ws, target_os, runner, proj, recipe, rnd)
         if verdict.get("infra"):
             _log.console_line("[porter] P2b: boot 日志不可得——infra 关口"
@@ -479,3 +508,46 @@ def run_scaffold(ws: Path, target_os: Path,
              "hint": "诊断结论或修复说明（如手工修正施工单/换特征串）"}],
     })
     return 3
+
+
+def source_fingerprint(ws: Path, target_os: Path) -> str:
+    """Hash the skeleton and wiring, so a repair invalidates earlier loop results."""
+    manifest = load_manifest(ws) or {}
+    paths = set()
+    for rel in manifest.get("source_paths", manifest.get("commit_paths", [])):
+        path = target_os / rel
+        if path.is_dir():
+            paths.update(p for p in path.rglob("*") if p.is_file())
+        else:
+            paths.add(path)
+    contract = {k: manifest.get(k) for k in (
+        "driver_home", "created", "source_paths", "acceptance_log_patterns", "test_substrate")}
+    digest = hashlib.sha256(json.dumps(contract, sort_keys=True).encode())
+    for path in sorted(paths):
+        digest.update(str(path.relative_to(target_os)).encode())
+        digest.update(path.read_bytes() if path.is_file() else b"MISSING")
+    return digest.hexdigest()
+
+
+def accept_p0(ws: Path, target_os: Path, results: list[dict]) -> None:
+    """Publish verified interfaces only after all three P0 loops pass."""
+    if {r["item"] for r in results} != {"build", "boot_with_device", "unit_test"} or not all(r["ok"] for r in results):
+        raise ValueError("P0 scaffold acceptance requires all three loops")
+    manifest = load_manifest(ws)
+    if not manifest:
+        raise ValueError("P0 scaffold manifest missing")
+    manifest.update(status="verified", verified={r["item"]: r for r in results},
+                    source_sha256=source_fingerprint(ws, target_os))
+    ws.joinpath(*MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
+    _annotate_mapping(ws, {"api_claims": manifest.get("api_claims", [])})
+    try:
+        from . import candidates
+        candidates.record_candidate(
+            ws, hook="scaffold-verified", ref=manifest["driver"],
+            draft=f"P0 骨架三个 loop 通过；接口用法见 scaffold_manifest.json，driver_home={manifest['driver_home']}",
+            evidence=["P2/reports/scaffold_manifest.json"], suggested="maps")
+        from ..common import vcs
+        vcs.commit_target(ws, "P0: verified scaffold + wiring",
+                          paths=manifest["commit_paths"], phase="P0")
+    except Exception as exc:
+        _log.console_line(f"[porter] P0: 骨架验收已记录，知识/VCS 收尾失败：{exc}")

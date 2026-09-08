@@ -39,8 +39,8 @@ def _targets(ws: Path, driver_root: Path, order: list[str],
         if rc != 0:
             raise RuntimeError(f"使用面提取失败：{m}")
 
-    mapping = json.loads((ws / "P2" / "mapping.json").read_text(
-        encoding="utf-8"))
+    from .mapping import _load_mapping
+    mapping = _load_mapping(ws / "P2")
     entries = {e["linux_api"]: e for e in mapping.get("entries", [])}
 
     union: set[str] = set()
@@ -72,8 +72,7 @@ def run_pregen(ws: Path, target_os: Path,
                max_batches: int | None = None) -> int:
     """返回 0 成功 / 1 失败 / 2 前置缺失。幂等：已探 claim 跳过。"""
     for need in (ws / "project.json", ws / "runner.json",
-                 ws / "P1" / "modules" / "deps.json",
-                 ws / "P2" / "mapping.json"):
+                 ws / "P1" / "modules" / "deps.json"):
         if not need.exists():
             _log.console_line(f"[porter] P2c: 缺少 {need}（先跑 p0/p1/p2-map）")
             return 2
@@ -92,7 +91,7 @@ def run_pregen(ws: Path, target_os: Path,
     dorm = _scaffold.dormitory_abs(ws, target_os)
     if dorm is None or not dorm.exists():
         _log.console_line("[porter] P2c: 无 scaffold_manifest 或宿舍未建"
-                          "（先跑 p2-scaffold）")
+                          "（先跑 p0）")
         return 2
     (ws / "P2" / "logs").mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +107,9 @@ def run_pregen(ws: Path, target_os: Path,
 
     registry_path = ws / "P2" / "reports" / "probes.json"
     t0 = len(probe_lib.load_registry(registry_path).get("probes", []))
+    if not todo and not t0:
+        _write_report(ws, [], registry_path, 0)
+        return 0
     rc = probe_lib.run_probe_lifecycle(
         ws, target_os, proj, order, registry_path,
         label="P2PREG", todo_entries=todo,

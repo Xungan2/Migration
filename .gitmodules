@@ -1,0 +1,6 @@
+[submodule "linux-5.10"]
+	path = linux-5.10
+	url = https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+[submodule "asterinas"]
+	path = asterinas
+	url = https://github.com/asterinas/asterinas.git

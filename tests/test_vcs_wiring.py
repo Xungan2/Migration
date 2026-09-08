@@ -288,7 +288,7 @@ class TestWiringPoints(WiringBase):
             '{"order": [], "edges": {}}', encoding="utf-8")
         (w / "P2" / "reports").mkdir(parents=True)
         (w / "P2" / "reports" / "scaffold_manifest.json").write_text(
-            json.dumps({"commit_paths": ["kernel/core/comps/e1000",
+            json.dumps({"status": "verified", "source_sha256": "p0-accepted", "commit_paths": ["kernel/core/comps/e1000",
                                          "Cargo.toml", "Components.toml"],
                         "dormitory": "kernel/core/comps/e1000/src/probes.rs"}),
             encoding="utf-8")

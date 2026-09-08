@@ -147,7 +147,7 @@ def _scaffold_ctx(ws: Path, target_os: Path) -> tuple[Path, str, dict]:
                 m.get("probe_channel") or {})
     raise RuntimeError(
         "probe 生命周期前置缺失：scaffold_manifest.json 不存在或无 "
-        f"dormitory 字段（{p}）——先跑 p2-scaffold（P2b）再执行探针流程")
+        f"dormitory 字段（{p}）——先跑 p0 完成骨架验收再执行探针流程")
 
 
 _PROBES_C_HEADER = '''// SPDX-License-Identifier: GPL-2.0
@@ -634,7 +634,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     tag = "P2pregen" if kind == "P2" else f"{kind}{current_module}"
     reg = load_registry(registry_path)
     locs = usage_locs or {}
-    previous_gen_task = ("p2.scaffold" if kind == "P2" else
+    previous_gen_task = ("p0" if kind == "P2" else
                          f"loop.module.{current_module}.p3.criteria")
 
     # ---- 生成（≤GEN_BATCH 条/批，每批 ≤2 次带反馈重试）----
@@ -642,7 +642,7 @@ def run_probe_lifecycle(ws: Path, target_os: Path, proj: dict,
     skill = agent.load_skill("P3-probe")
     dorm, _lang, pc = _scaffold_ctx(ws, target_os)
     if pc:
-        substrate = ("- 探针底座契约（P2b 框架引导三信号验证过的骨架）：\n"
+        substrate = ("- 探针底座契约（P0 三个 loop 验证过的骨架）：\n"
                      f"  - 宿舍文件 `{dorm}`（探针会被 porter 追加进该文件"
                      "整体再生）\n"
                      f"  - 调用点：{pc.get('call_site_desc', '?')}\n"

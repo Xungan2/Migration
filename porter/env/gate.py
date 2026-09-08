@@ -3,7 +3,7 @@
 P0 退出条件（全部显式结论，禁止空白项）：
 1. project.json 完整（身份/类别已填——manual/回落均为合法显式值）
 2. runner.json 存在且机器校验通过
-3. T3 开发能力三项（build/boot/boot_with_device）均有显式结果且全 PASS
+3. T3 三个 loop（build/boot_with_device/unit_test）均有显式结果且全 PASS
    （双信号判定；任一 FAIL = 门禁不通过）
 
 产出 reports/p0_report.md（人读）+ exit code（0=过）。
@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .extract import validate_runner
+from .extract import _check_p0_section, CAPS, _sha256_file
 from .. import log as _log
 
 
@@ -38,7 +38,12 @@ def run_gate(ws: Path) -> bool:
     runner = None
     if runner_path.exists():
         runner = json.loads(runner_path.read_text(encoding="utf-8"))
-        defects = validate_runner(runner)
+        defects = []
+        for cap in CAPS:
+            section = ({k: runner.get(k) for k in ("boot", "inject_device")}
+                       if cap == "boot" else runner.get(cap))
+            defects += (_check_p0_section(cap, section) if isinstance(section, dict)
+                        else [f"缺少 {cap} 节"])
         checks.append(("runner.json 机器校验", not defects,
                        "通过" if not defects else "; ".join(defects)))
     else:
@@ -50,7 +55,7 @@ def run_gate(ws: Path) -> bool:
     if dev_path.exists():
         dev = json.loads(dev_path.read_text(encoding="utf-8"))
         items = {r["item"]: r for r in dev.get("results", [])}
-        for name in ("build", "boot", "boot_with_device"):
+        for name in ("build", "boot_with_device", "unit_test"):
             r = items.get(name)
             if r is None:
                 checks.append((f"T3 {name} 有显式结果", False, "缺失"))
@@ -60,43 +65,25 @@ def run_gate(ws: Path) -> bool:
     else:
         checks.append(("T3 探测执行", False, "P0/reports/T3_development.json 缺失"))
 
-    # 3.5 boot_with_device 驱动级判定配置：配置了 driver_success_pattern
-    #     → 驱动结论已含在 T3 boot_with_device 行（MISS 即该项 FAIL）；
-    #     未配置 → ⚠ 告警跳过（不拦——目标 OS 无该类别内置驱动时合法，
-    #     如 Asterinas P0 尚无驱动；适配有内置驱动的新内核时强烈建议配置）
-    inj = (runner or {}).get("inject_device") or {}
-    if inj.get("driver_success_pattern"):
-        checks.append(("boot_with_device 驱动级判定", True,
-                       f"已配置 {inj['driver_success_pattern']!r}"
-                       "（结论见 T3 boot_with_device 行）"))
-    else:
-        checks.append(("boot_with_device 驱动级判定", True,
-                       "⚠ 未配置 driver_success_pattern——跳过驱动级判定"
-                       "（目标 OS 无该类别内置驱动时合法；有内置驱动的目标"
-                       "建议配置，P0 才能验证'驱动成功启动'而非仅内核启动）"))
-
-    # 4. unit_test 烟测（第一道，2026-08-30 双道烟测定案）：
-    #    真跑 smoke_cmd（agent 在目标树最小已有单测 crate 上验证过的形态）
-    #    断言特征命中。缺 smoke_cmd = 告警跳过（非门禁失败）——存量/异构
-    #    目标兼容；真跑失败 = 门禁失败（机制主张被证伪）。
-    ut = (runner or {}).get("unit_test") or {}
-    if not ut:
-        checks.append(("unit_test 烟测", True,
-                       "runner 无 unit_test 节（loop 补探回填时二道烟测兜底）"))
-    elif ut.get("mechanism") == "none":
-        checks.append(("unit_test 烟测", True,
-                       "mechanism=none（目标 OS 无内核单测机制，L0 将转 deferred）"))
-    elif not ut.get("smoke_cmd"):
-        checks.append(("unit_test 烟测", True,
-                       "⚠ 无 smoke_cmd——跳过（建议补：agent 探明时应在最小"
-                       "已有单测 crate 上实跑验证）"))
-    else:
-        from ..loop.ut_verify import smoke_unit_test_config
-        target_os = Path(proj["target_os"])
-        ok, detail = smoke_unit_test_config(ws, target_os, runner, ut,
-                                            label="P0_unit_test_smoke")
-        checks.append((f"unit_test 烟测 {'PASS' if ok else 'FAIL'}",
-                       ok, detail))
+    # Consume verified results; T5 never reruns boot or tests.
+    from ..bootstrap import scaffold
+    manifest = scaffold.load_manifest(ws) or {}
+    checks.append(("骨架已通过三个 loop", manifest.get("status") == "verified",
+                   str(manifest.get("status", "missing"))))
+    fingerprint = scaffold.source_fingerprint(ws, Path(proj["target_os"])) if proj.get("target_os") else None
+    checks.append(("骨架验收对应当前源码", bool(fingerprint) and manifest.get("source_sha256") == fingerprint,
+                   "source fingerprint"))
+    frozen = proj.get("t3_frozen") or {}
+    for filename, key in (("runner.json", "runner_sha256"), ("runner.md", "runner_md_sha256")):
+        path = ws / filename
+        checks.append((f"{filename} 对应验收版本", path.is_file() and frozen.get(key) == _sha256_file(path),
+                       "frozen fingerprint"))
+    verified = manifest.get("verified") or {}
+    checks.append(("验收结果与骨架记录一致",
+                   all(isinstance(verified.get(name), dict) and verified[name].get("ok")
+                       and verified[name] == items.get(name)
+                       for name in ("build", "boot_with_device", "unit_test")) if dev_path.exists() else False,
+                   "三个 loop 的机器结果"))
 
     passed = all(ok for _, ok, _ in checks)
 

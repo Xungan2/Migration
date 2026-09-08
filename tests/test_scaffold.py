@@ -345,6 +345,19 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
            .exists())
         ok("C6 幂等：重跑复用", SC.run_scaffold(self.ws, self.os) == 0)
 
+    def test_p0_applies_before_runner_without_claiming_verification(self):
+        (self.ws / "runner.json").unlink()
+        stub = _AgentStub([_recipe()])
+        with mock.patch.object(scaffold.agent, "_opencode_json_runner", stub), \
+             mock.patch.object(scaffold, "_verify", side_effect=AssertionError("P0 owns acceptance")), \
+             mock.patch("porter.common.vcs.commit_target") as commit:
+            self.assertEqual(scaffold.run_scaffold(self.ws, self.os, prepare_only=True), 0)
+        manifest = scaffold.load_manifest(self.ws)
+        self.assertEqual(manifest["status"], "applied")
+        self.assertFalse(manifest["verified"]["build"])
+        self.assertEqual(commit.call_count, 0)
+        self.assertTrue((self.os / manifest["created"][0]).is_file())
+
     def test_c2_mapping_annotation(self):
         import porter.bootstrap.scaffold as SC
         (self.ws / "P2").mkdir()

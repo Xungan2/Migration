@@ -195,8 +195,11 @@ def cli_spec(args, ws: Path) -> TaskSpec:
         materials.append("runner.json")
         return TaskSpec("p2.scaffold", ("p0",), tuple(materials))
     if phase == "p2-probes":
-        materials.extend(["runner.json", "P2/mapping.json"])
-        return TaskSpec("p2.probes", ("p2.scaffold",), tuple(materials))
+        materials.append("runner.json")
+        if (ws / "P2/mapping.json").exists():
+            materials.append("P2/mapping.json")
+        predecessor = "p1.prune" if (ws / "P1/scope.json").exists() else "p1.resolve"
+        return TaskSpec("p2.probes", ("p0", predecessor), tuple(materials))
     if phase in ("p3", "p4", "p5"):
         module = _selected_module(ws, getattr(args, "module", None))
         if not module:
@@ -257,7 +260,8 @@ def output_artifacts(ws: Path, task_id: str, args=None) -> list[Path]:
         if args is not None and getattr(args, "t1_only", False):
             return [ws / "project.json"]
         return [ws / "project.json", ws / "runner.json",
-                ws / "P0" / "reports" / "p0_report.md"]
+                ws / "P0" / "reports" / "p0_report.md",
+                ws / "P2" / "reports" / "scaffold_manifest.json"]
     p1_outputs = {
         "p1.strategy": [ws / "P1" / "strategy.md"] +
                        ([ws / "P1/scope.json"] if (ws / "P1/scope.json").exists() else []),
