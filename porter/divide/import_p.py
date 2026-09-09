@@ -208,6 +208,10 @@ def run_import(ws: Path, driver_root: Path, plan_path: Path,
     elif not (p1 / "strategy.md").exists():
         _log.console_line("[porter] P1I: ⚠️ 未提供 --strategy 且 P1/strategy.md"
               " 不存在（CP1 拆分审对象缺失——建议补齐）")
+    # scope.json 随四件套导入时，driver_name 身份同步入 project.json
+    # （幂等；与 run_strategy/CP1 双点同款——外部导入是第三消费入口）
+    from ..common.scope import sync_driver_name
+    sync_driver_name(ws)
     from ..common.scope import input_fingerprint
     (p1 / "reports" / "P1D_inputs.json").write_text(
         json.dumps({"fingerprint": input_fingerprint(ws, driver_root)}, indent=2) + "\n",
