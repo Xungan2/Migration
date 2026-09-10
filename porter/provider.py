@@ -12,6 +12,11 @@ DEFAULT_MODEL = 'zhipu-ai/glm-5.2'
 def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
         session: str | None = None) -> tuple[int, str, str | None]:
     prompt = (SKILLS / f'prepare-{role}.md').read_text(encoding='utf-8')
+    if role == 'task':
+        category = data.get('category')
+        if category not in ('source', 'skeleton', 'planning'):
+            raise ValueError('Unknown task skill')
+        prompt += '\nTASK SKILL\n' + (SKILLS / f'prepare-task-{category}.md').read_text(encoding='utf-8')
     prompt += '\nTASK INPUT\n' + json.dumps(data, ensure_ascii=False)
     stem.parent.mkdir(parents=True, exist_ok=True)
     stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')

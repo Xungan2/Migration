@@ -47,6 +47,105 @@ class UnifiedTest(unittest.TestCase):
         self.assertFalse((self.ws / 'knowledgebase/verification.md').exists())
         self.assertFalse((self.ws / 'runner.json').exists())
 
+    def test_optional_failure_is_deferred_and_renamed_retry_is_not_dispatched(self):
+        self.env['SCENARIO'] = 'optional-once'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(len([c for c in calls if c['role'] == 'task']), 1)
+        todo = (self.ws / 'knowledgebase/AUTO-TODO.md').read_text()
+        self.assertIn('Protocol check failed', todo)
+        self.assertIn('controller is available', todo)
+        self.assertEqual(json.loads((self.ws / 'prepare/state.json').read_text())['status'], 'complete')
+
+    def test_optional_execution_failure_and_timeout_defer_without_swallowing_integrity_failure(self):
+        for scenario in ('optional-error', 'optional-error-timeout', 'optional-error-integrity'):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                expected = 3 if scenario.endswith('integrity') else 0
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                if not expected:
+                    todo = (self.ws / 'knowledgebase/AUTO-TODO.md').read_text()
+                    self.assertIn('controller unavailable', todo)
+                    self.assertIn('Controller responds', todo)
+                    self.assertIn('AUTO-TODO', todo)
+
+    def test_required_retry_needs_failure_evidence_and_a_correction(self):
+        for scenario, expected, attempts in (('required-retry-no-evidence', 3, 1),
+                                             ('required-retry-with-evidence', 0, 2)):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                self.assertEqual(len([c for c in calls if c['role'] == 'task']), attempts)
+
+    def test_selected_skill_delivers_required_work_with_supplemental_goal_deferred(self):
+        for category in ('source', 'skeleton', 'planning'):
+            with self.subTest(category=category):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env.update(SCENARIO='selected-category', TASK_CATEGORY=category)
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                state = json.loads((self.ws / 'prepare/state.json').read_text())
+                self.assertEqual(len(state['tasks']), 1)
+                self.assertEqual(state['tasks'][0]['category'], category)
+                self.assertEqual([g['status'] for g in state['tasks'][0]['goals']], ['delivered', 'deferred'])
+
+    def test_unresolved_required_goal_cannot_be_hidden_by_owner_finish(self):
+        self.env['SCENARIO'] = 'required-unresolved'
+        result = self.cli()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertIn('Required goals remain unfinished', result.stdout)
+
+    def test_owner_can_accept_preserved_plan_after_mixed_provider_failure_without_rerunning(self):
+        self.env['SCENARIO'] = 'mixed-provider-failure'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        self.assertEqual(len([c for c in calls if c['role'] == 'task']), 1)
+        self.assertIn('Protocol check failed', (self.ws / 'knowledgebase/AUTO-TODO.md').read_text())
+
+    def test_malformed_goal_delivery_leaves_a_blocked_handoff(self):
+        self.env.update(SCENARIO='malformed-goal', TASK_CATEGORY='planning')
+        result = self.cli()
+        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+        self.assertTrue(any('Task did not finish' in p.read_text()
+                            for p in (self.ws / 'prepare/handoffs').glob('*task*.md')))
+
+    def test_interrupted_optional_attempt_is_deferred_and_cannot_run_again_on_resume(self):
+        for stop_signal in (signal.SIGINT, signal.SIGKILL):
+            with self.subTest(signal=stop_signal):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = 'optional-error-interrupted'
+                with subprocess.Popen([sys.executable, str(CLI), *self.args], env=self.env,
+                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) as proc:
+                    deadline = time.monotonic() + 5
+                    while not (self.ws / 'optional-started').exists() and time.monotonic() < deadline:
+                        time.sleep(0.02)
+                    self.assertTrue((self.ws / 'optional-started').exists())
+                    proc.send_signal(stop_signal)
+                    if stop_signal == signal.SIGKILL:
+                        # The external provider outlives a killed host; clean up this test's process group.
+                        os.killpg(int((self.ws / 'optional-started').read_text()), signal.SIGTERM)
+                    proc.communicate(timeout=5)
+                    self.assertEqual(proc.returncode, 130 if stop_signal == signal.SIGINT else -signal.SIGKILL)
+                self.env['SCENARIO'] = 'optional-resume'
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                self.assertEqual(len([c for c in calls if c['role'] == 'task']), 1)
+                state = json.loads((self.ws / 'prepare/state.json').read_text())
+                self.assertEqual(state['tasks'][0]['goals'][0]['status'], 'deferred')
+                self.assertIn('controller unavailable', (self.ws / 'knowledgebase/AUTO-TODO.md').read_text())
+
     def test_both_acceptances_and_knowledge_required(self):
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)

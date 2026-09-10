@@ -7,6 +7,12 @@
 需要 Python ≥ 3.10、git、PATH 中可用的 opencode，以及目标 OS 的构建与运行环境。
 Porter 本体只使用 Python 标准库。`PORTER_MODEL` 可覆盖默认模型。
 
+主 agent 负责派发、必要性判断与验收，大任务由宿主顺序交给子 agent。按需选用三类任务 skill：
+源码与依赖调查、原生骨架实现与构建载入验证、迁移规划与补充验证；不要求依次执行全部类别。
+任务与验证目标的尝试记录保存在工作区状态中。补充验证按稳定目标只尝试一次，失败或超时后
+由知识 agent 整理到 AUTO-TODO；规划和补充验证分别交付。必要目标重试需失败证据和针对性修正。
+宿主按目标标识检查重复派发；主 agent 负责识别改名但语义相同的目标，并监督任务内的停止条件。
+
 ```bash
 python3 porter/main.py prepare \
   --linux-driver linux-5.10/drivers/md \

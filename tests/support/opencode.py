@@ -32,9 +32,74 @@ if scenario == 'session-lost' and '--session' in sys.argv:
 if scenario == 'task-writes-knowledge' and role == 'task':
     (ws / 'knowledgebase').mkdir(exist_ok=True)
     (ws / 'knowledgebase/unauthorized.md').write_text('task must not own this')
+if scenario == 'mixed-provider-failure' and role == 'task':
+    (ws / 'partial-plan.md').write_text('Scope: driver. Module: core (driver.c). Dependencies: none. Order: core.')
+    Path(data['handoff']).write_text('Planning complete: partial-plan.md. Protocol check failed; cause unknown.')
+    print('Protocol check transport failed', flush=True)
+    sys.exit(1)
+if scenario.startswith('optional-error') and role == 'task':
+    Path(data['handoff']).write_text('Partial check: controller unavailable. Cause unknown.')
+    print('check execution failed', flush=True)
+    if scenario == 'optional-error-interrupted':
+        (ws / 'optional-started').write_text(str(os.getpid()))
+        time.sleep(60)
+    if scenario == 'optional-error-timeout':
+        time.sleep(60)
+    if scenario == 'optional-error-integrity':
+        (ws / 'knowledgebase').mkdir(exist_ok=True)
+        (ws / 'knowledgebase/unauthorized.md').write_text('unauthorized')
+    sys.exit(1)
 if role == 'owner':
     tasks = [c for c in history if c['role'] == 'task']
-    if scenario in ('tasks', 'reorganize', 'task-writes-knowledge', 'task-timeout') and len(tasks) < 2:
+    latest_goals = {g['id']: (g, t) for t in data.get('tasks', []) for g in t['goals']}
+    unfinished = [(g, t) for g, t in latest_goals.values() if g['required'] and g.get('status') != 'delivered']
+    if scenario == 'success' and unfinished:
+        goal, previous = unfinished[0]
+        result = {'action': 'task', 'id': previous['id'], 'category': previous['category'],
+                  'prompt': 'Resume the interrupted source investigation from its checkpoint.',
+                  'inputs': [previous['handoff']], 'goals': [dict(goal, retry={
+                      'evidence': [previous['handoff']], 'correction': 'Resume from saved checkpoint with available budget'})]}
+    elif scenario == 'optional-resume' and not (ws / 'resume-requested').exists():
+        (ws / 'resume-requested').write_text('requested')
+        result = {'action': 'task', 'id': 'renamed-after-resume', 'category': 'planning',
+                  'prompt': 'Try the controller again', 'inputs': [],
+                  'goals': [{'id': 'controller', 'objective': 'Check controller with new arguments',
+                             'required': False, 'reason': 'Supplemental', 'completion': 'Controller responds'}]}
+    elif scenario == 'required-unresolved' and not tasks:
+        result = {'action': 'task', 'id': 'must-build', 'category': 'skeleton',
+                  'prompt': 'Build skeleton', 'inputs': []}
+    elif scenario in ('selected-category', 'malformed-goal', 'mixed-provider-failure') and not tasks:
+        result = {'action': 'task', 'id': 'selected', 'category': os.environ.get('TASK_CATEGORY', 'planning'),
+                  'prompt': 'Deliver the requested work and optional protocol check.', 'inputs': [],
+                  'goals': [{'id': 'main', 'objective': 'Deliver work', 'required': True,
+                             'reason': 'Planning or skeleton acceptance', 'completion': 'Evidence delivered'},
+                            {'id': 'protocol', 'objective': 'Check protocol', 'required': False,
+                             'reason': 'Supplemental only', 'completion': 'Check succeeds'}]}
+    elif scenario.startswith('required-retry') and len(tasks) < 2:
+        result = {'action': 'task', 'id': 'build', 'category': 'skeleton',
+                  'prompt': 'Build and load skeleton', 'inputs': [],
+                  'goals': [{'id': 'build-load', 'objective': 'Build and load', 'required': True,
+                             'reason': 'Skeleton acceptance', 'completion': 'Build and load evidence'}]}
+        if tasks and scenario == 'required-retry-with-evidence':
+            result['goals'][0]['retry'] = {'evidence': [tasks[-1]['data']['handoff']],
+                                         'correction': 'Use the supported compiler after missing-tool failure'}
+    elif scenario.startswith('optional-error') and not tasks:
+        result = {'action': 'task', 'id': 'optional-error', 'category': 'planning',
+                  'prompt': 'Check controller once', 'inputs': [], 'timeout': 0.2,
+                  'goals': [{'id': 'controller', 'objective': 'Check controller', 'required': False,
+                             'reason': 'Supplemental', 'completion': 'Controller responds'}]}
+        if scenario == 'optional-error-interrupted':
+            result['timeout'] = 5
+    elif scenario == 'optional-once' and not data.get('task_feedback', {}).get('rejected'):
+        result = {'action': 'task', 'id': 'plan-check', 'category': 'planning',
+                  'prompt': 'Deliver plan and check protocol once.', 'inputs': [], 'timeout': 2,
+                  'goals': [{'id': 'protocol', 'objective': 'Check protocol', 'required': False,
+                             'reason': 'Supplemental only', 'completion': 'Protocol check succeeds'}]}
+        if tasks:
+            result['id'] = 'renamed-check'
+            result['prompt'] = 'Use a different command and wait longer.'
+            result['timeout'] = 3
+    elif scenario in ('tasks', 'reorganize', 'task-writes-knowledge', 'task-timeout') and len(tasks) < 2:
         inputs = ([str(Path(data['project']['linux_driver']) / 'driver.c')] if not tasks else
                   [p for p in data['handoff_index'] if '-task-' in p][-1:])
         result = {'action': 'task', 'prompt': 'Investigate driver dependencies; report evidence only.', 'inputs': inputs}
@@ -56,6 +121,10 @@ if role == 'owner':
                                'evidence': [str(evidence)], 'inputs': [str(code)]},
                   'planning': {'status': 'pass', 'reason': 'scope, modules and order reviewed',
                                'evidence': [str(plan)], 'inputs': [str(Path(data['project']['linux_driver']) / 'driver.c')]}}
+        if scenario == 'mixed-provider-failure':
+            result['planning']['evidence'] = [str(ws / 'partial-plan.md')]
+            result['completed_goals'] = {'main': 'planning'}
+            result['report'] = 'Owner reviewed preserved partial-plan.md; main goal complete. Protocol check deferred.'
         if scenario == 'local-compile':
             code.write_text('#include <stdio.h>\n__attribute__((constructor)) static void init(void) { puts("loaded fixture"); fflush(stdout); }\n')
             build = subprocess.run(['cc', '-shared', '-fPIC', '-MMD', str(code), '-o', str(target / 'driver.so')], capture_output=True, text=True)
@@ -94,6 +163,30 @@ elif role == 'knowledge':
     result = {'status': 'updated', 'report': 'Updated supplied handoffs.'}
 else:
     result = {'status': 'delivered', 'report': 'Task findings and evidence. Build reference: ../../knowledgebase/build/details.md'}
+    if scenario == 'optional-once':
+        result = {'status': 'blocked', 'report': 'Protocol check failed; cause unknown. Evidence: protocol.log. '
+                  'AUTO-TODO: retry when a controller is available; completion: protocol check succeeds.',
+                  'goals': [{'id': 'protocol', 'status': 'blocked'}]}
+    if scenario.startswith('required-retry') and len([c for c in history if c['role'] == 'task']) == 1:
+        result = {'status': 'blocked', 'report': 'Build failed: compiler unavailable.'}
+    if scenario == 'required-unresolved':
+        result = {'status': 'blocked', 'report': 'Build failed: compiler unavailable.'}
+    if scenario == 'selected-category':
+        assert '\nTASK SKILL\n' in message, 'Selected task skill missing'
+        result = {'status': 'delivered', 'report': 'Planning complete. Protocol unavailable; defer until controller exists.',
+                  'goals': [{'id': 'main', 'status': 'delivered'}, {'id': 'protocol', 'status': 'blocked'}]}
+    if scenario == 'malformed-goal':
+        result['goals'] = [{'id': [], 'status': 'delivered'}, {'id': 'protocol', 'status': 'blocked'}]
+if role == 'knowledge' and (scenario in ('optional-once', 'optional-resume', 'mixed-provider-failure') or scenario.startswith('optional-error')):
+    (kb / 'AUTO-TODO.md').write_text('\n'.join(p.read_text() for p in (ws / 'prepare/handoffs').glob('*task*.md')))
+if role == 'owner' and result.get('action') == 'task':
+    result.setdefault('id', 'task-' + str(len(tasks)))
+    result.setdefault('category', 'source')
+    result.setdefault('timeout', 5)
+    result.setdefault('goals', [{'id': result['id'], 'objective': 'Investigate source',
+                               'required': True, 'reason': 'Needed for planning', 'completion': 'Evidence delivered'}])
+if role == 'task':
+    result.setdefault('goals', [{'id': g['id'], 'status': result['status']} for g in data['goals']])
 if scenario == 'commentary':
     print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': 'I will inspect the supplied source.'}}))
 print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': json.dumps(result)}}))

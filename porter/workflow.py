@@ -9,6 +9,10 @@ from porter import provider
 from porter.workspace import read_json, read_text, write_json
 
 
+class ProviderFailure(RuntimeError):
+    """An execution failure, distinct from workspace integrity or budget failures."""
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -35,6 +39,7 @@ class Preparation:
         self.state.setdefault('sessions', {})
         self.state.setdefault('acceptance', {})
         self.state.setdefault('incorporated', {})
+        self.state.setdefault('tasks', [])
         self.state.update(status='running', run_id=uuid.uuid4().hex, error=None)
         self.deadline = time.monotonic() + budget
         self.target = Path(project['target_os'])
@@ -79,13 +84,15 @@ class Preparation:
         path.write_text(report + '\n', encoding='utf-8')
         return path
 
-    def invoke(self, role: str, data: dict) -> dict:
+    def invoke(self, role: str, data: dict, timeout: float | None = None) -> dict:
         protected = {str(p): digest(p) for p in self.handoffs.glob('*.md')}
         kb = self.ws / 'knowledgebase'
         knowledge_before = {str(p): digest(p) for p in kb.rglob('*') if p.is_file()}
         remaining = self.deadline - time.monotonic()
         if remaining <= 0:
             raise RuntimeError('Total preparation budget exhausted')
+        if timeout is not None:
+            remaining = min(remaining, timeout)
         stem = self.root / 'logs' / f'{time.time_ns()}-{role}'
         session = self.state['sessions'].get(role) if role != 'task' else None
         data = dict(data, role=role, workspace=str(self.ws))
@@ -100,7 +107,7 @@ class Preparation:
         if rc:
             # Only an explicitly unavailable session gets one fresh attempt.
             lower = text.lower()
-            if session and 'session' in lower and ('not found' in lower or 'does not exist' in lower):
+            if role != 'task' and session and 'session' in lower and ('not found' in lower or 'does not exist' in lower):
                 self.state['sessions'][role] = None
                 self.save()
                 remaining = self.deadline - time.monotonic()
@@ -112,15 +119,20 @@ class Preparation:
                     self.save()
             if rc == 130:
                 raise KeyboardInterrupt
-            if rc:
-                raise RuntimeError(f'{role} provider failed ({rc}); logs: {stem}.log')
         if fingerprints(list(protected)) != protected:
             raise RuntimeError('Historical handoff changed during provider execution')
         if role != 'knowledge':
             knowledge_after = {str(p): digest(p) for p in kb.rglob('*') if p.is_file()}
             if knowledge_before != knowledge_after:
                 raise RuntimeError('Only the knowledge agent may write shared knowledge')
-        return provider.response(text)
+        if time.monotonic() >= self.deadline:
+            raise RuntimeError('Total preparation budget exhausted')
+        if rc:
+            raise ProviderFailure(f'{role} provider failed ({rc}); logs: {stem}.log')
+        try:
+            return provider.response(text)
+        except ValueError as exc:
+            raise ProviderFailure(f'{role} invalid provider response; logs: {stem}.log') from exc
 
     def sync_knowledge(self):
         pending = {str(p): digest(p) for p in sorted(self.handoffs.glob('*.md'))
@@ -166,12 +178,24 @@ class Preparation:
             if value['status'] == 'pass' and (not evidence or not inputs):
                 raise ValueError(f'{name} pass requires evidence and relevant source/config inputs')
             acceptance[name] = dict(value, files=fingerprints(evidence + inputs), context=self.context())
+        completed = result.get('completed_goals', {})
+        latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
+        if (not isinstance(completed, dict) or any(
+                goal_id not in latest or not latest[goal_id]['required']
+                or not isinstance(name, str) or name not in acceptance or acceptance[name]['status'] != 'pass'
+                for goal_id, name in completed.items())):
+            raise ValueError('Completed goals must reference required goals and a passing acceptance')
         report = self.handoff('owner-acceptance', result.get('report', ''))
+        for goal_id, name in completed.items():
+            latest[goal_id]['review'] = {'acceptance': name, 'report': str(report)}
         self.state.update(acceptance=acceptance, acceptance_report=str(report), knowledge_current=False)
         self.save()
 
     def finish(self, result: dict):
         self.refresh()
+        latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
+        if any(g['required'] and g.get('status') != 'delivered' and not g.get('review') for g in latest.values()):
+            raise RuntimeError('Required goals remain unfinished; deliver a correction or blocker')
         kb = self.ws / 'knowledgebase'
         required = ['README.md', 'verification.md', 'AUTO-DECISION.md', 'AUTO-TODO.md',
                     'AUTO-FIXME.md', 'build/README.md', 'boot/README.md', 'plan/README.md']
@@ -185,8 +209,113 @@ class Preparation:
         self.state['status'] = 'complete'
         self.save()
 
+    def dispatch(self, request: dict):
+        inputs = request.get('inputs', [])
+        if not isinstance(inputs, list) or not all(isinstance(p, str) for p in inputs):
+            raise ValueError('Task inputs must be a list of absolute file paths')
+        fingerprints(inputs)
+        for key in ('id', 'prompt'):
+            if not isinstance(request.get(key), str) or not request[key].strip():
+                raise ValueError(f'Task requires {key}')
+        if request.get('category') not in ('source', 'skeleton', 'planning'):
+            raise ValueError('Task category must be source, skeleton or planning')
+        timeout = request.get('timeout')
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout < float('inf'):
+            raise ValueError('Task requires a finite positive timeout in seconds')
+        goals = request.get('goals')
+        if not isinstance(goals, list) or not goals:
+            raise ValueError('Task requires goals')
+        seen = set()
+        for goal in goals:
+            if not isinstance(goal, dict):
+                raise ValueError('Task goal must be an object')
+            for key in ('id', 'objective', 'reason', 'completion'):
+                if not isinstance(goal.get(key), str) or not goal[key].strip():
+                    raise ValueError(f'Task goal requires {key}')
+            if type(goal.get('required')) is not bool or goal['id'] in seen:
+                raise ValueError('Goals require boolean necessity and unique IDs')
+            seen.add(goal['id'])
+            previous = [g for task in self.state['tasks'] for g in task['goals'] if g['id'] == goal['id']]
+            if previous and any(not g['required'] for g in previous):
+                rejection = f"Rejected repeated supplemental goal {goal['id']}; retain its handoff and AUTO-TODO."
+                path = self.handoff('task-rejected', rejection)
+                self.state['task_feedback'] = {'rejected': True, 'report': rejection, 'handoff': str(path)}
+                self.save()
+                return
+            if previous:
+                if goal['required'] != previous[-1]['required']:
+                    raise ValueError('An attempted goal cannot change necessity')
+                retry = goal.get('retry')
+                if (not isinstance(retry, dict) or not isinstance(retry.get('correction'), str)
+                        or not retry['correction'].strip() or not isinstance(retry.get('evidence'), list)
+                        or not retry['evidence'] or not all(isinstance(p, str) for p in retry['evidence'])):
+                    raise ValueError(f"Required goal {goal['id']} retry needs failure evidence and a correction")
+                fingerprints(retry['evidence'])
+        goals = [{key: goal[key] for key in ('id', 'objective', 'required', 'reason', 'completion', 'retry')
+                  if key in goal} | {'status': 'running'} for goal in goals]
+        delivery = self.handoffs / f'{time.time_ns()}-task-{uuid.uuid4().hex[:8]}.md'
+        task = {key: request[key] for key in ('id', 'category')}
+        task['goals'] = goals
+        task.update(status='running', handoff=str(delivery), run_id=self.state['run_id'], timeout=timeout)
+        self.state['tasks'].append(task)
+        self.state['task_feedback'] = {'rejected': False, 'handoff': str(delivery)}
+        self.save()
+        try:
+            result = self.invoke('task', {'prompt': request['prompt'], 'inputs': inputs,
+                                         'task_id': task['id'], 'timeout': timeout,
+                                         'category': task['category'], 'goals': goals,
+                                         'handoff': str(delivery)}, timeout=timeout)
+            if result.get('status') not in ('delivered', 'blocked'):
+                raise ValueError('Task status must be delivered or blocked')
+            report = result.get('report')
+            if not isinstance(report, str) or not report.strip():
+                raise ValueError('Task must deliver a nonempty report')
+            outcomes = result.get('goals', [])
+            if (not isinstance(outcomes, list) or len(outcomes) != len(goals)
+                    or any(not isinstance(g, dict) or not isinstance(g.get('id'), str)
+                           or g.get('status') not in ('delivered', 'blocked')
+                           for g in outcomes) or {g.get('id') for g in outcomes} != seen):
+                raise ValueError('Task must deliver a result for every goal')
+            for goal in goals:
+                status = next(g['status'] for g in outcomes if g['id'] == goal['id'])
+                goal['status'] = 'deferred' if status == 'blocked' and not goal['required'] else status
+            task['status'] = result['status']
+            delivery.write_text(f"# Task: {task['status']}\n\n{report}\n\nGoals: "
+                                + json.dumps(goals, ensure_ascii=False) + '\n', encoding='utf-8')
+        except ProviderFailure as exc:
+            task['status'] = 'blocked' if any(g['required'] for g in goals) else 'deferred'
+            for goal in goals:
+                goal['status'] = 'blocked' if goal['required'] else 'deferred'
+            with delivery.open('a', encoding='utf-8') as stream:
+                stream.write(f'\n\nExecution failed: {exc}\nCause beyond the recorded evidence: unknown.\n'
+                             'AUTO-TODO: defer supplemental goals until their execution prerequisites are available; '
+                             'use the goal completion conditions below. Preserve partial findings.\n'
+                             + json.dumps(goals, ensure_ascii=False) + '\n')
+        except (OSError, ValueError, RuntimeError, KeyboardInterrupt):
+            task['status'] = 'interrupted'
+            for goal in goals:
+                goal['status'] = 'blocked' if goal['required'] else 'deferred'
+            with delivery.open('a', encoding='utf-8') as stream:
+                stream.write(f"\n\nTask did not finish. Objective: {request['prompt']}\n"
+                             f'Inputs: {inputs}\nProvider: {self.state.get("last_call")}\n'
+                             'Any findings not recorded above remain unknown.\n'
+                             'AUTO-TODO: resume supplemental work only when prerequisites permit; '
+                             'use these completion conditions.\n' + json.dumps(goals, ensure_ascii=False) + '\n')
+            raise
+        finally:
+            self.save()
+
     def run(self) -> int:
         try:
+            for task in self.state['tasks']:
+                if task['status'] == 'running':
+                    task['status'] = 'interrupted'
+                    for goal in task['goals']:
+                        goal['status'] = 'blocked' if goal['required'] else 'deferred'
+                    self.handoff('task-recovery', f"Interrupted task; partial evidence: {task['handoff']}\n"
+                                 'Cause unknown. AUTO-TODO: defer supplemental goals until prerequisites permit; '
+                                 'completion conditions: ' + json.dumps(task['goals'], ensure_ascii=False))
+            self.save()
             self.refresh()
             self.sync_knowledge()
             while True:
@@ -199,6 +328,7 @@ class Preparation:
                     'handoff_index': [str(p) for p in sorted(self.handoffs.glob('*.md'))],
                     'goals': str(self.ws / 'goals.md'), 'answers': str(self.ws / 'answers.md'),
                     'hints': str(self.ws / 'inputs/hints'),
+                    'tasks': self.state['tasks'], 'task_feedback': self.state.get('task_feedback', {}),
                 })
                 self.refresh()
                 action = result.get('action')
@@ -210,31 +340,7 @@ class Preparation:
                 elif action == 'record':
                     self.handoff('owner', result.get('report', ''))
                 elif action == 'task':
-                    inputs = result.get('inputs', [])
-                    if not isinstance(inputs, list) or not all(isinstance(p, str) for p in inputs):
-                        raise ValueError('Task inputs must be a list of absolute file paths')
-                    fingerprints(inputs)
-                    prompt = result.get('prompt')
-                    if not isinstance(prompt, str) or not prompt.strip():
-                        raise ValueError('Task requires objective, scope and delivery expectations')
-                    # ponytail: sequential tasks guarantee one code writer; parallelize read-only research if needed.
-                    delivery = self.handoffs / f'{time.time_ns()}-task-{uuid.uuid4().hex[:8]}.md'
-                    try:
-                        task = self.invoke('task', {'prompt': prompt, 'inputs': inputs,
-                                                    'handoff': str(delivery)})
-                        if task.get('status') not in ('delivered', 'blocked'):
-                            raise ValueError('Task status must be delivered or blocked')
-                        report = task.get('report')
-                        if not isinstance(report, str) or not report.strip():
-                            raise ValueError('Task must deliver a nonempty report')
-                        delivery.write_text(f"# Task: {task['status']}\n\n{report}\n", encoding='utf-8')
-                    except (OSError, ValueError, RuntimeError, KeyboardInterrupt):
-                        # Preserve the executor's checkpoint, even when no final response arrives.
-                        with delivery.open('a', encoding='utf-8') as stream:
-                            stream.write(f'\n\nTask did not finish. Objective: {prompt}\n'
-                                         f'Inputs: {inputs}\nProvider: {self.state.get("last_call")}\n'
-                                         'Any findings not recorded above remain unknown.\n')
-                        raise
+                    self.dispatch(result)
                 elif action == 'blocked':
                     self.handoff('owner-blocked', result.get('report', ''))
                     self.sync_knowledge()
