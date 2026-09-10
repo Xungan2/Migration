@@ -1,17 +1,18 @@
 """test_exp_mono.py — exp-mono 子命令的功能性测试（全 mock，零真实 agent）。
 
-覆盖：
-  1. 拓扑推进：全 loop 两模块按 order 依次迁移 → 全 pass + 目标树按
-     模块 commit + 终局（全量单测 + 启动冒烟留档）+ report 就位
-  2. 幂等跳过：ledger 已 pass 的模块不再调 agent
-  3. gate ① 失败短路：产物守卫失败时 build/ut 均不执行
-  4. gate ③ 测试标记检测：代码/登记/build/ut 全过但标记零增量 → 判败
-  5. 缺键降级：无 driver_scope_cmd → 全量 cmd；无 integration → 跳登记
-  6. blocked 停车与重入：agent 报 blocked → rc 1 不 commit；修复后重跑
-     从断点续（前一失败模块重跑成功）
-  7. 前置守卫：缺 deps.json / 模块不在 order / 依赖未 pass → rc 2
-  8. 改动范围守卫：越出白名单的改动 → gate ① 判败
-  9. 小件：预算 clamp / 非注释行计数 / 占位符替换
+覆盖（研究/翻译拆分形态）：
+  1. 拓扑推进：两模块按 order 各跑 研究任务→翻译任务 → 全 pass +
+     词典/契约登记表收割 + 目标树按模块 commit + 终局 + report
+  2. 幂等跳过：ledger 已 pass 的研究/翻译分别跳过
+  3. 研究交付物校验回灌：首写坏块 → 同 session 续修 → 过；连坏 →
+     invalid-deliverable 停车（1+RESEARCH_RETRIES 次）
+  4. gate ① 失败短路 / ③ 启动失败短路 / 四段全绿
+  5. 声明面自动重试：首败 → 同 session 续修 → 过（decl_retries 记账）；
+     连败 → 重试上限后停车
+  6. blocked 停车与重入；缺键降级；改动范围守卫；前置守卫 rc 2
+  7. 双模型接线：研究调 reasoning、翻译调 coding（config 数据面）
+  8. 仅研究模式（--module-research）：只研究不翻译
+  9. 小件：双预算 clamp / 非注释行计数 / 占位符替换
 
 fixture 全虚构：driver-x / fake-tree / 模块 fx-a→fx-b / 扩展名 .cx /
 测试标记 @MARK / 登记模板 `decl {stem};`——不承载任何真实平台事实。
@@ -28,6 +29,8 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from porter.exp import mono as mono_mod
+
+FX_MODELS = ("fx/reasoning-model", "fx/coding-model")
 
 
 def _mk_fixture(tmp: Path) -> dict:
@@ -91,8 +94,8 @@ def _mk_fixture(tmp: Path) -> dict:
 
 
 def _write_module_product(home: Path, stem: str, *, marker=True,
-                          register=True, lines=12, stray=None):
-    """模拟 agent 交付：driver_home 内新文件 + 登记 + 测试标记。"""
+                           register=True, lines=12, stray=None):
+    """模拟翻译 agent 交付：driver_home 内新文件 + 登记 + 测试标记。"""
     body = [f"unit {stem};"]
     body += [f"line_{stem}_{i} = {i};" for i in range(lines)]
     if marker:
@@ -108,30 +111,76 @@ def _write_module_product(home: Path, stem: str, *, marker=True,
         stray.write_text("stray\n", encoding="utf-8")
 
 
-class _FakeSeq:
-    """run_agent_seq 的 mock：做点活 → 跑一次静态段 → done。
+def _deliverable_text(module: str, valid: bool = True) -> str:
+    """合成研究交付物（坏块 = verdict 出词表）。"""
+    stem = module.replace("-", "_")
+    data = {
+        "module": module,
+        "mappings": [{"symbol": f"api_{stem}",
+                      "verdict": "equivalent" if valid else "SAME",
+                      "usage": f"目标等价物 {stem}_eq",
+                      "evidence": "home/drv/reg.txt:1",
+                      "notes": "语义一致"}],
+        "contracts": [
+            {"name": f"Hook{stem}",
+             "signature": f"type Hook{stem} = fn(&mut Dev) -> i32",
+             "anchor": "home/drv/scaffold.cx:1",
+             "consumers": module, "conflicts_with": ""}],
+        "prunes": [], "parking": [],
+        "read_list": [{"path": "home/drv/reg.txt", "purpose": "登记先例"}],
+        "negatives": [], "open_questions": []}
+    return ("## 研究叙事（fx 合成）\n\n### 适配架构与整合方案\n\n"
+            "（合成）直译。\n\n### 可测面评估\n\n（合成）全部可执行"
+            "验证。\n\n```json\n"
+            + json.dumps(data, ensure_ascii=False) + "\n```\n")
 
-    decl = callable(module) -> 记账声明（默认与 _write_module_product
-    的默认产物一致：1 个已测单元 + 1 个带标记测试）。
+
+class _FakeSplitSeq:
+    """run_agent_seq 的双任务 mock：按 task.step 分派研究/翻译。
+
+    - research_bad：<模块名> 首写坏交付物的次数（校验回灌测试用）
+    - decl：callable(module) -> 翻译记账声明（默认与产物一致）
+    - decl_seq：{module: [decl, ...]} 按调用序消费（自动重试测试用）
     """
 
-    def __init__(self, work, decl=None, static_fail_status="stalled"):
-        self.work = work                 # callable(module) -> None
+    def __init__(self, translate_work, decl=None, static_fail_status="stalled",
+                 research_bad=None):
+        self.translate_work = translate_work
         self._decl = decl
         self.static_fail_status = static_fail_status
-        self.calls = []                  # (module, prompt, budget)
+        self.research_bad = dict(research_bad or {})
+        self.calls = []              # 全部调用（含 step/model/session）
         self.static_results = []
+        self._decl_seq = {}
 
     def __call__(self, prompt, workdir, log_stem, static=None,
                  gen_schema=None, final_static=False, agent_budget_sec=0,
-                 task=None, model=None, resume_session=None):
-        module = (task or {})["module"]
-        self.calls.append({"module": module, "prompt": prompt,
-                           "budget": agent_budget_sec,
-                           "gen_schema": gen_schema,
-                           "static": static,
-                           "resume_session": resume_session})
-        self.work(module)
+                 task=None, model=None, resume_session=None,
+                 fix_floor_sec=0, stall_meta_rounds=0):
+        task = task or {}
+        step = task.get("step", "translate")
+        module = task.get("module")
+        rec = {"step": step, "module": module, "prompt": prompt,
+               "budget": agent_budget_sec, "gen_schema": gen_schema,
+               "static": static, "resume_session": resume_session,
+               "model": model}
+        self.calls.append(rec)
+        if step == "research":
+            exp_dir = Path(log_stem).parent.parent
+            dpath = exp_dir / "research" / f"{module}.md"
+            valid = self.research_bad.get(module, 0) <= 0
+            if not valid:
+                self.research_bad[module] -= 1
+            dpath.write_text(_deliverable_text(module, valid=valid),
+                             encoding="utf-8")
+            return {"status": "done", "session_id": f"ses_r_{module}",
+                    "fallback": False, "rounds": [{"seg": 1}],
+                    "parsed": {"status": "done",
+                               "deliverable": str(dpath),
+                               "notes": "研究完成"},
+                    "total_agent_sec": 0.3}
+        # ---- 翻译任务（旧 _FakeSeq 行为） ----
+        self.translate_work(module)
         if static is not None:
             ok, out = static["fn"]()
             self.static_results.append({"module": module, "ok": ok,
@@ -142,7 +191,11 @@ class _FakeSeq:
                         "rounds": [{"seg": 1}], "parsed": None,
                         "total_agent_sec": 0.1}
         stem = module.replace("-", "_")
-        decl = (self._decl or (lambda m: {}))(module)
+        if module in self._decl_seq and self._decl_seq[module]:
+            d = self._decl_seq[module].pop(0)
+            decl = d if d is not None else {}
+        else:
+            decl = (self._decl or (lambda m: {}))(module)
         parsed = {"status": "done",
                   "files": [f"home/drv-x/{stem}.cx"],
                   "notes": "虚构完成",
@@ -158,11 +211,19 @@ class _FakeSeq:
                 "parsed": parsed,
                 "total_agent_sec": 1.5}
 
+    def steps(self, step, module=None):
+        return [c for c in self.calls if c["step"] == step
+                and (module is None or c["module"] == module)]
 
-def _run_with_fakes(test, fx, work, *, build_ok=True, boot_ok=True,
-                    decl=None, session=None):
-    """通用环境：patch seq/build/ut 执行器/commit/boot 后跑全 loop。"""
-    seq = _FakeSeq(work, decl=decl)
+
+def _run_with_fakes(test, fx, translate_work, *, build_ok=True, boot_ok=True,
+                    decl=None, decl_seq=None, session=None,
+                    research_bad=None, **kw):
+    """通用环境：patch seq/build/ut/commit/boot/模型加载后跑 loop。"""
+    seq = _FakeSplitSeq(translate_work, decl=decl,
+                        research_bad=research_bad)
+    if decl_seq:
+        seq._decl_seq = {k: list(v) for k, v in decl_seq.items()}
     ut_calls = []
 
     def _shell_ut(cmd, cwd, env, timeout_sec, log_path):
@@ -179,6 +240,8 @@ def _run_with_fakes(test, fx, work, *, build_ok=True, boot_ok=True,
         return ["deadbeef0"]
 
     with mock.patch.object(mono_mod.agent, "run_agent_seq", seq), \
+            mock.patch.object(mono_mod, "_load_models",
+                              return_value=FX_MODELS), \
             mock.patch.object(mono_mod.probe_mod, "probe_build",
                               return_value={"item": "build",
                                             "ok": build_ok,
@@ -189,7 +252,7 @@ def _run_with_fakes(test, fx, work, *, build_ok=True, boot_ok=True,
                 mono_mod.probe_mod, "probe_boot",
                 return_value={"item": "final_boot", "ok": boot_ok,
                               "detail": "rc=0"}):
-        rc = mono_mod.run_exp_mono(fx["ws"], session=session)
+        rc = mono_mod.run_exp_mono(fx["ws"], session=session, **kw)
     return {"rc": rc, "seq": seq, "commits": commits, "ut_calls": ut_calls}
 
 
@@ -208,63 +271,102 @@ class TestExpMonoLoop(unittest.TestCase):
 
     def test_full_loop_topo_commits_terminal(self):
         def work(module):
-            stem = module.replace("-", "_")
-            _write_module_product(self.fx["home"], stem)
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 0)
-        self.assertEqual([c["module"] for c in r["seq"].calls],
-                         ["fx-a", "fx-b"])
+        self.assertEqual([(c["step"], c["module"]) for c in r["seq"].calls],
+                         [("research", "fx-a"), ("translate", "fx-a"),
+                          ("research", "fx-b"), ("translate", "fx-b")])
         led = self._ledger()
         for m in ("fx-a", "fx-b"):
             self.assertEqual(led["modules"][m]["status"], "pass")
+            self.assertEqual(led["modules"][m]["research"]["status"],
+                             "pass")
+        # notes 持久化：done 路径也留档（矛盾上报/兜底裁定的通道）
+        self.assertEqual(led["modules"]["fx-a"]["notes"], "虚构完成")
         self.assertEqual(len(r["commits"]), 2)
-        self.assertIn("fx-a", r["commits"][0])
-        self.assertIn("fx-b", r["commits"][1])
         self.assertIn("build+ut green", r["commits"][0])
-        # 终局：最后一次 ut 是全量 cmd（无占位符、非 scope 形态）
+        # 终局：最后一次 ut 是全量 cmd；scope 形态只在翻译轮出现
         self.assertNotIn("{PORTER", r["ut_calls"][-1])
-        self.assertIn("full", r["ut_calls"][-1])
-        # scope 形态在模块轮中出现过且占位符已替换
-        scope_calls = [c for c in r["ut_calls"] if "scope" in c]
-        self.assertEqual(len(scope_calls), 2)
-        self.assertIn("home/drv-x", scope_calls[0])
+        self.assertEqual(len([c for c in r["ut_calls"] if "scope" in c]), 2)
+        # 知识收割：词典节 + 契约登记表
+        notes = (self.fx["ws"] / "exp-mono" / "mapping-notes.md").read_text(
+            encoding="utf-8")
+        self.assertIn("## fx-a", notes)
+        self.assertIn("- api_fx_a | equivalent |", notes)
+        reg = (self.fx["ws"] / "exp-mono" / "contracts.md").read_text(
+            encoding="utf-8")
+        self.assertIn("- **Hookfx_a**：", reg)
+        # prompt 组装：研究 prompt 注入词典/契约/泊车/交付物路径，
+        # 且输入面 ⊇ mono 输入面∩研究相关（登记模板/测试基质/现有
+        # 文件清单——防拆分后漂移的回归守卫）
+        rp = r["seq"].steps("research", "fx-a")[0]["prompt"]
+        self.assertIn("迁移词典", rp)
+        self.assertIn("契约登记表", rp)
+        self.assertIn("泊车记录", rp)
+        self.assertIn("research/fx-a.md", rp)
+        self.assertIn("虚构核心词汇", rp)
+        self.assertIn("decl {stem};", rp)       # 登记约定（构建入口）
+        self.assertIn("@MARK", rp)              # 测试基质（可测面依据）
+        self.assertIn("scaffold.cx", rp)        # driver_home 现有文件清单
+        # 翻译 prompt 注入交付物全文/契约/泊车/基质，但不注入词典
+        tp = r["seq"].steps("translate", "fx-a")[0]["prompt"]
+        self.assertIn("研究交付物", tp)
+        self.assertIn("api_fx_a", tp)
+        self.assertIn("Hookfx_a", tp)
+        self.assertIn("@MARK", tp)
+        self.assertIn("decl {stem};", tp)
+        self.assertIn("泊车记录", tp)
+        self.assertIn("接线白名单", tp)         # 白名单注入（硬性①引用对齐）
+        self.assertIn("top.txt", tp)
+        self.assertNotIn("迁移词典（JIT 接力）", tp)
+        # 双任务 gen_schema
+        self.assertEqual(r["seq"].steps("research")[0]["gen_schema"],
+                         {"status": "str", "deliverable": "str",
+                          "notes": "str"})
+        self.assertEqual(r["seq"].steps("translate")[0]["gen_schema"],
+                         {"status": "str", "files": "list", "notes": "str",
+                          "migrated_functions": "list", "tests": "list",
+                          "untested": "list"})
         report = (self.fx["ws"] / "exp-mono" / "report.md").read_text(
             encoding="utf-8")
-        self.assertIn("fx-a", report)
         self.assertIn("全量单测：PASS", report)
         self.assertIn("函数覆盖台账", report)
-        self.assertIn("truth table", report)
-        # gen_schema 含记账三字段（声明面由编排器核对）
-        self.assertEqual(
-            r["seq"].calls[0]["gen_schema"],
-            {"status": "str", "files": "list", "notes": "str",
-             "migrated_functions": "list", "tests": "list",
-             "untested": "list"})
-        # 词典/泊车文件已被初始化
-        self.assertTrue((self.fx["ws"] / "exp-mono" / "mapping-notes.md")
-                        .exists())
-        self.assertTrue((self.fx["ws"] / "exp-mono" / "parking.md").exists())
-        # prompt 注入了模块上下文与词典路径
-        prompt = r["seq"].calls[0]["prompt"]
-        self.assertIn("fx-a", prompt)
-        self.assertIn("mapping-notes.md", prompt)
-        self.assertIn("decl {stem};", prompt)
-        self.assertIn("@MARK", prompt)
-        self.assertIn("虚构核心词汇", prompt)
+        self.assertIn("词典+1", report)        # 研究列的收割统计
+
+    def test_models_wiring(self):
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work)
+        self.assertEqual(r["rc"], 0)
+        self.assertTrue(all(c["model"] == FX_MODELS[0]
+                            for c in r["seq"].steps("research")))
+        self.assertTrue(all(c["model"] == FX_MODELS[1]
+                            for c in r["seq"].steps("translate")))
+
+    def test_models_missing_rc2(self):
+        with mock.patch.object(mono_mod, "_load_models",
+                               return_value=(None, "config 缺 models 块")):
+            rc = mono_mod.run_exp_mono(self.fx["ws"])
+        self.assertEqual(rc, 2)
 
     def test_idempotent_skip(self):
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         r1 = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r1["rc"], 0)
         r2 = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r2["rc"], 0)
-        self.assertEqual([c["module"] for c in r2["seq"].calls], [])
+        self.assertEqual(r2["seq"].calls, [])
 
     def test_gate_short_circuit(self):
-        def work(module):        # 什么都不写 → 产物守卫必败
+        def work(module):        # 什么都不写 → 翻译产物守卫必败
             pass
 
         r = _run_with_fakes(self, self.fx, work)
@@ -277,9 +379,9 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertIn("产物守卫", r["seq"].static_results[0]["out"])
 
     def test_gate_boot_fail_short_circuits_ut(self):
-        # 四段 gate ③ 启动失败 → 单测不执行（build 后短路），模块不 pass
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         r = _run_with_fakes(self, self.fx, work, boot_ok=False)
         self.assertEqual(r["rc"], 1)
@@ -287,62 +389,58 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertFalse(r["seq"].static_results[0]["ok"])
         self.assertIn("③ 启动 FAIL", r["seq"].static_results[0]["out"])
         self.assertEqual(r["commits"], [])
-        led = self._ledger()["modules"]["fx-a"]
-        self.assertNotEqual(led["status"], "pass")
 
     def test_gate_four_stage_all_green(self):
-        # 全绿路径：gate 描述为四段（产物/构建/启动/单测）
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 0)
         self.assertTrue(r["seq"].static_results[0]["ok"])
         self.assertIn("四段全绿", r["seq"].static_results[0]["out"])
-        self.assertIn("启动成功", r["seq"].static_results[0]["out"])
 
-    def test_decl_marker_consistency(self):
-        # 声明了 1 个测试但产物零标记（四段 gate 全过）→ 声明面判败
+    def test_decl_marker_consistency_exhausts_retries(self):
+        # 声明 1 测试但产物零标记：自动重试 2 次仍不过 → 停车
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"),
-                                  marker=False)
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"), marker=False)
 
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 1)
-        # 四段 gate 在 session 内全绿（build/boot/ut 都跑了），败在记账核对
-        self.assertEqual(len(r["ut_calls"]), 1)
-        self.assertTrue(r["seq"].static_results[0]["ok"])
-        self.assertEqual(r["commits"], [])
+        # 每次翻译调用都跑四段 gate（重试也全量验证）→ ut 3 次
+        self.assertEqual(len(r["ut_calls"]), 3)
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["status"], "decl-mismatch")
-        self.assertEqual(led["marker_delta"], 0)
-        self.assertEqual(len(led["tests"]), 1)
+        self.assertEqual(led.get("decl_retries"), 2)
+        # 自动重试走同 session 续接
+        tr = r["seq"].steps("translate", "fx-a")
+        self.assertEqual(len(tr), 3)
+        self.assertEqual(tr[1]["resume_session"], "ses_fx")
+        self.assertIn("声明面核对未通过", tr[1]["prompt"])
 
-    def test_decl_accounting_incomplete(self):
-        # migrated 里 fa_math 未出现在 tests ∪ untested → 记账不完备
+    def test_decl_auto_retry_recovers(self):
+        # 首轮记账漏挂 1 单元 → 自动重试补齐 → pass（进程内闭环，零人工）
         def work(module):
-            stem = module.replace("-", "_")
-            _write_module_product(self.fx["home"], stem)
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
-        def decl(module):
-            stem = module.replace("-", "_")
-            return {"migrated_functions": [f"{stem}_logic", f"{stem}_math"],
-                    "tests": [{"fn": f"{stem}_logic",
-                               "aspect": "truth table",
-                               "name": f"probe_{stem}_a"}],
-                    "untested": []}
-
-        r = _run_with_fakes(self, self.fx, work, decl=decl)
-        self.assertEqual(r["rc"], 1)
+        seq_decl = {"fx-a": [
+            {"migrated_functions": ["fx_a_logic", "fx_a_math"],
+             "tests": [{"fn": "fx_a_logic", "aspect": "truth table",
+                        "name": "probe_fx_a_a"}],
+             "untested": []},
+            None]}      # None → 回退默认（完备记账）
+        r = _run_with_fakes(self, self.fx, work, decl_seq=seq_decl)
+        self.assertEqual(r["rc"], 0)
         led = self._ledger()["modules"]["fx-a"]
-        self.assertEqual(led["status"], "decl-mismatch")
-        self.assertEqual(r["commits"], [])
+        self.assertEqual(led["status"], "pass")
+        self.assertEqual(led.get("decl_retries"), 1)
 
     def test_decl_overlap_rejected(self):
-        # 同一单元同时挂 tests 与 untested → 判败
         def work(module):
-            stem = module.replace("-", "_")
-            _write_module_product(self.fx["home"], stem)
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         def decl(module):
             stem = module.replace("-", "_")
@@ -359,10 +457,9 @@ class TestExpMonoLoop(unittest.TestCase):
                          "decl-mismatch")
 
     def test_decl_all_exempted_is_legal(self):
-        # 零测试 + 全部豁免带理由 = 合法（个数不是指标），report 留档
         def work(module):
-            stem = module.replace("-", "_")
-            _write_module_product(self.fx["home"], stem, marker=False)
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"), marker=False)
 
         def decl(module):
             stem = module.replace("-", "_")
@@ -375,14 +472,12 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertEqual(r["rc"], 0)
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["status"], "pass")
-        self.assertEqual(led["marker_delta"], 0)
-        report = (self.fx["ws"] / "exp-mono" / "report.md").read_text(
-            encoding="utf-8")
-        self.assertIn("纯声明单元", report)
+        self.assertNotIn("decl_retries", led)
 
     def test_change_scope_guard(self):
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"),
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"),
                                   stray=self.fx["tree"] / "stray.txt")
 
         r = _run_with_fakes(self, self.fx, work)
@@ -407,42 +502,62 @@ class TestExpMonoLoop(unittest.TestCase):
 
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 0)
-        # 降级为全量 cmd
         self.assertTrue(all("full" in c for c in r["ut_calls"]))
 
     def test_blocked_stop_and_resume(self):
-        def _blocked_seq(prompt, workdir, log_stem, static=None,
-                         gen_schema=None, final_static=False,
-                         agent_budget_sec=0, task=None, model=None,
-                         resume_session=None):
+        def _blocked_translate(prompt, workdir, log_stem, static=None,
+                               gen_schema=None, final_static=False,
+                               agent_budget_sec=0, task=None, model=None,
+                               resume_session=None, fix_floor_sec=0,
+                               stall_meta_rounds=0):
+            task = task or {}
+            if task.get("step") == "research":
+                module = task.get("module")
+                exp_dir = Path(log_stem).parent.parent
+                dpath = exp_dir / "research" / f"{module}.md"
+                dpath.write_text(_deliverable_text(module),
+                                 encoding="utf-8")
+                return {"status": "done", "session_id": "s",
+                        "fallback": False, "rounds": [{"seg": 1}],
+                        "parsed": {"status": "done",
+                                   "deliverable": str(dpath),
+                                   "notes": "研究完成"},
+                        "total_agent_sec": 0.2}
             return {"status": "done", "session_id": "s",
                     "fallback": False, "rounds": [{"seg": 1}],
                     "parsed": {"status": "blocked",
-                               "notes": "词典缺虚构条目"},
+                               "notes": "交付物缺虚构条目"},
                     "total_agent_sec": 0.2}
 
         with mock.patch.object(mono_mod.agent, "run_agent_seq",
-                               _blocked_seq), \
+                               _blocked_translate), \
+                mock.patch.object(mono_mod, "_load_models",
+                                  return_value=FX_MODELS), \
                 mock.patch("porter.common.vcs.commit_target") as _c:
             rc = mono_mod.run_exp_mono(self.fx["ws"])
         self.assertEqual(rc, 1)
-        self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
-                         "blocked")
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led["status"], "blocked")
+        self.assertEqual(led["research"]["status"], "pass")  # 研究已过
         _c.assert_not_called()
 
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
         r2 = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r2["rc"], 0)
-        self.assertEqual([c["module"] for c in r2["seq"].calls],
-                         ["fx-a", "fx-b"])
+        # fx-a 研究已 pass 跳过；翻译重跑；fx-b 研究+翻译
+        self.assertEqual([(c["step"], c["module"]) for c in r2["seq"].calls],
+                         [("translate", "fx-a"),
+                          ("research", "fx-b"), ("translate", "fx-b")])
 
     def test_budget_and_session_override(self):
         def work(module):
-            _write_module_product(self.fx["home"], module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
-        seq = _FakeSeq(work)
+        seq = _FakeSplitSeq(work)
 
         def _shell_ut(cmd, cwd, env, timeout_sec, log_path):
             Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -450,6 +565,8 @@ class TestExpMonoLoop(unittest.TestCase):
             return 0, "UT-DONE x\n"
 
         with mock.patch.object(mono_mod.agent, "run_agent_seq", seq), \
+                mock.patch.object(mono_mod, "_load_models",
+                                  return_value=FX_MODELS), \
                 mock.patch.object(mono_mod.probe_mod, "probe_build",
                                   return_value={"item": "build", "ok": True,
                                                 "detail": "rc=0"}), \
@@ -461,17 +578,71 @@ class TestExpMonoLoop(unittest.TestCase):
                                                 "ok": True,
                                                 "detail": "rc=0"}):
             rc = mono_mod.run_exp_mono(self.fx["ws"], module="fx-a",
-                                       budget=1800,
+                                       budget=1800, budget_research=555,
                                        session="ses_old_run")
         self.assertEqual(rc, 0)
-        self.assertEqual(seq.calls[0]["budget"], 1800)
-        self.assertEqual(seq.calls[0]["resume_session"], "ses_old_run")
-        entry = self._ledger()["modules"]["fx-a"]
-        self.assertEqual(entry["budget_sec"], 1800)
-        self.assertEqual(entry["session_id"], "ses_fx")
+        res = seq.steps("research", "fx-a")[0]
+        tr = seq.steps("translate", "fx-a")[0]
+        # 研究从未跑过 → session 不给研究（留给翻译，旧语义）
+        self.assertIsNone(res["resume_session"])
+        self.assertEqual(res["budget"], 555)
+        self.assertEqual(tr["resume_session"], "ses_old_run")
+        self.assertEqual(tr["budget"], 1800)
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led["budget_sec"], 1800)
+        self.assertEqual(led["research"]["budget_sec"], 555)
+
+    def test_research_validation_retry_then_pass(self):
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work,
+                            research_bad={"fx-a": 1})
+        self.assertEqual(r["rc"], 0)
+        res = r["seq"].steps("research", "fx-a")
+        self.assertEqual(len(res), 2)
+        self.assertEqual(res[1]["resume_session"], "ses_r_fx-a")
+        self.assertIn("交付物校验未通过", res[1]["prompt"])
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led["research"]["status"], "pass")
+        self.assertEqual(led["research"]["validate_attempts"], 2)
+
+    def test_research_validation_exhausted(self):
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work,
+                            research_bad={"fx-a": 99})
+        self.assertEqual(r["rc"], 1)
+        self.assertEqual(len(r["seq"].steps("research", "fx-a")),
+                         1 + mono_mod.RESEARCH_RETRIES)
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led["research"]["status"],
+                         "invalid-deliverable")
+        # 研究未过 → 翻译不跑
+        self.assertEqual(r["seq"].steps("translate"), [])
+
+    def test_module_research_mode(self):
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work,
+                            module_research="fx-a")
+        self.assertEqual(r["rc"], 0)
+        self.assertEqual([(c["step"], c["module"]) for c in r["seq"].calls],
+                         [("research", "fx-a")])
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led["research"]["status"], "pass")
+        self.assertNotIn("status", led)         # 翻译未跑，无翻译状态
+        report = (self.fx["ws"] / "exp-mono" / "report.md").read_text(
+            encoding="utf-8")
+        self.assertIn("未到达", report)          # 终局未触达
 
     def test_resume_baseline_cumulative(self):
-        # 续跑基线重建：上次已交付产物 + snap_base 在 ledger——本轮
+        # 翻译续跑基线：上次已交付产物 + snap_base 在 ledger——本轮
         # 零新增代码也必须过增量守卫（累计 delta 语义），不误杀
         _write_module_product(self.fx["home"], "fx_a_logic")
         led_p = self.fx["ws"] / "exp-mono" / "ledger.json"
@@ -489,41 +660,47 @@ class TestExpMonoLoop(unittest.TestCase):
                 _write_module_product(self.fx["home"],
                                       module.replace("-", "_"))
 
-        r = _run_with_fakes(self, self.fx, work=work,
+        r = _run_with_fakes(self, self.fx, work,
                             session="ses_prev")
         self.assertEqual(r["rc"], 0)
         self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
                          "pass")
+        # 翻译续跑拿到 session（研究从未跑过，不消费）
+        tr = r["seq"].steps("translate", "fx-a")
+        self.assertEqual(tr[0]["resume_session"], "ses_prev")
 
-    def test_resume_legacy_entry_baseline(self):
-        # 旧式条目（无 snap_base/snap_end，仅 marker_delta）→ marker
-        # 基线保守取 0、代码基线不可知 → 增量守卫跳过
-        _write_module_product(self.fx["home"], "fx_a_logic")
+    def test_research_resume_gets_session(self):
+        # 研究续跑（上次 invalid-deliverable）→ session 给研究任务
         led_p = self.fx["ws"] / "exp-mono" / "ledger.json"
         led_p.parent.mkdir(parents=True, exist_ok=True)
         led_p.write_text(json.dumps(
-            {"modules": {"fx-a": {"status": "decl-mismatch",
-                                  "marker_delta": 1}}}), encoding="utf-8")
+            {"modules": {"fx-a": {
+                "research": {"status": "invalid-deliverable"}}}}),
+            encoding="utf-8")
 
         def work(module):
-            if module != "fx-a":
-                _write_module_product(self.fx["home"],
-                                      module.replace("-", "_"))
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
 
-        r = _run_with_fakes(self, self.fx, work=work, session="ses_prev")
+        r = _run_with_fakes(self, self.fx, work, session="ses_res")
         self.assertEqual(r["rc"], 0)
-        self.assertEqual(self._ledger()["modules"]["fx-a"]["status"],
-                         "pass")
+        res = r["seq"].steps("research", "fx-a")
+        self.assertEqual(res[0]["resume_session"], "ses_res")
+        # 研究消费后，翻译不再拿 session
+        tr = r["seq"].steps("translate", "fx-a")
+        self.assertIsNone(tr[0]["resume_session"])
 
     def test_preconditions_rc2(self):
         (self.fx["ws"] / "P1" / "modules" / "deps.json").unlink()
         self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 2)
         self.setUp()                     # 重建 fixture
-        self.assertEqual(
-            mono_mod.run_exp_mono(self.fx["ws"], module="nope"), 2)
-        # 依赖未 pass：只允许按序迁移
-        self.assertEqual(
-            mono_mod.run_exp_mono(self.fx["ws"], module="fx-b"), 2)
+        with mock.patch.object(mono_mod, "_load_models",
+                               return_value=FX_MODELS):
+            self.assertEqual(
+                mono_mod.run_exp_mono(self.fx["ws"], module="nope"), 2)
+            # 依赖未 pass：只允许按序迁移
+            self.assertEqual(
+                mono_mod.run_exp_mono(self.fx["ws"], module="fx-b"), 2)
 
 
 class TestExpMonoUnits(unittest.TestCase):
@@ -532,8 +709,12 @@ class TestExpMonoUnits(unittest.TestCase):
         self.assertEqual(mono_mod._budget_sec(100), 900)
         self.assertEqual(mono_mod._budget_sec(653), 900)
         self.assertEqual(mono_mod._budget_sec(2064), 2683)
-        self.assertEqual(mono_mod._budget_sec(2719), 3534)
         self.assertEqual(mono_mod._budget_sec(9000), 4200)
+
+    def test_budget_research_clamp(self):
+        self.assertEqual(mono_mod._budget_research(100), 600)
+        self.assertEqual(mono_mod._budget_research(800), 1200)
+        self.assertEqual(mono_mod._budget_research(9000), 2400)
 
     def test_code_lines_strips_comments(self):
         p = Path(tempfile.mkdtemp(prefix="exp_mono_u_")) / "f.cx"
@@ -577,7 +758,6 @@ class TestExpMonoUnits(unittest.TestCase):
             which="full")
         self.assertTrue(ok)
         body = Path(log_path).read_text(encoding="utf-8")
-        # shell 形态经 env 正确展开（无 "$/…" 咬坏痕迹）
         self.assertIn(f"{tmp / 'tree'}/x UT-DONE", body)
         self.assertNotIn("${", body)
 

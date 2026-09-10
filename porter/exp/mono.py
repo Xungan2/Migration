@@ -1,22 +1,29 @@
-"""mono.py — exp-mono：单体模块迁移 loop（实验子命令，直连 P1 结尾）。
+"""mono.py — exp-mono：模块迁移 loop（实验子命令，直连 P1 结尾）。
 
-形态：一个迁移者 agent 一次迭代迁一个模块（研究+翻译一体）；不做
-映射/探针/判据等中间层——这正是实验点（验证单体 agent 形态）。平台
-事实全部来自工作区数据面（runner.json / scaffold manifest /
-module.json），本文件零目标 OS / 目标语言假设。
+形态（2026-09-10 拆分改造）：每模块两段任务——**研究者 agent**（只读
+目标树，产出结构化研究交付物）+ **翻译者 agent**（消费交付物，写码+
+执行式测试，四段复合 gate 验证）。研究/翻译各自独立 session、独立
+预算、独立模型（config.models.reasoning / coding）。平台事实全部来自
+工作区数据面（runner.json / scaffold manifest / module.json），本文件
+零目标 OS / 目标语言假设。
 
 每模块流程：
-  1. 幂等：exp-mono/ledger.json 里该模块 pass → 跳过
-  2. prompt = SKILL + 模块上下文（职责/规格文件/依赖模块已迁产物）
-             + 迁移词典现内容（接力）+ 泊车记录 + Linux 参考树
-  3. run_agent_seq：同 session 多轮；静态段 = 三段复合 gate
-     （① 产物守卫 ② 构建 ③ 单测），便宜先行失败短路，结果回灌
-  4. done + 三段绿 → ledger=pass + 目标树按白名单 commit；
+  1. 幂等：ledger 里该模块 research.status / status 为 pass → 分别跳过
+  2. 研究任务：prompt = SKILL + 规格文件 + 词典/契约登记表/泊车现文 +
+     依赖产物清单；产出 exp-mono/research/<module>.md（正文+JSON 块）；
+     编排器浅校验（词表/必填/证据路径警告）不过 → 同 session 回灌修
+     （≤2 次）；过 → 机器收割（mappings→词典 / contracts→登记表 /
+     parking→泊车）
+  3. 翻译任务：prompt = SKILL + 规格 + 交付物全文 + 契约登记表 + 泊车 +
+     依赖产物；run_agent_seq 同 session 多轮；静态段 = 四段复合 gate
+     （① 产物守卫 ② 构建 ③ 启动 ④ 单测），修复段预算下限保护 +
+     停滞元反馈；done 后声明面核对，不过 → 同 session 自动重试 ≤2
+  4. gate 全绿 + 记账完备 → ledger=pass + 目标树按白名单 commit；
      blocked / 失败 / 预算耗尽 → 停车 rc 1（ledger 断点续）
 
-预算（秒）= clamp(900, 模块源行数×1.3, 4200)。
-终局（order 全 pass）：全量单测（阻断）+ 启动冒烟（非阻断留档）
-+ report.md。
+预算（秒）：研究 = clamp(600, 行数×1.5, 2400)；翻译 = clamp(900,
+行数×1.3, 4200)（CLI 可覆盖）。终局（order 全 pass）：全量单测（阻断）
++ 启动冒烟（非阻断留档）+ report.md。
 """
 
 from __future__ import annotations
@@ -34,8 +41,13 @@ from ..common import scope as _scope
 from ..env import probe as probe_mod
 from .. import log as _log
 
-SKILL_NAME = "EXP-mono-migrate"
+SKILL_RESEARCH = "EXP-research"
+SKILL_TRANSLATE = "EXP-mono-migrate"
 GATE_DESC = "四段复合静态检查（① 产物守卫 ② 构建 ③ 启动 ④ 单测）"
+FIX_FLOOR_SEC = 300          # 修复段预算下限（一次性宽限，防主段吃光）
+STALL_META_ROUNDS = 1        # 停滞元反馈轮数（同签名连败时的换思路警告）
+DECL_RETRIES = 2             # 声明面核对不过的同 session 自动重试上限
+RESEARCH_RETRIES = 2         # 交付物校验不过的同 session 回灌上限
 _COMMENT_PREFIXES = ("//", "/*", "*", "*/", "#")
 
 
@@ -49,8 +61,13 @@ def _read_json(path: Path) -> dict | None:
 
 
 def _budget_sec(loc: int) -> int:
-    """行数驱动的 agent 预算（静态段时长在预算之外）。"""
+    """翻译任务预算（静态段时长在预算之外）。"""
     return max(900, min(4200, int(loc * 1.3)))
+
+
+def _budget_research(loc: int) -> int:
+    """研究任务预算（只读研究，读多写少）。"""
+    return max(600, min(2400, int(loc * 1.5)))
 
 
 def _declaration_problems(parsed: dict, marker_delta: int | None,
@@ -193,6 +210,213 @@ def _shell_ut(cmd: str, cwd: Path, env: dict, timeout_sec: int,
     return rc, out
 
 
+# ---------- 研究交付物（research deliverable）----------
+
+VERDICTS = ("equivalent", "adapt", "helper", "bypass", "parked")
+REQUIRED_SECTIONS = ("适配架构与整合方案", "可测面评估")
+
+
+def _split_deliverable(text: str) -> tuple[str, dict | None]:
+    """分离研究交付物正文与结构化 JSON 块（仿 scope.split_strategy_output）。
+
+    规则：取最后一个能解析为 dict 且含 "module" 键的 ```json 围栏块
+    作为结构化部分抽出；无合规块 → (原文, None)。
+    """
+    pat = re.compile(r"```json\s*\n(.*?)```", re.DOTALL)
+    for m in reversed(list(pat.finditer(text))):
+        try:
+            parsed = json.loads(m.group(1))
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get("module"), str):
+            md = pat.sub("", text).rstrip() + "\n"
+            return md, parsed
+    return text, None
+
+
+def _path_token_hits(tok: str, roots: list[Path]) -> bool:
+    """证据 token 是否解析到真实文件：剥 :line/-range 后缀后按序试根。
+
+    绝对路径直接判；相对路径依次拼 roots。解析不到不算错误（调用方
+    只收集警告）——研究者可能引用带上下文的复合描述。
+    """
+    cand = re.split(r":[0-9][0-9,\-]*", tok.strip(), 1)[0]
+    cand = cand.strip("`'\"，,;；")
+    if not cand or "/" not in cand:
+        return False
+    p = Path(cand)
+    if p.is_absolute():
+        return p.is_file()
+    return any((root / cand).is_file() for root in roots)
+
+
+def _validate_research(text: str, module: str, target_os, driver_home_rel,
+                       ws) -> dict:
+    """研究交付物浅校验：结构化骨架完备 + 词表合法；证据路径仅警告。
+
+    原则（与声明面核对一致）：校验一致性不校验语义。problems 非空 =
+    打回重修；warnings 只记录（进 ledger 供人审）。
+    """
+    problems: list[str] = []
+    warnings: list[str] = []
+    md, data = _split_deliverable(text)
+    if data is None:
+        return {"ok": False,
+                "problems": ['交付物缺少可解析的 ```json 块'
+                             '（须为含 "module" 键的 dict 对象）'],
+                "warnings": [], "data": None, "prose": md}
+    if data.get("module") != module:
+        problems.append(f"module 字段 {data.get('module')!r} ≠ 本模块 "
+                        f"{module!r}")
+    # 叙事必写节（硬性要求 3）：标题字面存在即可，无内容要求——
+    # 纯数据模块允许写"无特殊决策/直译"，但不许略节。
+    for sec in REQUIRED_SECTIONS:
+        if sec not in md:
+            problems.append(f"叙事缺必写节标题：「{sec}」"
+                            "（无实际内容时明确写'无特殊决策/直译'）")
+    roots = [Path(target_os), Path(target_os) / driver_home_rel, Path(ws)]
+
+    def _entries(key: str, required: tuple[str, ...]) -> list[dict]:
+        v = data.get(key)
+        if not isinstance(v, list):
+            problems.append(f"缺 {key} 数组（无内容也须给空数组）")
+            return []
+        out: list[dict] = []
+        for i, e in enumerate(v):
+            if not isinstance(e, dict):
+                problems.append(f"{key}[{i}] 须为对象")
+                continue
+            missing = [f for f in required
+                       if not (isinstance(e.get(f), str) and e[f].strip())]
+            if missing:
+                problems.append(f"{key}[{i}] 缺必填字段或为空："
+                                + "、".join(missing))
+                continue
+            out.append(e)
+        return out
+
+    mappings = _entries("mappings", ("symbol", "verdict", "usage",
+                                     "evidence"))
+    contracts = _entries("contracts", ("name", "signature", "anchor"))
+    _entries("prunes", ("item", "reason"))
+    parking = _entries("parking", ("item", "missing", "handling"))
+    _entries("read_list", ("path",))
+    _entries("negatives", ("claim", "evidence"))
+    _entries("open_questions", ("question",))
+    if not problems and not mappings:
+        problems.append("mappings 为空——本模块至少须核实并裁定一个"
+                        "源侧 API（纯数据模块也必然触碰接口）")
+    for i, m in enumerate(mappings):
+        if m["verdict"].strip() not in VERDICTS:
+            problems.append(f"mappings[{i}].verdict {m['verdict']!r} 不在"
+                            f"词表 {VERDICTS}")
+
+    def _warn_unresolved(kind: str, idx: int, val: str) -> None:
+        toks = [t for t in re.split(r"[\s+；;，,]+", val) if "/" in t]
+        if toks and not any(_path_token_hits(t, roots) for t in toks):
+            warnings.append(f"{kind}[{idx}] 证据路径未能解析到真实文件："
+                            f"{val[:80]}")
+
+    for i, m in enumerate(mappings):
+        _warn_unresolved("mappings", i, m["evidence"])
+    for i, c in enumerate(contracts):
+        _warn_unresolved("contracts", i, c["anchor"])
+    _ = parking            # 计数交收割器；此处仅形状校验
+    return {"ok": not problems, "problems": problems,
+            "warnings": warnings, "data": data, "prose": md}
+
+
+def _section_exists(text: str, section: str) -> bool:
+    return any(ln.strip() == section for ln in text.splitlines())
+
+
+def _harvest_research(exp_dir: Path, module: str, data: dict) -> dict:
+    """收割研究交付物的结构化部分（机器排版、幂等、零语义加工）。
+
+    - mappings → mapping-notes.md（模块节追加）
+    - contracts → contracts.md（契约登记表，不存在则建）
+    - parking → parking.md（`<module> 研究轮` 节追加）
+    幂等判据 = 模块节标题行已存在 → 该文件跳过（防重复追加）。
+    """
+    counts = {"dictionary": 0, "contracts": 0, "parking": 0}
+    section = f"## {module}"
+
+    def _append(path: Path, header: str, lines: list[str],
+                init: str = "") -> bool:
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="replace")
+        else:
+            text = init
+        if _section_exists(text, header):
+            return False
+        path.write_text(text.rstrip() + "\n\n" + header + "\n"
+                        + "\n".join(lines) + "\n", encoding="utf-8")
+        return True
+
+    lines = []
+    for m in data.get("mappings") or []:
+        note = str(m.get("notes") or "").strip()
+        tail = f"（注意：{note}）" if note else ""
+        lines.append(f"- {m['symbol']} | {m['verdict']} | {m['usage']}"
+                     f" | {m['evidence']}{tail}")
+    if lines and _append(exp_dir / "mapping-notes.md", section, lines):
+        counts["dictionary"] = len(lines)
+
+    lines = []
+    for c in data.get("contracts") or []:
+        consumers = str(c.get("consumers") or "").strip() or "—"
+        conflict = str(c.get("conflicts_with") or "").strip() or "无"
+        lines.append(f"- **{c['name']}**：`{c['signature']}`"
+                     f"（锚 {c['anchor']}；消费方 {consumers}；"
+                     f"冲突 {conflict}）")
+    if lines and _append(exp_dir / "contracts.md", section, lines,
+                         init="# 契约登记表\n\n"
+                              "> 跨模块共享的类型/钩子签名——研究任务提案、机器"
+                              "收割追加。后继模块研究前必查：新契约若与既有条目"
+                              "冲突，在交付物 conflicts_with 显式标记。\n"):
+        counts["contracts"] = len(lines)
+
+    lines = []
+    for e in data.get("parking") or []:
+        refill = str(e.get("refill_when") or "").strip() or "待定"
+        lines.append(f"- **{e['item']}**：缺 {e['missing']}；临时处置："
+                     f"{e['handling']}；回填条件：{refill}")
+    if lines and _append(exp_dir / "parking.md",
+                         f"## {module} 研究轮", lines):
+        counts["parking"] = len(lines)
+    return counts
+
+
+def _load_models(config_path=None) -> tuple[str | None, str | None]:
+    """读取 config 的 models.reasoning / models.coding（exp-mono 双模型）。
+
+    返回 (reasoning, coding) 或 (None, 错误消息)。校验：两键存在非空、
+    含 provider 前缀（'/'——裸模型名会在 provider 侧报神秘 server error，
+    此处前置拦截）。两值允许一致。旧 "model" 键与此无关（其他流程用）。
+    """
+    path = (Path(config_path) if config_path
+            else agent.TOOL_ROOT / "porter" / "config.json")
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as ex:
+        return None, f"config 不可读（{path}）：{ex!r}"
+    models = cfg.get("models") if isinstance(cfg, dict) else None
+    if not isinstance(models, dict):
+        return None, ("config 缺 models 配置块——exp-mono 需要 "
+                      "models.reasoning（研究）与 models.coding（翻译）")
+    out = []
+    for key in ("reasoning", "coding"):
+        v = models.get(key)
+        if not (isinstance(v, str) and v.strip()):
+            return None, (f"config.models.{key} 缺失或为空——请在 "
+                          "config.json 配置后重跑")
+        if "/" not in v:
+            return None, (f"config.models.{key} = {v!r} 缺 provider 前缀"
+                          "（须形如 provider/model）")
+        out.append(v.strip())
+    return out[0], out[1]
+
+
 # ---------- 三段复合 gate ----------
 
 def _guard_products(home: Path, driver_home_rel: str, manifest: dict,
@@ -312,13 +536,13 @@ def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
             return False, (f"② 构建 FAIL：{b.get('detail', '')}"
                            f"（全文：{build_log}）")
         # ③ 启动（阻断）：带上目标树当前全部已迁移代码（每模块 pass 即
-        # commit），全树构建后 QEMU 启动自检。比单测便宜，先行短路。
+        # commit），全树构建后启动自检。比单测便宜，先行短路。
         boot = probe_mod.probe_boot(exp_dir, target_os, runner,
                                     label=f"exp_{module}_boot")
         if not boot.get("ok"):
             boot_log = exp_dir / "logs" / f"T3_exp_{module}_boot.log"
             return False, (f"③ 启动 FAIL：{boot.get('detail', '')}"
-                           f"（全文：{boot_log}；排 panic 看 qemu-serial.log）")
+                           f"（全文：{boot_log}；排 panic 看启动串口日志）")
         ut_ok, ut_detail, _lp = _run_ut(exp_dir, target_os, runner,
                                         driver_home_rel,
                                         label=f"exp_{module}_ut")
@@ -333,12 +557,79 @@ def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
 
 # ---------- prompt 组装 ----------
 
-def _module_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
-                   spec_files: list[tuple[Path, int]], ledger: dict,
-                   manifest: dict, proj: dict, target_os: Path,
-                   driver_home_rel: str, deps: list[str],
-                   notes_text: str, parking_text: str) -> str:
-    skill = agent.load_skill(SKILL_NAME)
+def _dep_lines(ledger: dict, deps: list[str]) -> list[str]:
+    lines = []
+    for d in deps:
+        entry = (ledger.get("modules") or {}).get(d) or {}
+        files = entry.get("files") or []
+        lines.append(f"- {d}：" + ("、".join(f"`{f}`" for f in files)
+                                   if files else "（无登记产物清单）"))
+    return lines
+
+
+def _research_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
+                     spec_files: list[tuple[Path, int]], ledger: dict,
+                     manifest: dict, proj: dict, target_os: Path,
+                     driver_home_rel: str, deps: list[str],
+                     notes_text: str, parking_text: str,
+                     registry_text: str, deliverable_path: Path) -> str:
+    skill = agent.load_skill(SKILL_RESEARCH)
+    home = target_os / driver_home_rel
+    ext = manifest.get("source_ext")
+    integ = manifest.get("integration") or {}
+    ts = manifest.get("test_substrate") or {}
+    marker = ts.get("marker") or "（数据面未提供）"
+    how = ts.get("how") or "（数据面未提供惯例说明）"
+    reg_lines = []
+    if integ.get("list_file") and integ.get("entry_template"):
+        reg_lines = [
+            f"- 登记约定：清单文件 `{home / integ['list_file']}`；登记行"
+            f"模板 `{integ['entry_template']}`（`{{stem}}` = 文件名去"
+            "扩展名）——构建入口事实，整合方案须与之相容"]
+    existing = "、".join(f"`{p.name}`"
+                         for p in _driver_files(home, ext)) or "（空）"
+    dep_lines = _dep_lines(ledger, deps)
+    spec_listing = "\n".join(f"  - `{p}`（{n} 行）" for p, n in spec_files)
+    return (f"{skill}\n\n---\n\n## 背景数据（平台事实，以数据面为准）\n"
+            f"- 目标 OS 源码树：`{target_os}` = 你的工作目录"
+            "（**只读研究——禁止改动目标树任何文件**）\n"
+            f"- 驱动落点 driver_home（供检索先例，不写入）：`{home}`\n"
+            f"- driver_home 现有文件（先例与词汇的第一现场）："
+            f"{existing}\n"
+            + "\n".join(reg_lines)
+            + ("\n" if reg_lines else "")
+            + f"- 测试基质：标记 `{marker}`；惯例：{how}"
+            "——可测面评估的依据\n"
+            f"- Linux 参考源树（只读规格）：`{proj.get('linux_driver')}`\n"
+            f"- 迁移词典（前序研究的裁定，先读再用——你**不直接写词典**，"
+            f"裁定写进交付物由编排器收割）：\n\n"
+            f"{notes_text.strip() or '（空——你是第一位研究者）'}\n\n"
+            f"- 契约登记表（**提案前必查**——冲突须在 conflicts_with "
+            f"显式标记）：\n\n"
+            f"{registry_text.strip() or '（空——尚无契约登记）'}\n\n"
+            f"- 泊车记录（既有平台能力缺口裁定）：\n\n"
+            f"{parking_text.strip() or '（空）'}\n\n"
+            f"## 本模块任务\n"
+            f"- 模块：`{module}` —— {mod_json.get('function', '')}\n"
+            f"- 模块规格文件（逐个精读）：\n{spec_listing}\n"
+            f"- 依赖模块已迁产物（研究其对外接口面，理解既有词汇与"
+            "契约）：\n"
+            + ("\n".join(dep_lines) if dep_lines else "  （无依赖模块）")
+            + f"\n- 研究交付物写入路径（唯一允许的写入）："
+            f"`{deliverable_path}`\n\n"
+            f"## 任务\n按 SKILL 纪律完成本模块研究，把交付物（一个文件："
+            "叙事正文 + 末尾 JSON 围栏块）写入上述路径；完成时按运行协议"
+            "输出 done JSON（status / deliverable=交付物绝对路径 / notes"
+            " 三字段）。")
+
+
+def _translate_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
+                      spec_files: list[tuple[Path, int]], ledger: dict,
+                      manifest: dict, proj: dict, target_os: Path,
+                      driver_home_rel: str, deps: list[str],
+                      parking_text: str, registry_text: str,
+                      deliverable_text: str) -> str:
+    skill = agent.load_skill(SKILL_TRANSLATE)
     home = target_os / driver_home_rel
     ext = manifest.get("source_ext")
     integ = manifest.get("integration") or {}
@@ -351,30 +642,29 @@ def _module_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
             f"- 构建单元登记：清单文件 `{home / integ['list_file']}`；"
             f"登记行模板 `{integ['entry_template']}`（`{{stem}}` = 文件名"
             "去扩展名；新文件必须按模板登记，否则不进入构建）"]
-    dep_lines = []
-    for d in deps:
-        entry = (ledger.get("modules") or {}).get(d) or {}
-        files = entry.get("files") or []
-        dep_lines.append(f"- {d}：" + ("、".join(f"`{f}`" for f in files)
-                                       if files else "（无登记产物清单）"))
+    wiring = [str(p) for p in (manifest.get("commit_paths") or [])]
+    dep_lines = _dep_lines(ledger, deps)
     spec_listing = "\n".join(f"  - `{p}`（{n} 行）"
                              for p, n in spec_files)
     existing = "、".join(f"`{p.name}`"
                          for p in _driver_files(home, ext)) or "（空）"
     return (f"{skill}\n\n---\n\n## 背景数据（平台事实，以数据面为准）\n"
             f"- 目标 OS 源码树：`{target_os}` = 你的工作目录\n"
-            f"- 驱动落点 driver_home：`{home}`"
+            f"- 驱动落点 driver_home：`{home}"
             f"（相对目标树 `{driver_home_rel}`）\n"
             f"- 源文件扩展名：`{ext}`（登记与测试标记扫描按此过滤）\n"
+            "- 接线白名单（driver_home 之外允许改动的全部文件，"
+            "无则不得越界改动）："
+            + ("、".join(f"`{p}`" for p in wiring) or "（无）") + "\n"
             + "\n".join(reg_lines)
             + ("\n" if reg_lines else "")
             + f"- Linux 参考源树（只读规格）：`{proj.get('linux_driver')}`\n"
-            f"- 迁移词典（接力，先读再增补）："
-            f"`{exp_dir / 'mapping-notes.md'}` 现内容：\n\n"
-            f"{notes_text.strip() or '（空——你是第一位迁移者，从零建词典）'}\n\n"
-            f"- 泊车记录（需平台侧能力，交人工处理）："
-            f"`{exp_dir / 'parking.md'}` 现内容：\n\n"
+            "- 契约登记表（跨模块共享签名，全局约束）：\n\n"
+            f"{registry_text.strip() or '（空）'}\n\n"
+            "- 泊车记录（需平台侧能力，交人工处理；既有泊车处置必须遵守）：\n\n"
             f"{parking_text.strip() or '（空）'}\n\n"
+            f"## 本模块研究交付物（最高优先级输入，先逐节消费再动笔）\n\n"
+            f"{deliverable_text.strip() or '（空——研究交付物缺失，兜底研究权自研并上报）'}\n\n"
             f"## 本模块任务\n"
             f"- 模块：`{module}` —— {mod_json.get('function', '')}\n"
             f"- 模块规格文件（逐个精读后翻译）：\n{spec_listing}\n"
@@ -396,11 +686,13 @@ def _module_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
             "  - `untested`：`[{\"fn\",\"reason\"}]`——迁移了但不测的"
             "单元与理由（trivial 透传/平台绑定/纯声明）\n"
             "- 硬要求 = 记账完备（migrated ⊆ tests ∪ untested，同一单元"
-            "不双挂）+ 声明的每个测试真实存在 + 执行式优先；数量本身"
-            "不是指标，覆盖台账交人审\n\n"
-            f"## 任务\n按 SKILL 纪律把本模块规格翻译进 driver_home"
-            "（新文件名贴近模块职责，登记后纳入构建）；构建与单测由外部"
-            "执行——需要验证时按运行协议请求静态段；完成时输出 done JSON。")
+            "不双挂）+ 声明的每个测试真实存在（编排器按标记计数核对）；"
+            "执行式优先与期望值源行号锚是质量要求（SKILL 纪律四），"
+            "数量本身不是指标，覆盖台账交人审\n\n"
+            f"## 任务\n按 SKILL 纪律、以研究交付物为准把本模块规格翻译进"
+            " driver_home（新文件名贴近模块职责，登记后纳入构建）；构建与"
+            "单测由外部执行——需要验证时按运行协议请求静态段；完成时输出"
+            " done JSON。")
 
 
 # ---------- ledger / 报告 ----------
@@ -421,25 +713,33 @@ def _save_ledger(exp_dir: Path, ledger: dict) -> None:
 def _write_report(ws: Path, exp_dir: Path, ledger: dict, order: list[str],
                   proj: dict, manifest: dict,
                   terminal: dict | None = None) -> None:
-    rows = ["| 模块 | 状态 | 源行数 | 预算s | 轮数 | agent时长s | 墙钟s | "
-            "声明单元 | 已测 | 豁免 | 标记增量 | 词典增量行 | commit |",
+    rows = ["| 模块 | 状态 | 研究 | 源行数 | 预算s | 轮数 | agent时长s | "
+            "墙钟s | 声明单元 | 已测 | 豁免 | 标记增量 | commit |",
             "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     detail = []
     for m in order:
         e = (ledger.get("modules") or {}).get(m) or {}
+        res = e.get("research") or {}
         commit = e.get("commit")
         ch = commit[0][:10] if isinstance(commit, list) and commit else \
             (str(commit)[:10] if commit else "—")
         migrated = e.get("migrated_functions") or []
         tests = e.get("tests") or []
         untested = e.get("untested") or []
+        research_cell = "—"
+        if res:
+            hv = res.get("harvest") or {}
+            research_cell = (f"{res.get('status', '未跑')}"
+                             f"（{res.get('agent_sec', '—')}s，词典+"
+                             f"{hv.get('dictionary', 0)}/契约+"
+                             f"{hv.get('contracts', 0)}）")
         rows.append(
-            f"| {m} | {e.get('status', '未跑')} | {e.get('loc', '—')} | "
+            f"| {m} | {e.get('status', '未跑')} | {research_cell} | "
+            f"{e.get('loc', '—')} | "
             f"{e.get('budget_sec', '—')} | {e.get('rounds', '—')} | "
             f"{e.get('agent_sec', '—')} | {e.get('wall_sec', '—')} | "
             f"{len(migrated)} | {len(tests)} | {len(untested)} | "
-            f"{e.get('marker_delta', '—')} | {e.get('dict_delta', '—')} | "
-            f"{ch} |")
+            f"{e.get('marker_delta', '—')} | {ch} |")
         if e.get("status") == "pass" or tests or untested:
             detail.append(f"### {m}（{e.get('status', '—')}）\n")
             if migrated:
@@ -482,12 +782,128 @@ def _write_report(ws: Path, exp_dir: Path, ledger: dict, order: list[str],
     (exp_dir / "report.md").write_text(body, encoding="utf-8")
 
 
-# ---------- 单模块执行 ----------
+# ---------- 任务执行 ----------
 
-def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
-                runner: dict, manifest: dict, deps: dict,
-                ledger: dict, budget_override: int | None = None,
-                session_override: str | None = None) -> int:
+def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
+                  manifest: dict, deps: dict, ledger: dict,
+                  budget_override: int | None = None,
+                  session_override: str | None = None,
+                  model: str | None = None) -> int:
+    mdir = ws / "P1" / "modules" / module
+    mod_json = _read_json(mdir / "module.json") or {}
+    spec_files = sorted(p for p in mdir.iterdir()
+                        if p.is_file() and p.suffix in (".c", ".h"))
+    loc = sum(_text_lines(p) for p in spec_files)
+    target_os = Path(proj["target_os"])
+    driver_home_rel = str(manifest["driver_home"])
+    research_dir = exp_dir / "research"
+    research_dir.mkdir(parents=True, exist_ok=True)
+    deliverable = research_dir / f"{module}.md"
+    budget = int(budget_override) if budget_override else _budget_research(loc)
+
+    def _read(name: str) -> str:
+        return (exp_dir / name).read_text(encoding="utf-8",
+                                          errors="replace")
+
+    prompt = _research_prompt(
+        ws, exp_dir, module, mod_json,
+        [(p, _text_lines(p)) for p in spec_files], ledger, manifest, proj,
+        target_os, driver_home_rel, deps.get(module) or [],
+        _read("mapping-notes.md"), _read("parking.md"),
+        _read("contracts.md") if (exp_dir / "contracts.md").exists() else "",
+        deliverable)
+    _log.console_line(f"[porter] exp-mono: 研究模块 {module}"
+                      f"（源 {loc} 行，预算 {budget}s）")
+    t0 = time.time()
+    session = session_override
+    attempts = 0
+    outcome: dict = {}
+    verdict: dict | None = None
+    problems: list[str] = []
+    while True:
+        attempts += 1
+        outcome = agent.run_agent_seq(
+            prompt, workdir=target_os,
+            log_stem=str(exp_dir / "logs" / f"RES_{module}"),
+            static=None,
+            gen_schema={"status": "str", "deliverable": "str",
+                        "notes": "str"},
+            agent_budget_sec=budget,
+            model=model,
+            resume_session=session,
+            task={"phase": "exp-mono", "module": module, "step": "research",
+                  "task_id": f"exp-mono.research.{module}"})
+        session = outcome.get("session_id") or session
+        parsed = outcome.get("parsed") or {}
+        if outcome.get("status") != "done" or parsed.get("status") == "blocked":
+            break
+        if deliverable.exists():
+            verdict = _validate_research(
+                deliverable.read_text(encoding="utf-8", errors="replace"),
+                module, target_os, driver_home_rel, ws)
+            problems = verdict["problems"]
+        else:
+            problems = [f"交付物文件不存在：{deliverable}"]
+        if not problems:
+            break
+        if attempts > RESEARCH_RETRIES:
+            break
+        _log.console_line(f"[porter] exp-mono: {module} 研究交付物校验"
+                          f"未过（第 {attempts} 次）——同 session 回灌修")
+        prompt = ("## 研究交付物校验未通过\n"
+                  + "\n".join(f"- {p}" for p in problems)
+                  + f"\n请修复交付物文件 `{deliverable}`（只修上述问题，"
+                  "不要重做已完成的研究），然后按运行协议重新输出 done "
+                  "JSON。")
+    wall = round(time.time() - t0, 1)
+    parsed = outcome.get("parsed") or {}
+    blocked = parsed.get("status") == "blocked"
+    ok = verdict is not None and verdict["ok"] \
+        and outcome.get("status") == "done"
+    harvest: dict = {}
+    if ok and verdict:
+        harvest = _harvest_research(exp_dir, module, verdict["data"])
+    entry = ledger.setdefault("modules", {}).setdefault(module, {})
+    entry["research"] = {
+        "status": "pass" if ok else ("blocked" if blocked else (
+            "invalid-deliverable"
+            if outcome.get("status") == "done" and problems
+            else outcome.get("status"))),
+        "loc": loc, "budget_sec": budget,
+        "rounds": len(outcome.get("rounds") or []),
+        "agent_sec": outcome.get("total_agent_sec"),
+        "wall_sec": wall,
+        "deliverable": str(deliverable),
+        "validate_attempts": attempts,
+        "warnings": (verdict or {}).get("warnings") or [],
+        "problems": problems if not ok else [],
+        "harvest": harvest,
+        "session_id": session,
+        "seq_status": outcome.get("status"),
+        "time": datetime.now().isoformat(timespec="seconds")}
+    _save_ledger(exp_dir, ledger)
+    if ok:
+        _log.console_line(f"[porter] exp-mono: {module} 研究 PASS"
+                          f"（agent {entry['research']['agent_sec']}s，"
+                          f"墙钟 {wall}s，收割 词典+{harvest.get('dictionary', 0)}"
+                          f"/契约+{harvest.get('contracts', 0)}"
+                          f"/泊车+{harvest.get('parking', 0)}）")
+    elif blocked:
+        entry["research"]["notes"] = str(parsed.get("notes", ""))[:400]
+        _log.console_line(f"[porter] exp-mono: {module} 研究被报 blocked："
+                          f"{entry['research']['notes']}——停车 rc 1")
+    else:
+        _log.console_line(f"[porter] exp-mono: {module} 研究未通过"
+                          f"（{problems[:2] or outcome.get('status')}）"
+                          "——停车 rc 1，人工介入后重跑（ledger 断点续）")
+    return 0 if ok else 1
+
+
+def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
+                   runner: dict, manifest: dict, deps: dict,
+                   ledger: dict, budget_override: int | None = None,
+                   session_override: str | None = None,
+                   model: str | None = None) -> int:
     mdir = ws / "P1" / "modules" / module
     mod_json = _read_json(mdir / "module.json") or {}
     spec_files = sorted(p for p in mdir.iterdir()
@@ -501,6 +917,18 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
     notes_path = exp_dir / "mapping-notes.md"
     parking_path = exp_dir / "parking.md"
     notes_before = _text_lines(notes_path)
+    deliverable = exp_dir / "research" / f"{module}.md"
+    deliverable_text = ""
+    if deliverable.exists():
+        deliverable_text = deliverable.read_text(encoding="utf-8",
+                                                 errors="replace")
+    else:
+        _log.console_line(f"[porter] exp-mono: {module} 研究交付物缺失"
+                          f"（{deliverable}）——翻译以兜底研究权自研并上报")
+    registry_text = ""
+    if (exp_dir / "contracts.md").exists():
+        registry_text = (exp_dir / "contracts.md").read_text(
+            encoding="utf-8", errors="replace")
     budget = int(budget_override) if budget_override else _budget_sec(loc)
     prev = (ledger.get("modules") or {}).get(module) or {}
     # 续跑基线重建：delta 语义跨调用累计——基线应回溯到**首次**开始该
@@ -526,12 +954,12 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
             "marker": base_marker if base_marker is not None else cur_marker,
             "growth_guard": base_code is not None or not session_override,
             "status": _git_status(target_os)}
-    prompt = _module_prompt(
+    prompt = _translate_prompt(
         ws, exp_dir, module, mod_json,
         [(p, _text_lines(p)) for p in spec_files], ledger, manifest, proj,
         target_os, driver_home_rel, deps.get(module) or [],
-        notes_path.read_text(encoding="utf-8", errors="replace"),
-        parking_path.read_text(encoding="utf-8", errors="replace"))
+        parking_path.read_text(encoding="utf-8", errors="replace"),
+        registry_text, deliverable_text)
     if session_override:
         if prev.get("status") not in (None, "pass"):
             resume_bits = [f"- 上次状态：{prev.get('status')}"]
@@ -544,56 +972,86 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
             prompt += ("\n\n---\n\n## 续跑指令（同会话续接，产物已在树中）\n"
                        + "\n".join(resume_bits)
                        + "\n请在此基础上修复/补全（**不要重做已完成的"
-                       "工作**；词典/登记/测试已就位的直接复用），按运行"
-                       "协议输出完整 done JSON（六字段：status/files/notes/"
-                       "migrated_functions/tests/untested）。")
-    _log.console_line(f"[porter] exp-mono: 迁移模块 {module}"
+                       "工作**；交付物裁定/登记/测试已就位的直接复用），按"
+                       "运行协议输出完整 done JSON（六字段：status/files/"
+                       "notes/migrated_functions/tests/untested）。")
+    _log.console_line(f"[porter] exp-mono: 翻译模块 {module}"
                       f"（源 {loc} 行，预算 {budget}s，起始测试标记 "
                       f"{snap['marker']}）")
     gate = _make_gate(exp_dir, target_os, runner, manifest, module, loc,
                       driver_home_rel, snap)
     t0 = time.time()
-    outcome = agent.run_agent_seq(
-        prompt, workdir=target_os,
-        log_stem=str(exp_dir / "logs" / f"MOD_{module}"),
-        static=gate,
-        gen_schema={"status": "str", "files": "list", "notes": "str",
-                    "migrated_functions": "list", "tests": "list",
-                    "untested": "list"},
-        final_static=True,
-        agent_budget_sec=budget,
-        resume_session=session_override,
-        task={"phase": "exp-mono", "module": module, "step": "migrate",
-              "task_id": f"exp-mono.module.{module}"})
-    wall = round(time.time() - t0, 1)
-    parsed = outcome.get("parsed") or {}
-    blocked = parsed.get("status") == "blocked"
-    ok = outcome.get("status") == "done" and not blocked
-    marker_delta = (_count_marker(home, ext, marker) - snap["marker"]) \
-        if marker else None
+    session = session_override
+    outcome: dict = {}
+    parsed: dict = {}
+    decl_retries = 0
+    total_agent_sec = 0.0
+    total_rounds = 0
     decl_probs: list[str] = []
-    if ok:
-        decl_probs = _declaration_problems(parsed, marker_delta, marker)
-        if decl_probs:
-            ok = False
-            _log.console_line(f"[porter] exp-mono: {module} 声明面记账"
-                              "不完备（" + "；".join(decl_probs)
-                              + "）——不予 pass，停车 rc 1")
-    entry = {"status": "pass" if ok else (blocked and "blocked")
-             or ("decl-mismatch" if decl_probs else outcome.get("status")),
-             "loc": loc, "budget_sec": budget,
-             "rounds": len(outcome.get("rounds") or []),
-             "agent_sec": outcome.get("total_agent_sec"),
-             "wall_sec": wall,
-             "dict_delta": _text_lines(notes_path) - notes_before,
-             "files": parsed.get("files") or [],
-             "migrated_functions": parsed.get("migrated_functions") or [],
-             "tests": parsed.get("tests") or [],
-             "untested": parsed.get("untested") or [],
-             "marker_delta": marker_delta,
-             "session_id": outcome.get("session_id"),
-             "seq_status": outcome.get("status"),
-             "time": datetime.now().isoformat(timespec="seconds")}
+    while True:
+        outcome = agent.run_agent_seq(
+            prompt, workdir=target_os,
+            log_stem=str(exp_dir / "logs" / f"MOD_{module}"),
+            static=gate,
+            gen_schema={"status": "str", "files": "list", "notes": "str",
+                        "migrated_functions": "list", "tests": "list",
+                        "untested": "list"},
+            final_static=True,
+            agent_budget_sec=budget,
+            model=model,
+            resume_session=session,
+            fix_floor_sec=FIX_FLOOR_SEC,
+            stall_meta_rounds=STALL_META_ROUNDS,
+            task={"phase": "exp-mono", "module": module, "step": "translate",
+                  "task_id": f"exp-mono.translate.{module}"})
+        session = outcome.get("session_id") or session
+        total_agent_sec += outcome.get("total_agent_sec") or 0.0
+        total_rounds += len(outcome.get("rounds") or [])
+        parsed = outcome.get("parsed") or {}
+        blocked = parsed.get("status") == "blocked"
+        ok = outcome.get("status") == "done" and not blocked
+        marker_delta = (_count_marker(home, ext, marker) - snap["marker"]) \
+            if marker else None
+        decl_probs = []
+        if ok:
+            decl_probs = _declaration_problems(parsed, marker_delta, marker)
+            if decl_probs:
+                ok = False
+        if ok or decl_retries >= DECL_RETRIES or blocked \
+                or outcome.get("status") != "done":
+            break
+        # 声明面核对不过 → 同 session 自动重试（实证 14/14 一轮自修；
+        # 进程内闭环消灭最大类人工介入）
+        decl_retries += 1
+        _log.console_line(f"[porter] exp-mono: {module} 声明面记账不完备"
+                          f"——自动重试第 {decl_retries}/{DECL_RETRIES} 次")
+        prompt = ("## 上次 done 的声明面核对未通过\n"
+                  + "\n".join(f"- {p}" for p in decl_probs)
+                  + "\n请**只补记账或补测试**（不要重做已完成的迁移），"
+                  "然后按运行协议重新输出完整 done JSON（六字段：status/"
+                  "files/notes/migrated_functions/tests/untested）。")
+    wall = round(time.time() - t0, 1)
+    blocked = parsed.get("status") == "blocked"
+    ok = outcome.get("status") == "done" and not blocked and not decl_probs
+    entry = ledger.setdefault("modules", {}).setdefault(module, {})
+    entry.update({
+        "status": "pass" if ok else (blocked and "blocked")
+        or ("decl-mismatch" if decl_probs else outcome.get("status")),
+        "loc": loc, "budget_sec": budget,
+        "rounds": total_rounds,
+        "agent_sec": round(total_agent_sec, 1),
+        "wall_sec": wall,
+        "dict_delta": _text_lines(notes_path) - notes_before,
+        "files": parsed.get("files") or [],
+        "migrated_functions": parsed.get("migrated_functions") or [],
+        "tests": parsed.get("tests") or [],
+        "untested": parsed.get("untested") or [],
+        "marker_delta": marker_delta,
+        "session_id": outcome.get("session_id"),
+        "seq_status": outcome.get("status"),
+        "time": datetime.now().isoformat(timespec="seconds")})
+    if decl_retries:
+        entry["decl_retries"] = decl_retries
     if decl_probs:
         entry["decl_problems"] = decl_probs
     entry["snap_base"] = {"code_lines": snap["code_lines"],
@@ -601,11 +1059,15 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
     entry["snap_end"] = {"code_lines": _count_code(home, ext),
                          "marker": _count_marker(home, ext, marker)
                          if marker else None}
-    if blocked:
+    # notes 持久化：矛盾上报/兜底裁定/泊车遵守是翻译者唯一的口头
+    # 知识通道——不只 blocked，done 也要留档（防蒸发，人审 ledger
+    # /report 消化）
+    if str(parsed.get("notes", "")).strip():
         entry["notes"] = str(parsed.get("notes", ""))[:400]
+    if blocked:
         _log.console_line(f"[porter] exp-mono: {module} 被 agent 报 blocked："
-                          f"{entry['notes']}——停车（词典/平台能力问题"
-                          "走人工，不硬编）")
+                          f"{entry.get('notes', '')}——停车（交付物/平台"
+                          "能力问题走人工，不硬编）")
     if ok:
         try:
             from ..common import vcs as _vcs
@@ -620,13 +1082,11 @@ def _run_module(ws: Path, exp_dir: Path, module: str, proj: dict,
                               f"（{ex!r}）——ledger 照记 pass")
         _log.console_line(f"[porter] exp-mono: {module} PASS"
                           f"（轮数 {entry['rounds']}，agent "
-                          f"{entry['agent_sec']}s，墙钟 {wall}s，"
-                          f"词典 +{entry['dict_delta']} 行）")
+                          f"{entry['agent_sec']}s，墙钟 {wall}s）")
     else:
         _log.console_line(f"[porter] exp-mono: {module} 未通过"
                           f"（seq={entry['seq_status']}）——停车 rc 1，"
                           "人工介入后重跑（ledger 断点续）")
-    ledger.setdefault("modules", {})[module] = entry
     _save_ledger(exp_dir, ledger)
     return 0 if ok else 1
 
@@ -655,8 +1115,12 @@ def _terminal(ws: Path, exp_dir: Path, runner: dict, proj: dict,
 
 def run_exp_mono(ws: Path, module: str | None = None,
                  budget: int | None = None,
-                 session: str | None = None) -> int:
+                 session: str | None = None,
+                 budget_research: int | None = None,
+                 budget_translate: int | None = None,
+                 module_research: str | None = None) -> int:
     ws = Path(ws).resolve()
+    research_only = module_research is not None
     needs = ["project.json", "runner.json", "P1/modules/deps.json",
              "P2/reports/scaffold_manifest.json"]
     missing = [n for n in needs if not (ws / n).exists()]
@@ -664,6 +1128,11 @@ def run_exp_mono(ws: Path, module: str | None = None,
         _log.console_line(f"[porter] exp-mono: 前置缺失："
                           + "、".join(missing) + "——rc 2")
         return 2
+    models = _load_models()
+    if models[0] is None:
+        _log.console_line(f"[porter] exp-mono: {models[1]}——rc 2")
+        return 2
+    model_research, model_coding = models
     proj = _read_json(ws / "project.json") or {}
     runner = _read_json(ws / "runner.json") or {}
     deps = _read_json(ws / "P1" / "modules" / "deps.json") or {}
@@ -678,19 +1147,29 @@ def run_exp_mono(ws: Path, module: str | None = None,
         _log.console_line(f"[porter] exp-mono: 模块 {module} 不在 order 中"
                           "——rc 2")
         return 2
+    if module_research is not None and module_research not in order:
+        _log.console_line(f"[porter] exp-mono: 模块 {module_research} 不在 "
+                          "order 中——rc 2")
+        return 2
     exp_dir = ws / "exp-mono"
     (exp_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (exp_dir / "research").mkdir(parents=True, exist_ok=True)
     ledger = _load_ledger(exp_dir)
     for name, text in (
             ("ledger.json", None),
             ("mapping-notes.md",
              "# 迁移词典（JIT 接力）\n\n"
              "> 每条一行：`符号 | verdict | 目标用法 | 证据 file:line`。\n"
-             "> 迁移者当场在目标树核实后追加；后继模块先读再用。\n"),
+             "> 研究任务产出裁定、编排器收割追加；后继研究先读再用。\n"),
             ("parking.md",
              "# 泊车记录\n\n"
              "> 需要平台侧能力/人工裁定的条目记在此（条目 + 原因 + "
-             "临时处置）；编排器每模块把现内容注入 prompt。\n")):
+             "临时处置）；编排器每模块把现内容注入 prompt。\n"),
+            ("contracts.md",
+             "# 契约登记表\n\n"
+             "> 跨模块共享的类型/钩子签名——研究任务提案、机器收割"
+             "追加。后继模块研究前必查：新契约若与既有条目冲突，在"
+             "交付物 conflicts_with 显式标记。\n")):
         p = exp_dir / name
         if not p.exists():
             if name == "ledger.json":
@@ -707,23 +1186,57 @@ def run_exp_mono(ws: Path, module: str | None = None,
                               "迁移，rc 2")
             return 2
         targets = [module]
+    elif research_only:
+        targets = [module_research]
     else:
         targets = list(order)
+    _log.console_line(f"[porter] exp-mono: 模型分层 reasoning="
+                      f"{model_research} coding={model_coding}")
     first_session = session          # 会话续接只作用于本次实际运行的
-    for m in targets:                # 首个模块（后续模块各自新会话）
+    stop = False                     # 首个任务（后续任务各自新会话）
+    for m in targets:
+        entry = ledger["modules"].get(m) or {}
+        res_status = (entry.get("research") or {}).get("status")
+        # 研究续跑规则：仅当上次研究尝试过且未过（预算杀/校验败）才
+        # 续接会话；研究从未跑过 → session 留给翻译任务（保留旧翻译
+        # 断点续语义）
+        research_session = first_session \
+            if (first_session and res_status not in (None, "pass")) else None
+        if res_status != "pass":
+            if _run_research(ws, exp_dir, m, proj, manifest, edges,
+                             ledger, budget_override=budget_research,
+                             session_override=research_session,
+                             model=model_research) != 0:
+                _write_report(ws, exp_dir, ledger, order, proj, manifest)
+                return 1
+            if research_session is not None:
+                first_session = None     # 已被研究续跑消费
+        else:
+            _log.console_line(f"[porter] exp-mono: {m} 研究已 pass——跳过")
+        if research_only:
+            _log.console_line(f"[porter] exp-mono: {m} 仅研究模式——"
+                              "跳过翻译")
+            continue
         if (ledger["modules"].get(m) or {}).get("status") == "pass":
             _log.console_line(f"[porter] exp-mono: {m} 已 pass——跳过")
-            continue
-        if _run_module(ws, exp_dir, m, proj, runner, manifest, edges,
-                       ledger, budget_override=budget,
-                       session_override=first_session) != 0:
             first_session = None
-            _write_report(ws, exp_dir, ledger, order, proj, manifest)
-            return 1
+            continue
+        if _run_translate(ws, exp_dir, m, proj, runner, manifest, edges,
+                          ledger,
+                          budget_override=budget_translate
+                          or budget,
+                          session_override=first_session,
+                          model=model_coding) != 0:
+            stop = True
+            break
         first_session = None
+    if stop:
+        _write_report(ws, exp_dir, ledger, order, proj, manifest)
+        return 1
     terminal = None
-    if all((ledger["modules"].get(m) or {}).get("status") == "pass"
-           for m in order):
+    if not research_only and all(
+            (ledger["modules"].get(m) or {}).get("status") == "pass"
+            for m in order):
         terminal = _terminal(ws, exp_dir, runner, proj, manifest)
     _write_report(ws, exp_dir, ledger, order, proj, manifest, terminal)
     done = sum(1 for m in order

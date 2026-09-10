@@ -1,5 +1,10 @@
 {
   "model": "zhipu-ai/glm-5.3-flash",
+  "models": {
+    "reasoning": "zhipu-ai/glm-5.2",
+    "coding": "zhipu-ai/glm-5.3-flash",
+    "_notes": "exp-mono 拆分流程双模型：reasoning=研究任务（读多写少的推理），coding=翻译+修复任务（输出密集的生成）。两值允许一致。缺任一键或裸模型名（无 provider 前缀）exp-mono 启动即 rc 2。顶层 model 键与此无关（其他流程的全局缺省）。"
+  },
   "self_diagnosis": {
     "enabled": true,
     "_notes": "§15 重设计（2026-09-03）后为错误处理模块求解循环的总开关兼熔断。true（缺省）= p5/p6/d1 失败走求解循环（≤3 轮 agent + 双信号复验 + 同签名早退），耗尽 → 升级报告 + unsolved 关口（attempts 在挂载点退役）。false = 熔断回退旧人工路径（p5 失败 rc 1 → attempts→panic；--defect-diagnose rc 2）。PORTER_SELF_DIAGNOSIS=1 可强制开（测试惯例）"

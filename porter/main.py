@@ -1164,7 +1164,7 @@ def cmd_handoff(args) -> int:
 
 
 def cmd_exp_mono(args) -> int:
-    """实验：单体模块迁移 loop（P1 结尾直连；三段复合 gate 驱动）。"""
+    """实验：模块迁移 loop（P1 结尾直连；研究+翻译两段任务驱动）。"""
     from porter.exp import mono as mono_mod
     ws = Path(args.output_dir).resolve()
     if not (ws / "project.json").exists():
@@ -1172,7 +1172,10 @@ def cmd_exp_mono(args) -> int:
         return 2
     return mono_mod.run_exp_mono(ws, module=args.module,
                                  budget=args.budget,
-                                 session=args.session)
+                                 session=args.session,
+                                 budget_research=args.budget_research,
+                                 budget_translate=args.budget_translate,
+                                 module_research=args.module_research)
 
 
 def cmd_exp_accept(args) -> int:
@@ -1471,14 +1474,20 @@ def main(argv=None) -> int:
                        help="（closed 时）处置理由入档")
     p7cmd.set_defaults(func=cmd_p7)
 
-    expm = sub.add_parser("exp-mono", help="实验：单体模块迁移 loop（P1 结尾直连；研究+翻译一体的迁移者 ×N 模块）")
+    expm = sub.add_parser("exp-mono", help="实验：模块迁移 loop（P1 结尾直连；研究+翻译两段任务 ×N 模块，双模型分层见 config.models）")
     expm.add_argument("--output-dir", required=True, help="迁移工作区根目录（须有 P1 modules + P2 scaffold manifest）")
     expm.add_argument("--module", default=None, metavar="NAME",
                       help="单模块调试/重跑入口（须在 deps order 内且依赖全 pass）")
+    expm.add_argument("--module-research", default=None, metavar="NAME",
+                      help="只跑 NAME 的研究任务（跳过翻译；研究交付物调试用，不检查依赖 pass）")
     expm.add_argument("--budget", type=int, default=None, metavar="SEC",
-                      help="覆盖本模块 agent 预算（秒；缺省用行数公式 clamp(900, LOC×1.3, 4200)）")
+                      help="覆盖翻译任务 agent 预算（秒；缺省 clamp(900, LOC×1.3, 4200)）")
+    expm.add_argument("--budget-research", type=int, default=None, metavar="SEC",
+                      help="覆盖研究任务 agent 预算（秒；缺省 clamp(600, LOC×1.5, 2400)）")
+    expm.add_argument("--budget-translate", type=int, default=None, metavar="SEC",
+                      help="同 --budget（显式翻译预算别名）")
     expm.add_argument("--session", default=None, metavar="ID",
-                      help="续接既有 provider 会话（如超时中断后断点续跑；ledger 记录各模块 session_id）")
+                      help="续接既有 provider 会话（如超时中断后断点续跑；ledger 记录各任务 session_id）")
     expm.set_defaults(func=cmd_exp_mono)
 
     expa = sub.add_parser("exp-accept", help="实验：整驱动系统验收（接 exp-mono 终态；L1 编译/L2 单测/L3 设备+驱动启动/L4 端到端，红项自动修环）")
