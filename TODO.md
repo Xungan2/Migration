@@ -210,10 +210,13 @@ _strip_ansi 更根本；但 `_verify` 加 strip 仍是廉价鲁棒性，见下�
    后端）。拓扑说明行**不需要**——agent 自己走到了。
 
 另记：extract_json 嵌套围栏 bug（非贪婪围栏正则被 JSON 字符串内嵌
-``` 截短；r1_R1 实录 3930/12908 字符）仍存在于 ~20 处非 P2b 调用点
-（P3/P4/P5/P6/env/divide/routing/review/mapping）；P2b 已改文件
-输出免疫。修法已验证：```json 围栏后从 `{` 起做字符串感知花括号
-配平扫描（处理转义与字符串内花括号/反引号）。
+``` 截短；r1_R1 实录 3930/12908 字符）。**2026-09-10 核实已修**：
+修复落地在 `_response_objects`（`json.JSONDecoder.raw_decode` 从
+围栏起点做字符串感知解析，天然免疫字符串内 ```/花括号），且
+`extract_json` 首选路径与 seq 路径（`_parse_phase`）共用它——嵌套
+围栏样本双路径实测通过；仅 legacy moves 兜底分支（`"moves"` 锚点
+逆向扫描）理论仍可及，实际调用中首选路径命中后不会走到。原记录
+"~20 处调用点仍存在 bug" 系修复落地前的过时表述。
 
 ## 14. 新 P2b 重跑校准实验（session 化验证）——已执行 PASS（2026-09-05）
 
@@ -433,3 +436,62 @@ missing: <ws>/examples/...`（handoff/core.py `_material_ref`：非绝对路径
 **修法方向**：CLI 入口统一 `Path(...).resolve()` 后再交 handoff（main.py
 materials/intent_file/hints_dir 全套），或 `_material_ref` 对相对路径先按
 进程 cwd 解析、不存在再按 workspace。
+
+## 23. exp-mono 流程优化待办池（2026-09-10 spi-nor-final 12 模块全程复盘产出；用户裁定暂缓——非关键项）
+
+**背景**：12/12 pass 全程（09-08~09-10，ws-spinor-mono）30+ 次人工介入
+分类复盘：A 类"停车协议明示但实践证伪的空转关口"17 次（记账停 14 +
+失败断点续 3，全部机械续跑即过、0 次真人工审）；B 类模型/预算决策 ~8 次
+（合法人工领地）；C 类工具缺陷 4 次；D 类环境噪声；E 类不可替代人工
+（终态核验/记忆更新）。用户裁定本池各项暂缓，另一 session 做更关键的
+优化；本节仅备忘＋流程知识锚点。
+
+**待办项**（按优先级，均不动段内协议，只改 `_run_module`/`run_agent_seq`
+外围）：
+
+- **P0-1 记账停自动重试**：`_declaration_problems` 失败 → 进程内同
+  session 续跑（≤2 次）→ 仍停才人工。实证 14/14 一轮自修（39-97s）；
+  报错注入通路已存在（`_module_prompt` 的"上次状态"块），零新信息
+  通路。~40 行。
+- **P0-2 失败/预算杀/stalled 自动断点续 1 次**：regs/ids/io 实证可直接
+  续。局限：救不了 erase 型（同模型再败），需 P1-1 配合。~20 行。
+- **P1-1 模型 fallback 分级**：`PORTER_MODEL_FALLBACK`；主模型段败 →
+  同模型续 1 次 → 换 fallback 同 session 续 1 次。erase 实证：研究
+  记忆在 session 里跨模型可用（flash 研究 + 5.2 写码翻盘）。~80 行。
+- **P1-2 模型感知预算**：`_budget_sec(loc, model)` 乘数表（5.2 ×1.3 /
+  flash ×5.3）；现行 `clamp(900, LOC×1.3, 4200)` 的 900s 下限对 flash
+  连 qe（S1 891s）都贴线。~15 行。
+- **P1-3 工作区单实例锁**：`exp-mono/.lock` + flock；实测双 porter
+  进程 + 孤儿 opencode 并发写同一工作区事故（中断重试引发）。
+  ~15 行。
+- **P1-4 `porter/__main__.py`**：让 `python3 -m porter` 可用（曾 1s
+  失败）。3 行。
+- **P2-1 日志时间戳**：`_log.console_line` 加 `[HH:MM:SS]`（放
+  `[porter]` 内侧不破坏行首 grep 判据）；休眠/NTP 跳变时靠 mtime 反推
+  时间线太脆。~10 行。
+- **P2-2 agent 段心跳**：段日志段末才可观测（现靠 /proc/<pid>/fd/1）。
+  ~20 行，P2-1 后优先级降。
+- **P3（大改单独立项）**：S1 研究/写码一体拆分——erase 两轮研究段
+  API 超时再证 exp-mono-optimization-handoff.md 的拆分方向。
+
+**两个附带发现（另一 session 应知）**：
+
+1. **注释与实证矛盾**：agent.py ~720 行注释断言"rc≠0 的 provider
+   session 已终态、绝不续接"，但 erase run3 实测 rc=1 后同 session
+   续接成功翻盘——续接可行性条件需重新验证/修正文档。
+2. **porter/exp/ 源文件"丢失"（已解除的虚惊）**：2026-09-10 16:17
+   查看时 `porter/exp/` 只剩 `__pycache__`——实为用户切分支/rebase
+   （backup/pre-rebase-t3v2）的中间态被撞见；17:01 后 test 分支工作区
+   已完整（mono.py/accept.py/__init__.py 均在、git status 干净）。
+   教训保留：动工前先 `git status` 确认非中间态。
+
+**流程知识锚点**（详见 ws-spinor-mono 日志与 *.seq.json）：
+② `run_agent_seq`（agent.py）＝同 session 多段循环：S1 研究+翻译 →
+agent 输出 phase JSON → 四段 gate（①守卫②build③boot④UT）作为
+`static` 闭包外挂执行（不占 agent 预算）→ 失败结果以"指针块"喂下段
+（agent 自读全文）→ 尾 40 行规范化签名连败 2 次 stalled 早退 → done
+过 schema 后 final_static 终验再认。④ 记账核对五规则：每单元必须
+tests∪untested / 条目形状 / 不两头占 / 声明 tests 数==#[ktest] 标记
+增量（防虚报）/ marker 未配跳过。⑤ PASS → ledger.json（断点续依据 +
+session_id 源）→ `vcs.commit_target`（porcelain 捕获路径 → porter
+分支惰性校验 → vcs_commits.json 台账，best-effort）。
