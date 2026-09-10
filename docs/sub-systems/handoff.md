@@ -1,3 +1,5 @@
+> 历史文档：本页描述旧阶段实现，已退出 feat/unifyp01 执行路径。当前行为见 [README](../../README.md) 与统一 P0/P1 规格。
+
 # handoff 子系统
 
 handoff 把 Porter 的任务成果变成下一任务可验证的必读输入。每个逻辑任务有
