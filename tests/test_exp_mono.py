@@ -111,8 +111,8 @@ def _write_module_product(home: Path, stem: str, *, marker=True,
         stray.write_text("stray\n", encoding="utf-8")
 
 
-def _deliverable_text(module: str, valid: bool = True) -> str:
-    """合成研究交付物（坏块 = verdict 出词表）。"""
+def _deliverable_text(module: str, valid: bool = True, oq: bool = False) -> str:
+    """合成研究交付物（坏块 = verdict 出词表；oq = 带 open_questions）。"""
     stem = module.replace("-", "_")
     data = {
         "module": module,
@@ -128,7 +128,9 @@ def _deliverable_text(module: str, valid: bool = True) -> str:
              "consumers": module, "conflicts_with": ""}],
         "prunes": [], "parking": [],
         "read_list": [{"path": "home/drv/reg.txt", "purpose": "登记先例"}],
-        "negatives": [], "open_questions": []}
+        "negatives": [],
+        "open_questions": ([{"question": "锁习语取舍",
+                             "verify": "对照先例"}] if oq else [])}
     return ("## 研究叙事（fx 合成）\n\n### 适配架构与整合方案\n\n"
             "（合成）直译。\n\n### 可测面评估\n\n（合成）全部可执行"
             "验证。\n\n```json\n"
@@ -144,11 +146,13 @@ class _FakeSplitSeq:
     """
 
     def __init__(self, translate_work, decl=None, static_fail_status="stalled",
-                 research_bad=None):
+                 research_bad=None, adhoc=None, research_oq=None):
         self.translate_work = translate_work
         self._decl = decl
         self.static_fail_status = static_fail_status
         self.research_bad = dict(research_bad or {})
+        self.adhoc = dict(adhoc or {})          # 模块 → 兜底 mappings 列表
+        self.research_oq = set(research_oq or ())  # 带 open_questions 的模块
         self.calls = []              # 全部调用（含 step/model/session）
         self.static_results = []
         self._decl_seq = {}
@@ -171,8 +175,9 @@ class _FakeSplitSeq:
             valid = self.research_bad.get(module, 0) <= 0
             if not valid:
                 self.research_bad[module] -= 1
-            dpath.write_text(_deliverable_text(module, valid=valid),
-                             encoding="utf-8")
+            dpath.write_text(_deliverable_text(
+                module, valid=valid, oq=module in self.research_oq),
+                encoding="utf-8")
             return {"status": "done", "session_id": f"ses_r_{module}",
                     "fallback": False, "rounds": [{"seg": 1}],
                     "parsed": {"status": "done",
@@ -206,6 +211,8 @@ class _FakeSplitSeq:
                                  "aspect": "truth table",
                                  "name": f"probe_{stem}_a"}]),
                   "untested": decl.get("untested", [])}
+        if self.adhoc.get(module):
+            parsed["mappings"] = self.adhoc[module]
         return {"status": "done", "session_id": "ses_fx",
                 "fallback": False, "rounds": [{"seg": 1}, {"seg": 2}],
                 "parsed": parsed,
@@ -218,10 +225,11 @@ class _FakeSplitSeq:
 
 def _run_with_fakes(test, fx, translate_work, *, build_ok=True, boot_ok=True,
                     decl=None, decl_seq=None, session=None,
-                    research_bad=None, **kw):
+                    research_bad=None, adhoc=None, research_oq=None, **kw):
     """通用环境：patch seq/build/ut/commit/boot/模型加载后跑 loop。"""
     seq = _FakeSplitSeq(translate_work, decl=decl,
-                        research_bad=research_bad)
+                        research_bad=research_bad, adhoc=adhoc,
+                        research_oq=research_oq)
     if decl_seq:
         seq._decl_seq = {k: list(v) for k, v in decl_seq.items()}
     ut_calls = []
@@ -436,6 +444,65 @@ class TestExpMonoLoop(unittest.TestCase):
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["status"], "pass")
         self.assertEqual(led.get("decl_retries"), 1)
+
+    def test_decl_fixed_leftover(self):
+        # 首轮记账漏挂被打回、重试补齐 → 被修掉的问题清单留 decl_fixed
+        # （此前成功后只存计数，"当时哪几条对不上"蒸发）
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        seq_decl = {"fx-a": [
+            {"migrated_functions": ["fx_a_logic", "fx_a_math"],
+             "tests": [{"fn": "fx_a_logic", "aspect": "truth table",
+                        "name": "probe_fx_a_a"}],
+             "untested": []},
+            None]}
+        r = _run_with_fakes(self, self.fx, work, decl_seq=seq_decl)
+        self.assertEqual(r["rc"], 0)
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertTrue(led.get("decl_fixed"))
+        self.assertTrue(any("fx_a_math" in p for p in led["decl_fixed"]))
+
+    def test_adhoc_mappings_reflux(self):
+        # 兜底 mappings 回流词典：合法条目入「翻译兜底」节带标注，
+        # verdict 出表的条目静默跳过
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        adhoc = {"fx-a": [
+            {"symbol": "api_z", "verdict": "helper",
+             "usage": "组合 SpinLock 加 timer",
+             "evidence": "home/drv/reg.txt:2"},
+            {"symbol": "api_bad", "verdict": "SAME",
+             "usage": "x", "evidence": "home/drv/reg.txt:3"}]}
+        r = _run_with_fakes(self, self.fx, work, adhoc=adhoc)
+        self.assertEqual(r["rc"], 0)
+        notes = (self.fx["ws"] / "exp-mono" / "mapping-notes.md").read_text(
+            encoding="utf-8")
+        self.assertIn("## fx-a 翻译兜底", notes)
+        self.assertIn("- api_z | helper | 组合 SpinLock 加 timer | "
+                      "home/drv/reg.txt:2（兜底：翻译期发现）", notes)
+        self.assertNotIn("api_bad", notes)
+        led = self._ledger()["modules"]["fx-a"]
+        self.assertEqual(led.get("dict_adhoc"), 1)
+
+    def test_research_notes_and_open_questions_in_ledger(self):
+        # 研究侧 notes pass 路径持久化（对称化）+ open_questions 摘录入
+        # ledger（人首次可见"研究者在哪些点没把握"）
+        def work(module):
+            _write_module_product(self.fx["home"],
+                                  module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work, research_oq={"fx-a"})
+        self.assertEqual(r["rc"], 0)
+        res = self._ledger()["modules"]["fx-a"]["research"]
+        self.assertEqual(res.get("notes"), "研究完成")
+        self.assertEqual(res.get("open_questions"),
+                         [{"question": "锁习语取舍", "verify": "对照先例"}])
+        self.assertNotIn("open_questions",
+                         self._ledger()["modules"]["fx-b"]["research"])
 
     def test_decl_overlap_rejected(self):
         def work(module):

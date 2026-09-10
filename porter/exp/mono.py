@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -330,28 +331,86 @@ def _section_exists(text: str, section: str) -> bool:
     return any(ln.strip() == section for ln in text.splitlines())
 
 
+def _append_section(path: Path, header: str, lines: list[str],
+                    init: str = "") -> bool:
+    """幂等节追加（标题行存在即跳过）；文件不存在则用 init 初始化。"""
+    if path.exists():
+        text = path.read_text(encoding="utf-8", errors="replace")
+    else:
+        text = init
+    if _section_exists(text, header):
+        return False
+    path.write_text(text.rstrip() + "\n\n" + header + "\n"
+                    + "\n".join(lines) + "\n", encoding="utf-8")
+    return True
+
+
+def _claim_sig(claim: str) -> str:
+    """负结论 claim 的规范化签名（去空白+小写 → sha1[:12]）。"""
+    norm = re.sub(r"\s+", "", str(claim)).lower()
+    return hashlib.sha1(norm.encode("utf-8")).hexdigest()[:12]
+
+
+def _harvest_negatives(exp_dir: Path, module: str,
+                       entries: list) -> int:
+    """负结论行级收割：签名去重 + 跨模块复证标注。
+
+    行格式：`- [sig] claim（证据 …；首报 <模块>；复证：m2、m3）`
+    幂等 = 该模块名已在该行（首报或复证）则跳过；复现（异模块同
+    结论）是更强证据，追加标注而非丢弃。返回新收条数（复证不计）。
+    """
+    path = exp_dir / "negatives.md"
+    text = path.read_text(encoding="utf-8", errors="replace") \
+        if path.exists() else ""
+    out_lines = text.splitlines()
+    mod_pat = re.compile(rf"(?<![\w-]){re.escape(module)}(?![\w-])")
+    new_count = 0
+    changed = False
+    for e in entries:
+        claim = str(e.get("claim") or "").strip()
+        evidence = str(e.get("evidence") or "").strip()
+        if not claim or not evidence:
+            continue
+        sig = _claim_sig(claim)
+        marker = f"[{sig}]"
+        hit = next((i for i, ln in enumerate(out_lines)
+                    if marker in ln), None)
+        if hit is None:
+            out_lines.append(f"- {marker} {claim}（证据 {evidence}；"
+                             f"首报 {module}）")
+            new_count += 1
+            changed = True
+            continue
+        ln = out_lines[hit]
+        if mod_pat.search(ln):
+            continue
+        out_lines[hit] = (ln.rstrip("）")
+                          + (f"；复证：{module}）" if "复证：" not in ln
+                             else f"、{module}）"))
+        changed = True
+    if changed:
+        path.write_text("\n".join(out_lines).rstrip() + "\n",
+                        encoding="utf-8")
+    return new_count
+
+
 def _harvest_research(exp_dir: Path, module: str, data: dict) -> dict:
     """收割研究交付物的结构化部分（机器排版、幂等、零语义加工）。
 
     - mappings → mapping-notes.md（模块节追加）
     - contracts → contracts.md（契约登记表，不存在则建）
     - parking → parking.md（`<module> 研究轮` 节追加）
+    - prunes → prunes.md（裁剪台账，模块节追加——人审总账）
+    - negatives → negatives.md（行级签名去重 + 复证标注）
     幂等判据 = 模块节标题行已存在 → 该文件跳过（防重复追加）。
     """
-    counts = {"dictionary": 0, "contracts": 0, "parking": 0}
+    counts = {"dictionary": 0, "contracts": 0, "parking": 0,
+              "prunes": 0, "negatives": 0}
     section = f"## {module}"
 
     def _append(path: Path, header: str, lines: list[str],
                 init: str = "") -> bool:
-        if path.exists():
-            text = path.read_text(encoding="utf-8", errors="replace")
-        else:
-            text = init
-        if _section_exists(text, header):
-            return False
-        path.write_text(text.rstrip() + "\n\n" + header + "\n"
-                        + "\n".join(lines) + "\n", encoding="utf-8")
-        return True
+        return _append_section(path, header, lines, init)
 
     lines = []
     for m in data.get("mappings") or []:
@@ -384,7 +443,90 @@ def _harvest_research(exp_dir: Path, module: str, data: dict) -> dict:
     if lines and _append(exp_dir / "parking.md",
                          f"## {module} 研究轮", lines):
         counts["parking"] = len(lines)
+
+    lines = []
+    for p in data.get("prunes") or []:
+        anchor = str(p.get("anchor") or "").strip()
+        lines.append(f"- **{p['item']}**：{p['reason']}"
+                     + (f"（锚 {anchor}）" if anchor else ""))
+    if lines and _append(exp_dir / "prunes.md", section, lines,
+                         init="# 裁剪台账\n\n"
+                              "> 研究交付物 prunes 的机器收割（每模块"
+                              "一节）——「故意不迁」的显式申报总账：砍了"
+                              "什么、为什么、哪轮裁定。人审用。\n"):
+        counts["prunes"] = len(lines)
+
+    counts["negatives"] = _harvest_negatives(
+        exp_dir, module, data.get("negatives") or [])
     return counts
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _tail_excerpt(log_path: str | None, max_lines: int = 12,
+                  width: int = 120) -> str:
+    """失败日志的尾文摘录（去 ANSI、掐行宽）——内联进修复记录防覆盖。
+
+    同模块重跑/stalled 续跑会复用相同 stem 覆盖 MOD_*_S* 日志文件，
+    修复记录必须自包含（签名 + 尾文），指针只作辅助。
+    """
+    if not log_path:
+        return "（失败日志指针缺失）"
+    try:
+        text = Path(log_path).read_text(encoding="utf-8",
+                                         errors="replace")
+    except OSError:
+        return "（失败日志已不可读——可能被后续轮覆盖）"
+    lines = [ln[:width] for ln in _ANSI_RE.sub("", text).splitlines()
+             if ln.strip()]
+    return "\n".join(lines[-max_lines:]) or "（空）"
+
+
+def _fix_episodes(outcome: dict) -> list[dict]:
+    """run 内 gate 修复翻转：static 失败（有签名）→ 其后首个通过。
+
+    尾部悬而未决的失败（无后续通过）不算修复事件。跨 run 续跑翻转
+    明确不在收成范围（2026-09-11 裁定：续跑判定出 scope）。
+    """
+    eps: list[dict] = []
+    open_fail: dict | None = None
+    for r in outcome.get("rounds") or []:
+        st = r.get("static") or {}
+        if st.get("ok") is False and st.get("sig"):
+            if open_fail is None:
+                open_fail = r
+        elif st.get("ok") is True and open_fail is not None:
+            eps.append({"fail": open_fail, "pass": r})
+            open_fail = None
+    return eps
+
+
+def _record_fixes(exp_dir: Path, module: str,
+                  episodes: list[dict]) -> int:
+    """修复事件写入 fixes.md（每模块一节，幂等；尾文内联）。"""
+    if not episodes:
+        return 0
+    lines = []
+    for ep in episodes:
+        f, p = ep["fail"], ep["pass"]
+        fseg, pseg = f.get("seg"), p.get("seg")
+        segs = (pseg - fseg) if isinstance(fseg, int) \
+            and isinstance(pseg, int) else "—"
+        sig = (f.get("static") or {}).get("sig")
+        lines.append(f"- 轮 {fseg}→{pseg}｜签名 `{sig}`｜修复 {segs} 段"
+                     f"｜失败日志 {(f.get('static') or {}).get('log')}")
+        lines.append("  > 失败尾文（摘）：")
+        lines.extend(f"  > {ln}"
+                     for ln in _tail_excerpt(
+                         (f.get("static") or {}).get("log")).splitlines())
+    if _append_section(exp_dir / "fixes.md", f"## {module}", lines,
+                       init="# 修复记录（翻车与救活）\n\n"
+                            "> 翻译任务四段 gate 失败→修好的机器收成"
+                            "（签名 + 失败尾文内联，防日志覆盖）。"
+                            "蒸馏归人工。\n"):
+        return len(episodes)
+    return 0
 
 
 def _load_models(config_path=None) -> tuple[str | None, str | None]:
@@ -572,7 +714,8 @@ def _research_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
                      manifest: dict, proj: dict, target_os: Path,
                      driver_home_rel: str, deps: list[str],
                      notes_text: str, parking_text: str,
-                     registry_text: str, deliverable_path: Path) -> str:
+                     registry_text: str, negatives_text: str,
+                     deliverable_path: Path) -> str:
     skill = agent.load_skill(SKILL_RESEARCH)
     home = target_os / driver_home_rel
     ext = manifest.get("source_ext")
@@ -609,6 +752,9 @@ def _research_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
             f"{registry_text.strip() or '（空——尚无契约登记）'}\n\n"
             f"- 泊车记录（既有平台能力缺口裁定）：\n\n"
             f"{parking_text.strip() or '（空）'}\n\n"
+            f"- 已排除死路（历史负结论——**使用前须在当前树重新核实**，"
+            f"树会漂移；先查此节再检索，别重走也别盲信）：\n\n"
+            f"{negatives_text.strip() or '（空——尚无负结论登记）'}\n\n"
             f"## 本模块任务\n"
             f"- 模块：`{module}` —— {mod_json.get('function', '')}\n"
             f"- 模块规格文件（逐个精读）：\n{spec_listing}\n"
@@ -685,6 +831,10 @@ def _translate_prompt(ws: Path, exp_dir: Path, module: str, mod_json: dict,
             "期望值须引用源规格行号）；`name` 与产物中的测试名一致\n"
             "  - `untested`：`[{\"fn\",\"reason\"}]`——迁移了但不测的"
             "单元与理由（trivial 透传/平台绑定/纯声明）\n"
+            "  - `mappings`（**可选**）：翻译期兜底研究发现的 API 映射"
+            "（schema 同研究交付物 mappings 条目：symbol/verdict/usage/"
+            "evidence[/notes]）——编排器收割进词典供后继模块复用（行尾"
+            "标注兜底来源）；无兜底发现则省略此字段\n"
             "- 硬要求 = 记账完备（migrated ⊆ tests ∪ untested，同一单元"
             "不双挂）+ 声明的每个测试真实存在（编排器按标记计数核对）；"
             "执行式优先与期望值源行号锚是质量要求（SKILL 纪律四），"
@@ -763,6 +913,32 @@ def _write_report(ws: Path, exp_dir: Path, ledger: dict, order: list[str],
                       f"- 启动冒烟（非阻断留档）："
                       f"{'PASS' if (terminal.get('boot') or {}).get('ok') else 'FAIL'}"
                       f" —— {(terminal.get('boot') or {}).get('detail', '—')}"]
+    know_lines = []
+    for fname, label in (("prunes.md", "裁剪台账"),
+                         ("negatives.md", "负结论"),
+                         ("fixes.md", "修复记录")):
+        p = exp_dir / fname
+        if p.exists():
+            n = sum(1 for ln in p.read_text(
+                encoding="utf-8", errors="replace").splitlines()
+                if ln.startswith("- "))
+            if n:
+                know_lines.append(f"- {label}：{n} 条（`exp-mono/{fname}`）")
+    oq_bits = []
+    df_bits = []
+    for m in order:
+        e = (ledger.get("modules") or {}).get(m) or {}
+        res = e.get("research") or {}
+        if res.get("open_questions"):
+            oq_bits.append(f"{m}×{len(res['open_questions'])}")
+        if e.get("decl_fixed"):
+            df_bits.append(f"{m}×{len(e['decl_fixed'])}")
+    if oq_bits:
+        know_lines.append("- 研究存疑点（open_questions，内容见 ledger）："
+                          + "、".join(oq_bits))
+    if df_bits:
+        know_lines.append("- 记账修正史（decl_fixed，重试修掉的问题清单）："
+                          + "、".join(df_bits))
     body = (
         "# exp-mono 迁移报告\n\n"
         f"- 生成时间：{datetime.now().isoformat(timespec='seconds')}\n"
@@ -778,6 +954,8 @@ def _write_report(ws: Path, exp_dir: Path, ledger: dict, order: list[str],
         "## 模块汇总\n\n" + "\n".join(rows) + "\n\n"
         "## 函数覆盖台账\n\n"
         + ("\n".join(detail) if detail else "（尚无模块记账）") + "\n\n"
+        "## 知识与修复汇总\n\n"
+        + ("\n".join(know_lines) if know_lines else "（无）") + "\n\n"
         "## 终局验证\n\n" + "\n".join(f"- {ln}" for ln in term_lines) + "\n")
     (exp_dir / "report.md").write_text(body, encoding="utf-8")
 
@@ -811,6 +989,7 @@ def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
         target_os, driver_home_rel, deps.get(module) or [],
         _read("mapping-notes.md"), _read("parking.md"),
         _read("contracts.md") if (exp_dir / "contracts.md").exists() else "",
+        _read("negatives.md") if (exp_dir / "negatives.md").exists() else "",
         deliverable)
     _log.console_line(f"[porter] exp-mono: 研究模块 {module}"
                       f"（源 {loc} 行，预算 {budget}s）")
@@ -881,17 +1060,29 @@ def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
         "session_id": session,
         "seq_status": outcome.get("status"),
         "time": datetime.now().isoformat(timespec="seconds")}
+    if ok and verdict:
+        oqs = verdict["data"].get("open_questions") or []
+        if oqs:
+            entry["research"]["open_questions"] = [
+                {"question": str(o.get("question") or ""),
+                 "verify": str(o.get("verify") or "")}
+                for o in oqs if isinstance(o, dict)]
+    # notes 持久化对称化：研究侧 done 路径也留档（此前仅 blocked 存，
+    # pass 路径的口头报告蒸发——与翻译侧同款缺口，2026-09-11 补）
+    if str(parsed.get("notes", "")).strip():
+        entry["research"]["notes"] = str(parsed.get("notes", ""))[:400]
     _save_ledger(exp_dir, ledger)
     if ok:
         _log.console_line(f"[porter] exp-mono: {module} 研究 PASS"
                           f"（agent {entry['research']['agent_sec']}s，"
                           f"墙钟 {wall}s，收割 词典+{harvest.get('dictionary', 0)}"
                           f"/契约+{harvest.get('contracts', 0)}"
-                          f"/泊车+{harvest.get('parking', 0)}）")
+                          f"/泊车+{harvest.get('parking', 0)}"
+                          f"/裁剪+{harvest.get('prunes', 0)}"
+                          f"/负结论+{harvest.get('negatives', 0)}）")
     elif blocked:
-        entry["research"]["notes"] = str(parsed.get("notes", ""))[:400]
         _log.console_line(f"[porter] exp-mono: {module} 研究被报 blocked："
-                          f"{entry['research']['notes']}——停车 rc 1")
+                          f"{entry['research'].get('notes', '')}——停车 rc 1")
     else:
         _log.console_line(f"[porter] exp-mono: {module} 研究未通过"
                           f"（{problems[:2] or outcome.get('status')}）"
@@ -988,6 +1179,8 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
     total_agent_sec = 0.0
     total_rounds = 0
     decl_probs: list[str] = []
+    fix_eps: list[dict] = []
+    decl_history: list[list[str]] = []
     while True:
         outcome = agent.run_agent_seq(
             prompt, workdir=target_os,
@@ -1007,6 +1200,7 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
         session = outcome.get("session_id") or session
         total_agent_sec += outcome.get("total_agent_sec") or 0.0
         total_rounds += len(outcome.get("rounds") or [])
+        fix_eps.extend(_fix_episodes(outcome))
         parsed = outcome.get("parsed") or {}
         blocked = parsed.get("status") == "blocked"
         ok = outcome.get("status") == "done" and not blocked
@@ -1017,6 +1211,7 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
             decl_probs = _declaration_problems(parsed, marker_delta, marker)
             if decl_probs:
                 ok = False
+                decl_history.append(list(decl_probs))
         if ok or decl_retries >= DECL_RETRIES or blocked \
                 or outcome.get("status") != "done":
             break
@@ -1054,6 +1249,37 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
         entry["decl_retries"] = decl_retries
     if decl_probs:
         entry["decl_problems"] = decl_probs
+    # 被自动重试修掉的问题清单留底（此前成功后只存计数，清单蒸发）
+    if ok and decl_history:
+        entry["decl_fixed"] = [p for probs in decl_history for p in probs]
+    # 修复事件收成（run 内 gate 翻转；尾文内联防日志覆盖）
+    fixed_n = _record_fixes(exp_dir, module, fix_eps)
+    if fixed_n:
+        entry["fixes"] = fixed_n
+    # 兜底 mappings 回流词典（翻译期发现的 API 映射＝类 1 词典知识，
+    # 2026-09-11 裁定；可选字段，shape/词表不合法的条目静默跳过）
+    adhoc_n = 0
+    if ok:
+        raw = parsed.get("mappings")
+        if isinstance(raw, list):
+            lines = []
+            for mm in raw:
+                if not isinstance(mm, dict):
+                    continue
+                vals = [str(mm.get(k) or "").strip()
+                        for k in ("symbol", "verdict", "usage", "evidence")]
+                if not all(vals) or vals[1] not in VERDICTS:
+                    continue
+                note = str(mm.get("notes") or "").strip()
+                tail = f"（注意：{note}）" if note else ""
+                lines.append(f"- {vals[0]} | {vals[1]} | {vals[2]} | "
+                             f"{vals[3]}（兜底：翻译期发现）{tail}")
+            if lines and _append_section(
+                    exp_dir / "mapping-notes.md",
+                    f"## {module} 翻译兜底", lines):
+                adhoc_n = len(lines)
+    if adhoc_n:
+        entry["dict_adhoc"] = adhoc_n
     entry["snap_base"] = {"code_lines": snap["code_lines"],
                           "marker": snap["marker"]}
     entry["snap_end"] = {"code_lines": _count_code(home, ext),
@@ -1083,6 +1309,14 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
         _log.console_line(f"[porter] exp-mono: {module} PASS"
                           f"（轮数 {entry['rounds']}，agent "
                           f"{entry['agent_sec']}s，墙钟 {wall}s）")
+        if adhoc_n or fixed_n:
+            bits = []
+            if fixed_n:
+                bits.append(f"修复记录 {fixed_n} 起入 fixes.md")
+            if adhoc_n:
+                bits.append(f"兜底词典 +{adhoc_n}")
+            _log.console_line(f"[porter] exp-mono: {module} 知识收成："
+                              + "、".join(bits))
     else:
         _log.console_line(f"[porter] exp-mono: {module} 未通过"
                           f"（seq={entry['seq_status']}）——停车 rc 1，"
@@ -1169,7 +1403,21 @@ def run_exp_mono(ws: Path, module: str | None = None,
              "# 契约登记表\n\n"
              "> 跨模块共享的类型/钩子签名——研究任务提案、机器收割"
              "追加。后继模块研究前必查：新契约若与既有条目冲突，在"
-             "交付物 conflicts_with 显式标记。\n")):
+             "交付物 conflicts_with 显式标记。\n"),
+            ("prunes.md",
+             "# 裁剪台账\n\n"
+             "> 研究交付物 prunes 的机器收割（每模块一节）——「故意"
+             "不迁」的显式申报总账：砍了什么、为什么、哪轮裁定。"
+             "人审用。\n"),
+            ("negatives.md",
+             "# 已排除死路（负结论）\n\n"
+             "> 研究交付物 negatives 的机器收割（行级；claim 规范化"
+             "签名去重；跨模块复证标注）。注入后继研究 prompt——"
+             "历史结论，使用前须重新核实。\n"),
+            ("fixes.md",
+             "# 修复记录（翻车与救活）\n\n"
+             "> 翻译任务四段 gate 失败→修好的机器收成（签名 + 失败"
+             "尾文内联，防日志覆盖）。蒸馏归人工。\n")):
         p = exp_dir / name
         if not p.exists():
             if name == "ledger.json":

@@ -195,7 +195,8 @@ class TestHarvestResearch(unittest.TestCase):
         _body, data = _deliverable()
         counts = mono_mod._harvest_research(self.exp, "fx-a", data)
         self.assertEqual(counts, {"dictionary": 2, "contracts": 1,
-                                  "parking": 1})
+                                  "parking": 1, "prunes": 1,
+                                  "negatives": 1})
         notes = (self.exp / "mapping-notes.md").read_text(encoding="utf-8")
         self.assertIn("## fx-a", notes)
         self.assertIn("- api_x | equivalent | 目标等价物 api_x_t"
@@ -215,17 +216,216 @@ class TestHarvestResearch(unittest.TestCase):
         mono_mod._harvest_research(self.exp, "fx-a", data)
         counts = mono_mod._harvest_research(self.exp, "fx-a", data)
         self.assertEqual(counts, {"dictionary": 0, "contracts": 0,
-                                  "parking": 0})
+                                  "parking": 0, "prunes": 0,
+                                  "negatives": 0})
         notes = (self.exp / "mapping-notes.md").read_text(encoding="utf-8")
         self.assertEqual(notes.count("- api_x |"), 1)
 
     def test_harvest_empty_sections_noop(self):
         _body, data = _deliverable()
-        data.update(mappings=[], contracts=[], parking=[])
+        data.update(mappings=[], contracts=[], parking=[], prunes=[],
+                    negatives=[])
         counts = mono_mod._harvest_research(self.exp, "fx-a", data)
         self.assertEqual(counts, {"dictionary": 0, "contracts": 0,
-                                  "parking": 0})
+                                  "parking": 0, "prunes": 0,
+                                  "negatives": 0})
         self.assertFalse((self.exp / "contracts.md").exists())
+
+
+class TestHarvestPrunes(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="research_pr_"))
+        self.exp = self.tmp / "exp-mono"
+        self.exp.mkdir()
+
+    def test_content_and_header(self):
+        _body, data = _deliverable()
+        counts = mono_mod._harvest_research(self.exp, "fx-a", data)
+        self.assertEqual(counts["prunes"], 1)
+        text = (self.exp / "prunes.md").read_text(encoding="utf-8")
+        self.assertIn("# 裁剪台账", text)
+        self.assertIn("## fx-a", text)
+        self.assertIn("- **观测面 dump**：纯观测（锚 spec_a.c:20）", text)
+
+    def test_anchor_optional(self):
+        _body, data = _deliverable()
+        data["prunes"] = [{"item": "死类型 T", "reason": "裁剪刀"}]
+        mono_mod._harvest_research(self.exp, "fx-a", data)
+        text = (self.exp / "prunes.md").read_text(encoding="utf-8")
+        self.assertIn("- **死类型 T**：裁剪刀\n", text)
+        self.assertNotIn("（锚", text)
+
+    def test_idempotent(self):
+        _body, data = _deliverable()
+        mono_mod._harvest_research(self.exp, "fx-a", data)
+        counts = mono_mod._harvest_research(self.exp, "fx-a", data)
+        self.assertEqual(counts["prunes"], 0)
+        text = (self.exp / "prunes.md").read_text(encoding="utf-8")
+        self.assertEqual(text.count("- **观测面 dump**"), 1)
+
+
+class TestHarvestNegatives(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="research_ng_"))
+        self.exp = self.tmp / "exp-mono"
+        self.exp.mkdir()
+
+    @staticmethod
+    def _entries(claim, evidence="rg 全树无命中"):
+        return [{"claim": claim, "evidence": evidence}]
+
+    def test_new_entry_line(self):
+        n = mono_mod._harvest_negatives(self.exp, "fx-a",
+                                        self._entries("原语 Q 不存在"))
+        self.assertEqual(n, 1)
+        sig = mono_mod._claim_sig("原语 Q 不存在")
+        text = (self.exp / "negatives.md").read_text(encoding="utf-8")
+        self.assertIn(f"- [{sig}] 原语 Q 不存在"
+                      f"（证据 rg 全树无命中；首报 fx-a）", text)
+
+    def test_cross_module_reconfirm_written(self):
+        # 纯复证（新条目 0）也必须写盘——曾因只在 new_count>0 时落盘而丢
+        mono_mod._harvest_negatives(self.exp, "fx-a",
+                                    self._entries("原语 Q 不存在"))
+        n = mono_mod._harvest_negatives(
+            self.exp, "fx-b", self._entries("原语 Q   不存在"))  # 空白变体
+        self.assertEqual(n, 0)                        # 不算新条目
+        text = (self.exp / "negatives.md").read_text(encoding="utf-8")
+        self.assertIn("；复证：fx-b）", text)           # 但复证要落盘
+        self.assertEqual(text.count("首报 fx-a"), 1)
+
+    def test_second_reconfirm_appends(self):
+        for mod in ("fx-a", "fx-b", "fx-c"):
+            mono_mod._harvest_negatives(self.exp, mod,
+                                        self._entries("原语 Q 不存在"))
+        text = (self.exp / "negatives.md").read_text(encoding="utf-8")
+        self.assertIn("复证：fx-b、fx-c）", text)
+
+    def test_same_module_idempotent(self):
+        mono_mod._harvest_negatives(self.exp, "fx-a",
+                                    self._entries("原语 Q 不存在"))
+        n = mono_mod._harvest_negatives(self.exp, "fx-a",
+                                        self._entries("原语 Q 不存在"))
+        self.assertEqual(n, 0)
+        text = (self.exp / "negatives.md").read_text(encoding="utf-8")
+        self.assertNotIn("复证：fx-a", text)
+        self.assertEqual(len(text.strip().splitlines()), 1)
+
+
+class TestFixEpisodes(unittest.TestCase):
+
+    @staticmethod
+    def _round(seg, ok=None, sig=None, log=None):
+        return {"seg": seg, "stem": f"S{seg}",
+                "static": (None if ok is None else
+                           {"ok": ok, "sig": sig, "log": log})}
+
+    def test_pairing_skips_repeat_fails(self):
+        rounds = [self._round(1, True, None),
+                  self._round(2, False, "aaa"),
+                  self._round(3, False, "aaa"),      # 同签名连败只记首个
+                  self._round(4, True, None)]
+        eps = mono_mod._fix_episodes({"rounds": rounds})
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(eps[0]["fail"]["seg"], 2)
+        self.assertEqual(eps[0]["pass"]["seg"], 4)
+
+    def test_two_episodes(self):
+        rounds = [self._round(2, False, "aaa"), self._round(3, True, None),
+                  self._round(4, False, "bbb"), self._round(5, True, None)]
+        self.assertEqual(len(mono_mod._fix_episodes({"rounds": rounds})), 2)
+
+    def test_trailing_failure_not_episode(self):
+        rounds = [self._round(1, True, None), self._round(2, False, "aaa")]
+        self.assertEqual(mono_mod._fix_episodes({"rounds": rounds}), [])
+
+    def test_fail_without_sig_ignored(self):
+        rounds = [self._round(2, False, ""), self._round(3, True, None)]
+        self.assertEqual(mono_mod._fix_episodes({"rounds": rounds}), [])
+
+
+class TestRecordFixes(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="research_fx_"))
+        self.exp = self.tmp / "exp-mono"
+        self.exp.mkdir()
+        self.log = self.tmp / "S2_static.log"
+        self.log.write_text(
+            "filler\n" * 30
+            + "\x1b[31merror[E0432]\x1b[0m: unresolved import `ostd::foo`\n"
+            "  --> home/drv/regs.rs:88:12\n"
+            "note: 建议改用 ostd::bar\n", encoding="utf-8")
+
+    def _episodes(self):
+        return [{"fail": {"seg": 2, "static": {"ok": False, "sig": "ab12",
+                                               "log": str(self.log)}},
+                 "pass": {"seg": 4, "static": {"ok": True}}}]
+
+    def test_writes_inline_tail(self):
+        n = mono_mod._record_fixes(self.exp, "fx-a", self._episodes())
+        self.assertEqual(n, 1)
+        text = (self.exp / "fixes.md").read_text(encoding="utf-8")
+        self.assertIn("# 修复记录（翻车与救活）", text)
+        self.assertIn("## fx-a", text)
+        self.assertIn("- 轮 2→4｜签名 `ab12`｜修复 2 段", text)
+        self.assertIn("> 失败尾文（摘）：", text)
+        self.assertIn("error[E0432]", text)          # ANSI 已剥
+        self.assertNotIn("\x1b[", text)
+
+    def test_idempotent(self):
+        mono_mod._record_fixes(self.exp, "fx-a", self._episodes())
+        self.assertEqual(
+            mono_mod._record_fixes(self.exp, "fx-a", self._episodes()), 0)
+
+    def test_missing_log_graceful(self):
+        eps = [{"fail": {"seg": 1, "static": {"ok": False, "sig": "x",
+                                              "log": None}},
+                "pass": {"seg": 2, "static": {"ok": True}}}]
+        self.assertEqual(mono_mod._record_fixes(self.exp, "fx-a", eps), 1)
+        text = (self.exp / "fixes.md").read_text(encoding="utf-8")
+        self.assertIn("（失败日志指针缺失）", text)
+
+
+class TestWriteReportKnowledge(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="research_rp_"))
+        self.ws = self.tmp / "ws"
+        self.exp = self.ws / "exp-mono"
+        self.exp.mkdir(parents=True)
+        (self.exp / "prunes.md").write_text(
+            "# 裁剪台账\n\n## fx-a\n- **A**：r\n- **B**：r\n",
+            encoding="utf-8")
+        (self.exp / "negatives.md").write_text(
+            "# 已排除死路\n- [s1] c1（证据 e；首报 fx-a）\n"
+            "- [s2] c2（证据 e；首报 fx-a）\n", encoding="utf-8")
+        (self.exp / "fixes.md").write_text(
+            "# 修复记录\n\n## fx-a\n- 轮 2→4｜签名 `ab`\n",
+            encoding="utf-8")
+
+    def test_knowledge_section(self):
+        ledger = {"modules": {"fx-a": {
+            "status": "pass",
+            "research": {"status": "pass",
+                         "open_questions": [{"question": "q1",
+                                             "verify": "v"}]},
+            "decl_fixed": ["p1", "p2"]}}}
+        proj = {"target_os": "/tmp/t", "linux_driver": "/tmp/l"}
+        manifest = {"driver_home": "home/drv", "driver": "fx"}
+        mono_mod._write_report(self.ws, self.exp, ledger, ["fx-a"], proj,
+                               manifest)
+        text = (self.exp / "report.md").read_text(encoding="utf-8")
+        self.assertIn("## 知识与修复汇总", text)
+        self.assertIn("裁剪台账：2 条", text)
+        self.assertIn("负结论：2 条", text)
+        self.assertIn("修复记录：1 条", text)
+        self.assertIn("研究存疑点（open_questions，内容见 ledger）：fx-a×1",
+                      text)
+        self.assertIn("记账修正史（decl_fixed，重试修掉的问题清单）："
+                      "fx-a×2", text)
 
 
 class TestLoadModels(unittest.TestCase):
