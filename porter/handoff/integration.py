@@ -104,10 +104,17 @@ def module_task_id(module: str, phase: str) -> str:
     return f"loop.module.{module}.{phase}"
 
 
+def _scaffold_followup(ws: Path) -> tuple[str, ...]:
+    """Opt in when notes exist; dependency validation rejects damaged records."""
+    task_id = "p0.scaffold.followup"
+    exists = (ws / "P0/reports/scaffold/followup.json").exists()
+    return (task_id,) if exists or HandoffManager(ws).inspect(task_id) else ()
+
+
 def module_dependencies(ws: Path, module: str, phase: str) -> tuple[str, ...]:
     """Return direct source-DAG predecessors plus explicit shared-state producer."""
     if phase == "p3":
-        deps = ["p2.probes"]
+        deps = ["p2.probes", *_scaffold_followup(ws)]
         graph = _deps_json(ws)
         order = list(graph.get("order") or [])
         if module in order:
@@ -135,9 +142,9 @@ def module_dependencies(ws: Path, module: str, phase: str) -> tuple[str, ...]:
             deps.append(module_task_id(str(upstream), "p5"))
         return tuple(dict.fromkeys(deps))
     if phase == "p4":
-        return (module_task_id(module, "p3"),)
+        return (module_task_id(module, "p3"), *_scaffold_followup(ws))
     if phase == "p5":
-        return (module_task_id(module, "p4"),)
+        return (module_task_id(module, "p4"), *_scaffold_followup(ws))
     raise ValueError(phase)
 
 
@@ -170,7 +177,7 @@ def cli_spec(args, ws: Path) -> TaskSpec:
     materials.append("project.json")
     if phase in ("p1", "p1-strategy"):
         return TaskSpec("p1.pipeline" if phase == "p1" else "p1.strategy",
-                        ("p0",), tuple(materials), "P1 strategy or composite")
+                        ("p0", *_scaffold_followup(ws)), tuple(materials), "P1 strategy or composite")
     if phase == "p1-divide":
         return TaskSpec("p1.divide", ("p1.strategy",), tuple(materials))
     if phase == "p1-resolve":
@@ -189,7 +196,7 @@ def cli_spec(args, ws: Path) -> TaskSpec:
     if phase in ("p2", "p2-map"):
         task_id = "p2.pipeline" if phase == "p2" else "p2.map"
         predecessor = "p1.prune" if (ws / "P1/scope.json").exists() else "p1.resolve"
-        return TaskSpec(task_id, (predecessor,), tuple(materials),
+        return TaskSpec(task_id, (predecessor, *_scaffold_followup(ws)), tuple(materials),
                         "P2 composite" if phase == "p2" else "P2 mapping")
     if phase in ("p2-scaffold", "p2-skeleton"):
         materials.append("runner.json")
@@ -261,6 +268,9 @@ def output_artifacts(ws: Path, task_id: str, args=None) -> list[Path]:
             return [ws / "project.json"]
         return [ws / "project.json", ws / "runner.json",
                 ws / "P0" / "reports" / "p0_report.md",
+                ws / "P0/reports/prerequisites.json",
+                ws / "P0/reports/prerequisite_tasks.json",
+                ws / "P0/reports/prerequisite_tasks.md",
                 ws / "P2" / "reports" / "scaffold_manifest.json"]
     p1_outputs = {
         "p1.strategy": [ws / "P1" / "strategy.md"] +

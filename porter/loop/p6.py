@@ -46,10 +46,6 @@ from .. import log as _log
 GLOBAL_SENTINEL = "__P6__"
 _LEGACY_GLOBAL_SENTINELS = {"P5", "__P5__", GLOBAL_SENTINEL}
 
-# 执行模式设备环境：SLIRP 显式后端（P5-A 已验证形态）。优先取
-# runner.inject_device.example_args["net-user"]（工作区数据），缺省用此常量。
-DEFAULT_EXEC_DEVICE_ARGS = "-netdev user,id=e1 -device e1000,netdev=e1"
-
 # L4 判据草案 schema
 L4_FORMS = {"内核自测", "boot观测", "流量驱动"}
 L4_DISPOSITIONS = {"clear", "park"}     # 清偿 / 泊车
@@ -455,8 +451,9 @@ def aggregate(ws: Path) -> int:
 
 def _slirp_args(runner: dict) -> str:
     inj = runner.get("inject_device") or {}
-    args = ((inj.get("example_args") or {}).get("net-user")) \
-        or DEFAULT_EXEC_DEVICE_ARGS
+    args = (inj.get("example_args") or {}).get("net-user")
+    if not args:
+        raise RuntimeError("inject_device.example_args.net-user is required")
     return args
 
 

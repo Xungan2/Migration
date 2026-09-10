@@ -49,7 +49,7 @@ crate 上可独立复现的完整命令（供 P0 门禁机器复核——你的�
 ## 输出格式（必须，且只输出一个紧凑 JSON 块）
 
 ```json
-{"mechanism":"cargo-osdk-test","cmd":"docker run --rm --privileged --network=host -v /dev:/dev -v ${PORTER_TARGET_OS_ROOT}:/root/asterinas <image> bash -c 'cd /root/asterinas && make install_osdk > /dev/null 2>&1 && cd kernel/core/comps/e1000 && cargo osdk test; rc=$?; cat /root/asterinas/qemu-serial.log; exit rc'","timeout_sec":1800,"success_pattern":"passed; 0 failed;","fail_pattern":"failures:","scope_hint":"cd 进 crate 目录限定范围；追加测试名子串可再过滤","smoke_cmd":"docker run … bash -c 'cd /root/asterinas/osdk/deps/test-kernel && cargo osdk test; rc=$?; cat /root/asterinas/qemu-serial.log; exit rc'","notes":"实跑观察：<粘贴观察到的结果行原文>"}
+{"mechanism":"cargo-osdk-test","cmd":"docker run --rm --privileged --network=host -v /dev:/dev -v ${PORTER_TARGET_OS_ROOT}:/root/target-os <image> bash -c 'cd /root/target-os && make install_osdk > /dev/null 2>&1 && cd path/to/driver && cargo osdk test; rc=$?; cat /root/target-os/qemu-serial.log; exit rc'","timeout_sec":1800,"success_pattern":"passed; 0 failed;","fail_pattern":"failures:","scope_hint":"cd 进 crate 目录限定范围；追加测试名子串可再过滤","smoke_cmd":"docker run … bash -c 'cd /root/target-os/osdk/deps/test-kernel && cargo osdk test; rc=$?; cat /root/target-os/qemu-serial.log; exit rc'","notes":"实跑观察：<粘贴观察到的结果行原文>"}
 ```
 
 字段：`mechanism`（短名或 "none"）、`cmd`（驱动 crate 级、含容器包裹、

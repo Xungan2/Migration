@@ -1099,8 +1099,9 @@ def prepare_agent_prompt(prompt: str, *, new_session: bool) -> str:
             "\n---\n\n# Current task prompt\n\n" + prompt +
             "\n\n---\n\nBefore ending, include a concise semantic summary of "
             "work performed, decisions, validation, and remaining risks. Keep the "
-            "existing output contract; an extra `handoff_summary` field is allowed "
-            "for JSON objects.\n")
+            "existing output contract. Add `handoff_summary` to JSON only when "
+            "the task schema explicitly permits it; otherwise put the summary "
+            "in the response text if permitted. Never add fields to a closed schema.\n")
 
 
 T = TypeVar("T")

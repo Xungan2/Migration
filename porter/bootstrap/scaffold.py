@@ -60,7 +60,7 @@ def dormitory_abs(ws: Path, target_os: Path) -> Path | None:
 
     manifest 缺失/无 dormitory → None：意味着 P2b 未成功完成——调用方
     应以前置缺失处理（先跑 p2-scaffold），不猜测路径（2026-09-05 定案：
-    不留 Asterinas 约定路径回落）。
+    不留 target OS 约定路径回落）。
     """
     m = load_manifest(ws)
     if m and m.get("dormitory"):
@@ -351,21 +351,21 @@ def run_scaffold(ws: Path, target_os: Path,
                  device_ids: list[str] | None = None, *,
                  prepare_only: bool = False) -> int:
     """返回 0=成功；2=前置缺失；3=需人工（回炉耗尽/infra 关口）。幂等。"""
+    if prepare_only:
+        from .scaffold_p0 import prepare
+        return prepare(ws, target_os, device_ids)
     p2 = ws / "P2"
     if ws.joinpath(*MANIFEST_NAME).exists():
         _log.console_line(f"[porter] P2b: 复用框架（scaffold_manifest 存在；"
                           f"如需重做请删除该文件并回滚目标树施工改动）")
         return 0
-    needs = [(ws / "project.json", "project.json")]
-    if not prepare_only:
-        needs.append((ws / "runner.json", "runner.json"))
+    needs = [(ws / "project.json", "project.json"), (ws / "runner.json", "runner.json")]
     for need, name in needs:
         if not need.exists():
             _log.console_line(f"[porter] P2b: 缺少 {name}（先跑 p0）")
             return 2
     proj = json.loads((ws / "project.json").read_text(encoding="utf-8"))
-    runner = ({} if prepare_only else
-              json.loads((ws / "runner.json").read_text(encoding="utf-8")))
+    runner = json.loads((ws / "runner.json").read_text(encoding="utf-8"))
     driver = _scope.driver_name_of(proj)
     if not proj.get("driver_name"):
         _log.console_line(f"[porter] P2b: ⚠️ project.json 无 driver_name"
@@ -399,10 +399,6 @@ def run_scaffold(ws: Path, target_os: Path,
                           ws.joinpath(*OUT_DIR) / "scaffold_r1.json")
     base_prompt += (f"\n- Linux 输入（只读）：`{proj.get('linux_driver')}`"
                     f"\n- 迁移意图（若存在先读）：`{ws / 'goals.md'}`")
-    if prepare_only:
-        base_prompt += ("\n本次属于 P0：先施工，runner 尚未生成。设备认领键从"
-                        "Linux 输入和迁移意图发现。随后由三个 loop 验证；"
-                        "本次落盘不代表验证通过。")
     session_id: str | None = None
     feedback = ""                # 回炉轮续接消息（证据指针）
     last_stem = ""
@@ -425,7 +421,7 @@ def run_scaffold(ws: Path, target_os: Path,
             rc, out = agent._opencode_json_runner(
                 message, workdir=target_os, log_stem=stem,
                 timeout_sec=AGENT_TIMEOUT_SEC, session_id=session_id,
-                task={"phase": "P0" if prepare_only else "P2",
+                task={"phase": "P2",
                       "step": "scaffold", "attempt": rnd})
             ev = agent._parse_events(out)   # rc≠0 的 id 仅留诊断，禁止续接
             if rc != 0:
@@ -471,10 +467,6 @@ def run_scaffold(ws: Path, target_os: Path,
 
         recipe_apply.rollback(target_os, journal_path)   # 清上一轮残留
         res = recipe_apply.apply_recipe(target_os, recipe, journal_path)
-        if prepare_only:
-            _write_manifest(ws, proj, recipe, res, {}, rnd)
-            _log.console_line("[porter] P0: 骨架已施工，等待三个 loop 验证")
-            return 0
         verdict = _verify(ws, target_os, runner, proj, recipe, rnd)
         if verdict.get("infra"):
             _log.console_line("[porter] P2b: boot 日志不可得——infra 关口"

@@ -34,7 +34,7 @@
 ```json
 {"status":"done","circuit":"migration","action":"fix-code",
  "fix":{"runner_patch":{"unit_test":{"cmd":"新完整命令"}},"target":"criteria","expr":"新正则","gap":"缺口名","to":["真实消费者模块"]},
- "evidence":[{"file":"kernel/core/comps/e1000/src/x.rs","line":304,"quote":"bug 现场"}],
+ "evidence":[{"file":"path/to/driver/src/x.rs","line":304,"quote":"bug 现场"}],
  "summary":"≤300字：本轮判定依据、做了什么（或为何没做成）、下轮建议",
  "kb_consulted":["读过的条目文件名"],
  "signature_candidates":["新签名候选名（可空）"],

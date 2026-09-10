@@ -60,6 +60,9 @@ def _recipe(driver: str = "e1000") -> dict:
         "test_substrate": {"marker": "#[ktest]", "how": "ktest 注册"},
         "api_claims": [{"linux_api": "pci_register_driver",
                         "usage": "注册驱动", "evidence": "pci.rs:57"}],
+        "deferred_findings": [{"topic": "I/O forwarding", "read_when": "P3/P4 implement forwarding",
+                               "finding": "Preserve error propagation", "evidence": ["pci.rs:57"],
+                               "status": "unverified"}],
     }
 
 
@@ -346,12 +349,68 @@ class ScaffoldOrchestrationTest(unittest.TestCase):
         ok("C6 幂等：重跑复用", SC.run_scaffold(self.ws, self.os) == 0)
 
     def test_p0_applies_before_runner_without_claiming_verification(self):
+        from porter.bootstrap import scaffold_p0
+        from porter.handoff import HandoffManager, TaskSpec, prepare_agent_prompt
         (self.ws / "runner.json").unlink()
-        stub = _AgentStub([_recipe()])
+        calls = []
+        prerequisite_calls = []
+        fail_test = True
+        manager = HandoffManager(self.ws)
+        driver = Path(json.loads((self.ws / "project.json").read_text())["linux_driver"])
+        (driver / "registration.c").write_text("register_driver();\n")
+        with manager.start(TaskSpec("p0")) as execution:
+            execution.fail("unrelated-parent-failure")
+
+        def stub(message, **kwargs):
+            task = kwargs["task"]["step"]
+            output = Path(re.findall(r"输出文件：`([^`]+)`", message)[-1])
+            if task == "p0.prerequisites.discover":
+                prerequisite_calls.append(task)
+                output.write_text(json.dumps({
+                    "subject": "Fixture driver", "platform": "Fixture", "binding": "register_driver",
+                    "source_evidence": [{"path": "registration.c", "line": 1, "quote": "register_driver"}],
+                    "dependencies": [], "handoff_summary": "Fixture requires no external provider"}))
+                return 0, _ev_jsonl("written", session=task)
+            calls.append((task, kwargs["session_id"], prepare_agent_prompt(message, new_session=True)))
+            if task == "p0.scaffold.test" and fail_test:
+                return -1, "TIMEOUT"
+            output = Path(re.findall(r"输出文件：`([^`]+)`", message)[-1])
+            name = task.rsplit(".", 1)[-1]
+            value = (_recipe() if name == "recipe" else {
+                "findings": {key: "Fixture interface" for key in scaffold_p0.DISCOVERY[name]},
+                "evidence": [{"path": "Cargo.toml", "line": 1, "quote": "members"}],
+                "uncertainties": [], "handoff_summary": f"{name} discovered"})
+            output.write_text(json.dumps(value))
+            return 0, _ev_jsonl("written", session=task)
+
         with mock.patch.object(scaffold.agent, "_opencode_json_runner", stub), \
              mock.patch.object(scaffold, "_verify", side_effect=AssertionError("P0 owns acceptance")), \
              mock.patch("porter.common.vcs.commit_target") as commit:
+            with self.assertRaisesRegex(RuntimeError, "provider rc=-1"), manager.start(TaskSpec("p0")):
+                scaffold.run_scaffold(self.ws, self.os, prepare_only=True)
+            fail_test = False
+            with manager.start(TaskSpec("p0")) as execution:
+                self.assertEqual(scaffold.run_scaffold(self.ws, self.os, prepare_only=True), 0)
+                execution.complete("Fixture skeleton applied")
             self.assertEqual(scaffold.run_scaffold(self.ws, self.os, prepare_only=True), 0)
+        self.assertEqual([c[0] for c in calls], ["p0.scaffold.build", "p0.scaffold.device",
+                                               "p0.scaffold.test", "p0.scaffold.test", "p0.scaffold.recipe"])
+        self.assertEqual(len(prerequisite_calls), 3)
+        self.assertTrue(all(c[1] is None for c in calls))
+        self.assertTrue(all("unrelated-parent-failure" not in c[2] for c in calls))
+        self.assertIn("build discovered", calls[1][2])
+        self.assertIn("Failed handoff", calls[3][2])
+        self.assertEqual([r["status"] for r in manager.inspect("p0.scaffold.test")], ["success", "failed"])
+        self.assertTrue(manager.require_success("p0.scaffold.apply"))
+        followup = manager.require_success("p0.scaffold.followup")
+        self.assertIn("P3/P4 implement forwarding", followup["summary"])
+        notes = json.loads((self.ws / "P0/reports/scaffold/followup.json").read_text())
+        self.assertEqual(notes, _recipe()["deferred_findings"])
+        from porter.handoff.integration import module_dependencies
+        self.assertIn("p0.scaffold.followup", module_dependencies(self.ws, "io", "p4"))
+        with manager.start(TaskSpec("future", ("p0.scaffold.followup",))) as execution:
+            self.assertIn("I/O forwarding", prepare_agent_prompt("implement forwarding", new_session=True))
+            execution.complete("consumer checked")
         manifest = scaffold.load_manifest(self.ws)
         self.assertEqual(manifest["status"], "applied")
         self.assertFalse(manifest["verified"]["build"])

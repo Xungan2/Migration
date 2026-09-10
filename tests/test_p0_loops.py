@@ -49,6 +49,16 @@ int main(void) { assert(skeleton_test() == 7); puts("skeleton_test PASS"); }
         (self.ws / "project.json").write_text(json.dumps({
             "linux_driver": str(self.root), "target_os": str(self.target),
             "category": ["block"], "driver_name": "demo"}))
+        from porter.env import prerequisites as pre
+        from porter.handoff import HandoffManager, TaskSpec
+        report = {"subject": "Fixture", "platform": "Local compiler/shell", "binding": "Fixture device",
+                  "source_evidence": [{"path": "os/driver/probes.c", "line": 1, "quote": "probe dormitory"}],
+                  "dependencies": [], "handoff_summary": "Fixture prerequisites ready"}
+        (self.ws / pre.REPORT).write_text(json.dumps(report))
+        pre._write_tasks(self.ws, report, self.root, self.target)
+        with HandoffManager(self.ws).start(TaskSpec(pre.GATE)) as execution:
+            execution.complete("Fixture prerequisites ready", artifacts=tuple(
+                self.ws / name for name in (pre.REPORT, pre.TASKS, pre.TASK_VIEW)))
         shell = self.target / "guest.py"
         shell.write_text('''import os
 print("BOOTED", flush=True)
@@ -106,6 +116,39 @@ os.execv("/bin/sh", ["sh", "-i"])
         (self.target / "driver/skeleton.c").write_text("changed source")
         self.assertFalse(gate.run_gate(self.ws))
 
+    def test_loop_sessions_receive_handoffs_and_timeout_is_terminal(self):
+        from porter.handoff import HandoffManager, TaskSpec, prepare_agent_prompt
+        manager = HandoffManager(self.ws)
+        with manager.start(TaskSpec("p0.scaffold.apply")) as execution:
+            execution.complete("Test skeleton applied", artifacts=(self.manifest_path,))
+        original = self.provider
+        seen = []
+        failed = False
+
+        def provider(message, **kwargs):
+            nonlocal failed
+            seen.append((kwargs["task"]["step"], kwargs["session_id"],
+                         prepare_agent_prompt(message, new_session=kwargs["session_id"] is None)))
+            if kwargs["task"]["step"] == "t3-boot" and not failed:
+                failed = True
+                return -1, json.dumps({"type": "step_start", "sessionID": "failed-boot"})
+            return original(message, **kwargs)
+
+        self.calls = []
+        with mock.patch.object(extract.agent, "_opencode_json_runner", side_effect=provider):
+            with self.assertRaisesRegex(RuntimeError, "provider rc=-1"), manager.start(TaskSpec("p0")):
+                extract.extract_env(self.ws, self.target, [], ["block"])
+            with manager.start(TaskSpec("p0")) as execution:
+                self.assertEqual(extract.extract_env(self.ws, self.target, [], ["block"]), 0)
+                execution.complete("P0 passed")
+        self.assertEqual([s[0] for s in seen], ["t3-build", "t3-boot", "t3-boot", "t3-unit_test"])
+        self.assertTrue(all(s[1] is None for s in seen))
+        self.assertIn("Test skeleton applied", seen[0][2])
+        self.assertIn("P0 build: converged", seen[1][2])
+        self.assertIn("Failed handoff", seen[2][2])
+        self.assertIn("P0 boot: converged", seen[3][2])
+        self.assertTrue(manager.require_success("p0.loop.unit_test"))
+
     def test_module_failure_stops_full_build(self):
         section = {**self.sections["build"], "module_cmd": "exit 9"}
         result, _ = extract._final_verify(self.ws, self.ws / "P0", "build", section, [], 1, self.target)
@@ -150,12 +193,35 @@ print(sys.stdin.readline(), flush=True)
         self.assertFalse(result["ok"])
         self.assertTrue(result["interaction_ok"])
 
+    def test_exited_guest_does_not_wait_for_background_pipe_holder(self):
+        rc, _, replied = probe._run_interactive(
+            "sleep 30 & python3 guest.py", self.target, dict(os.environ), 3,
+            self.ws / "P0/logs/background-pipe.log", None,
+            {"prompt_pattern": "[$#] ", "shutdown_cmd": "exit"})
+        self.assertTrue(replied)
+        self.assertEqual(rc, 0)
+
     def test_unrelated_tests_or_failed_assertions_cannot_pass(self):
         for change in ({"test_names": ["other_test"]}, {"scope": "other"},
                        {"smoke_cmd": "echo 'skeleton_test PASS'; exit 1"}):
             result, _ = extract._final_verify(self.ws, self.ws / "P0", "unit_test",
                                               {**self.sections["unit_test"], **change}, [], 1, self.target)
             self.assertFalse(result["ok"])
+
+    def test_qualified_test_name_matches_source_and_full_runtime_name(self):
+        source = self.target / "driver/skeleton.c"
+        source.write_text(source.read_text().replace(
+            'puts("skeleton_test PASS");',
+            'fputs("demo::tests::", stdout); puts("skeleton_test PASS");'))
+        section = {**self.sections["unit_test"],
+                   "test_names": ["demo::tests::skeleton_test"]}
+        result, _ = extract._final_verify(self.ws, self.ws / "P0", "unit_test",
+                                         section, [], 1, self.target)
+        self.assertTrue(result["ok"])
+        section["test_names"] = ["other::tests::skeleton_test"]
+        result, _ = extract._final_verify(self.ws, self.ws / "P0", "unit_test",
+                                         section, [], 2, self.target)
+        self.assertFalse(result["ok"])
 
     def test_later_source_repair_restarts_build(self):
         original = self.provider
@@ -171,9 +237,58 @@ print(sys.stdin.readline(), flush=True)
         with mock.patch.object(extract.agent, "_opencode_json_runner", side_effect=provider), \
              mock.patch.object(extract, "_final_verify", wraps=extract._final_verify) as verify:
             self.assertEqual(extract.extract_env(self.ws, self.target, [], ["block"]), 0)
-        self.assertEqual(self.calls, ["build", "boot", "build", "boot", "unit_test"])
+        self.assertEqual(self.calls, ["build", "boot", "boot", "unit_test"])
         self.assertEqual([call.args[2] for call in verify.call_args_list],
                          ["build", "build", "boot", "unit_test"])
+
+    def test_failed_reverification_returns_evidence_to_agent(self):
+        original = self.provider
+        source = self.target / "driver/skeleton.c"
+        good_source = source.read_text()
+        damaged = False
+
+        def provider(message, **kwargs):
+            nonlocal damaged
+            cap = kwargs["task"]["step"]
+            if cap == "t3-boot" and not damaged:
+                source.write_text("invalid C source")
+                damaged = True
+            elif cap == "t3-build" and damaged:
+                self.assertIn("T3_build_verify_r0", message)
+                self.assertIn("False", message)
+                self.assertTrue((self.ws / "P0/reports/out/build.json").exists())
+                source.write_text(good_source + "\n/* repaired */\n")
+            return original(message, **kwargs)
+
+        self.calls = []
+        with mock.patch.object(extract.agent, "_opencode_json_runner", side_effect=provider), \
+             mock.patch.object(extract, "_final_verify", wraps=extract._final_verify) as verify:
+            self.assertEqual(extract.extract_env(self.ws, self.target, [], ["block"]), 0)
+        self.assertEqual(self.calls, ["build", "boot", "build", "boot", "unit_test"])
+        self.assertEqual([call.args[2] for call in verify.call_args_list],
+                         ["build", "build", "build", "boot", "unit_test"])
+
+    def test_same_test_command_can_retry_after_script_repair(self):
+        original = self.provider
+        attempts = 0
+
+        def provider(message, **kwargs):
+            nonlocal attempts
+            if kwargs["task"]["step"] == "t3-build" and attempts < 2:
+                (self.target / "check.sh").write_text(f"exit {1 if attempts == 0 else 0}\n")
+                (self.ws / "P0/reports/out/build_test.json").write_text(
+                    json.dumps({"cmd": "sh check.sh", "timeout_sec": 5}))
+                attempts += 1
+                return 0, json.dumps({"type": "step_start", "sessionID": "retry-build"})
+            self.assertNotIn("测试请求内容未变化", message)
+            return original(message, **kwargs)
+
+        self.calls = []
+        with mock.patch.object(extract.agent, "_opencode_json_runner", side_effect=provider):
+            self.assertEqual(extract.extract_env(self.ws, self.target, [], ["block"]), 0)
+        for n, rc in ((1, 1), (2, 0)):
+            result = json.loads((self.ws / f"P0/logs/T3_build_test_r{n}.result.json").read_text())
+            self.assertEqual(result["rc"], rc)
 
     def test_old_runner_does_not_skip_new_acceptance(self):
         (self.ws / "runner.json").write_text("{}")

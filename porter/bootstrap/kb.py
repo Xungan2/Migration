@@ -349,7 +349,7 @@ def select_kb(mode: str, name: str, empty: bool = False,
     """p0 --kb 参数处理。返回知识库目录；非法输入打印原因返回 None。
 
     工作区模式（ws 给出，vcs 统一管理版）：
-      mode=new：新建 <ws>/knowledge/（已存在 → 拒绝）；empty=False
+      mode=new：新建 <ws>/knowledge/（已存在且身份相同 → 复用）；empty=False
         复制 base 内容，True 建空目录。git 策略不适用（随工作区 git
         统一入库），git_ignore 忽略。
       mode=use：复制全局 knowledge/<name>/ → <ws>/knowledge/（种子化；
@@ -366,6 +366,13 @@ def select_kb(mode: str, name: str, empty: bool = False,
     if ws is not None:
         d = Path(ws) / "knowledge"
         if d.exists():
+            try:
+                proj = json.loads((Path(ws) / "project.json").read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                proj = {}
+            if d.is_dir() and isinstance(proj, dict) and proj.get("kb_dir") == name:
+                _log.console_line(f"[porter] --kb: 复用工作区知识库 {d}")
+                return d
             _log.console_line(f"[porter] --kb: {d} 已存在——工作区知识库"
                   "只建一次（复用 project.json 记录；删除该目录方可重建）")
             return None

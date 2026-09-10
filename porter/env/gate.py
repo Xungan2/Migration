@@ -32,6 +32,10 @@ def run_gate(ws: Path) -> bool:
                    "身份字段"))
     cat = proj.get("category")
     checks.append(("类别已定（含人工/回落）", cat is not None, f"category={cat}"))
+    from . import prerequisites
+    checks.append(("前置依赖已就绪", bool(proj.get("target_os")) and
+                   prerequisites.is_ready(ws, Path(proj["target_os"])),
+                   prerequisites.REPORT))
 
     # 2. runner.json
     runner_path = ws / "runner.json"

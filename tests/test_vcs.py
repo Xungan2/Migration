@@ -111,6 +111,20 @@ class VcsBase(unittest.TestCase):
 
 class TestLowlevel(VcsBase):
 
+    def test_real_git_ignored_ledger_does_not_break_commit(self):
+        w = self.ws(git=False)
+        self.assertTrue(vcs.init_repo(w))
+        vcs.write_ws_gitignore(w)
+        (w / "vcs_commits.json").write_text("{}")
+        (w / "exports").mkdir()
+        (w / "exports/test.bundle").write_text("bundle")
+        self.assertIsNotNone(vcs.commit_workspace(w, "record artifacts"))
+        rc, files = vcs._git(w, "ls-files")
+        self.assertEqual(rc, 0)
+        self.assertIn("project.json", files)
+        self.assertNotIn("vcs_commits.json", files)
+        self.assertNotIn("test.bundle", files)
+
     def test_identity_injected(self):
         with mock.patch.object(vcs, "_load_cfg", return_value={
                 "enabled": True,
@@ -149,8 +163,8 @@ class TestLowlevel(VcsBase):
         add_tail = g.args_of("add")[0]
         ok("A10 add -A + 排除台账/exports",
            add_tail[0:3] == ["-A", "--", "."]
-           and ":(exclude)vcs_commits.json" in add_tail
-           and ":(exclude)exports" in add_tail)
+           and ":(exclude,glob)**/vcs_commits.json" in add_tail
+           and ":(exclude,glob)**/exports" in add_tail)
         msg = g.args_of("commit")[0][1]
         ok("A11 消息含 trailer", "Porter-Phase: P0" in msg
            and "P0: done" in msg)

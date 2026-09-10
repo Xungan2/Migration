@@ -467,7 +467,8 @@ def _final_verify(ws: Path, p0: Path, cap: str, section: dict,
             source = "\n".join((target_os / p).read_text(errors="replace")
                                for p in manifest.get("created", []) if (target_os / p).is_file())
             names = section["test_names"]
-            named = all(name in source and name in output for name in names)
+            named = all(re.search(r"\b" + re.escape(name.rsplit("::", 1)[-1]) + r"\b", source)
+                        and name in output for name in names)
             r = {"item": "unit_test", "ok": bool(ok and named),
                  "detail": detail + f" scaffold_tests={named}", "test_names": names}
     elapsed = time.time() - t0
@@ -583,6 +584,27 @@ def _exhaustion_summary_fallback(p0: Path, cap: str, st: dict,
 def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
                      materials: list[Path], categories: list[str],
                      state: dict, resume_ctx: dict | None) -> str:
+    from ..handoff import current_execution, run_task, TaskSpec
+    if current_execution() is None:
+        return _run_cap_session_impl(ws, p0, cap, target_os, materials,
+                                     categories, state, resume_ctx)
+    predecessor = (f"p0.loop.{CAPS[CAPS.index(cap) - 1]}" if cap != CAPS[0]
+                   else "p0.scaffold.apply")
+    return run_task(
+        ws, TaskSpec(f"p0.loop.{cap}", (predecessor,),
+                     (ws / "project.json", target_os, *materials), inherit_parent_inputs=False),
+        lambda: _run_cap_session_impl(ws, p0, cap, target_os, materials,
+                                     categories, state, resume_ctx),
+        success=lambda outcome: outcome == "converged",
+        summary=lambda outcome: f"P0 {cap}: {outcome}; {state['caps'][cap].get('verify_result')}",
+        artifacts=lambda outcome: tuple(_out_dir(p0) / f"{cap}.{ext}" for ext in ("json", "md"))
+        if outcome == "converged" else (),
+        verification=lambda outcome: (f"Native {cap} acceptance: {outcome}.",))
+
+
+def _run_cap_session_impl(ws: Path, p0: Path, cap: str, target_os: Path,
+                     materials: list[Path], categories: list[str],
+                     state: dict, resume_ctx: dict | None) -> str:
     """跑一个能力的 session。返回 "converged" | "exhausted" | "invalidated"。
 
     质量失败（无有效产出/契约缺陷）→ 同会话微增量 ≤QUALITY_TRIES 次
@@ -600,14 +622,27 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
     wall_budget = RESUME_WALL_SEC if resume_ctx else WALL_BUDGET_SEC[cap]
     prior_caps = [c for c in CAPS[:CAPS.index(cap)]
                   if state["caps"][c]["status"] == "converged"]
-    if not resume_ctx:                      # 防脏读（scaffold 教训）
+    reverify = st.pop("reverify", False)
+    reverify_result, reverify_wall = None, 0.0
+    if reverify:
+        section, _ = _parse_section(frag_json.read_text(), cap)
+        if section is not None and not _frag_quality_defects(cap, section, frag_md.read_text()):
+            reverify_result, reverify_wall = _final_verify(
+                ws, p0, cap, section, categories, 0, target_os)
+            if reverify_result["ok"]:
+                st.update(status="converged", verify_result=reverify_result,
+                          rounds_used=1, wall_used_sec=reverify_wall)
+                _save_state(p0, state)
+                _log.console_line(f"[porter] T3: {cap} 原配置对新源码重验通过")
+                return "converged"
+    if not resume_ctx and not reverify:     # 未经验证的旧片段不能直接复用
         for pth in (test_req, frag_json, frag_md):
             pth.unlink(missing_ok=True)
     session_id: str | None = None
     seg = 0
-    rounds = 0
+    rounds = int(reverify_result is not None)
     agent_used = 0.0
-    wall_used = 0.0
+    wall_used = reverify_wall
     quality_fails = 0
     seen = {"test": "", "frag": ""}
     stem_base = str(p0 / "logs" / f"T3_{cap}")
@@ -618,6 +653,9 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
     message = _capability_prompt(skill, cap, target_os, materials,
                                  categories, _hints_text(ws, cap),
                                  prior_caps, resume_ctx, out, bl)
+    if reverify:
+        message += (f"\n原配置保留在 `{frag_json}` 与 `{frag_md}`，源码变化后须修正重验。"
+                    f"重验结果：{reverify_result}；日志位于 {p0 / 'logs'} 的 T3_{cap}_verify_r0*。")
 
     def _sync_state(status: str) -> None:
         st.update({"status": status, "session_id": session_id,
@@ -671,7 +709,10 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
             task={"phase": "P0", "step": f"t3-{cap}", "attempt": seg})
         elapsed = time.time() - t0
         agent_used += elapsed
-        ev = agent._parse_events(out_txt)   # rc≠0 也抢救 session_id
+        if rc != 0:
+            _sync_state("pending")
+            raise RuntimeError(f"T3[{cap}]: provider rc={rc}; log={stem}.log")
+        ev = agent._parse_events(out_txt)
         if ev and ev.get("session_id"):
             session_id = ev["session_id"]
         if session_id is None:
@@ -780,6 +821,7 @@ def _run_cap_session(ws: Path, p0: Path, cap: str, target_os: Path,
             wall_used += wsec
             _sync_state("running")
             test_req.unlink(missing_ok=True)    # 消费即清（防旧请求重放）
+            seen["test"] = ""                 # 重建请求可重跑已修正脚本的同一命令
             _log.console_line(f"[porter] T3[{cap}]: 测试 r{rounds} "
                               f"rc={result['rc']} "
                               f"{result['elapsed_sec']:.0f}s")
@@ -1017,6 +1059,10 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
     if not manifest:
         _log.console_line("[porter] T3: 缺少骨架；先跑 p0 完成施工")
         return 2
+    from ..handoff import current_execution, HandoffManager
+    handoffs = HandoffManager(ws) if current_execution() is not None else None
+    if handoffs:
+        handoffs.require_success("p0.scaffold.apply")
     if runner_path.exists():
         proj = json.loads((ws / "project.json").read_text())
         frozen = proj.get("t3_frozen") or {}
@@ -1026,6 +1072,8 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
                 and (ws / "runner.md").exists()
                 and frozen.get("runner_md_sha256") == _sha256_file(ws / "runner.md")):
             _log.console_line(f"[porter] T3: 复用已验证 {runner_path}")
+            if handoffs:
+                handoffs.require_success("p0.loop.unit_test")
             return 0
         # _load_state rejects v2 evidence; preserve any v3 partial progress so
         # an old runner does not erase exhausted-loop answers on every resume.
@@ -1041,12 +1089,21 @@ def extract_env(ws: Path, target_os: Path, materials: list[Path],
             restarts += 1
             if restarts > MAX_ROUNDS:
                 raise RuntimeError("P0: 骨架持续修改，前序验证反复失效；检查 loop 修正范围")
+            previous = state["caps"]
             state = {"version": 3, "caps": {c: _new_cap_state() for c in CAPS}}
+            for c, old in previous.items():
+                if (c in CAPS and old["status"] == "converged"
+                        and old.get("fragment_sha256") is not None
+                        and old["fragment_sha256"] == _fragment_fingerprint(p0, c)):
+                    state["caps"][c]["reverify"] = True
             _save_state(p0, state)
             cap_index = 0
             continue
         st = state["caps"].setdefault(cap, _new_cap_state())
         if st["status"] == "converged":
+            if handoffs:
+                handoffs.require_success(f"p0.loop.{cap}", current_artifacts=tuple(
+                    _out_dir(p0) / f"{cap}.{ext}" for ext in ("json", "md")))
             cap_index += 1
             continue
         resume_ctx = None

@@ -26,7 +26,7 @@
 1. strategy"验证方式"列的每个**可机器化**子句 → 一条判据：
    - "编译" / "启动" → 不输出（基线已有）。
    - "纯逻辑宏单测（X 等）" → unit_test，expr 以模块内真实存在的宏/
-     纯函数命名（读模块源文件确认名字，如 `E1000_DESC_UNUSED`）。
+     纯函数命名（读模块源文件确认名字，如 `DRIVER_DESC_UNUSED`）。
    - "probe 日志中的 XXX" / "qemu.log 出现 YYY" → log_pattern，正则
      取日志特征子串（如 `MAC address`、`link status`）。
    - "计数增长" → counter。

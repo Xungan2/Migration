@@ -22,7 +22,7 @@
   export.format      导出格式（bundle）
 
 分支管理（project.json["vcs"]，工作区级；resume 依据）：
-  {"branch": "porter/e1000-20260903-a1b2",
+  {"branch": "porter/example_driver-20260903-a1b2",
    "repos": [{"root": "/abs/path", "baseline": "<sha>"}]}
   commit 前惰性校验：HEAD 已在记录分支 → 继续；不在 → 切回（会冲突则
   跳过该次 commit 并告警）。旧工作区无此节 → 不管理分支，当前分支直提。
@@ -183,7 +183,8 @@ def commit(repo: Path, msg: str, paths: list[str] | None = None,
     if paths is None:
         args = ["add", "-A", "--", "."]
         for e in (exclude or []):
-            args.append(f":(exclude){e}")
+            # A glob avoids Git rejecting an ignored literal even when excluded.
+            args.append(f":(exclude,glob)**/{e}")
         rc, out = _git(repo, *args)
         if rc != 0:
             _log.console_line(f"[porter] vcs: ⚠️ {repo} git add -A 失败："

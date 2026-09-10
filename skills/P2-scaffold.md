@@ -6,6 +6,19 @@
 由编译、启动/设备注入、单测三个 loop 验证；此时 runner 尚未生成。你不写
 任何驱动业务逻辑（不碰寄存器序列、不建 DMA 环、不收发包）。
 
+P0 分任务流程中，构建、设备、测试发现由前置 handoff 交付。本 session
+只把这些发现转成施工单；先读三个发现文件，复用已确认的先例和接口，
+仅补查生成代码所缺的签名或锚点。下方完整发现方法用于没有前置发现的
+独立 P2 校准。施工单交付后的编译、启动、单测各由独立 session 验证。
+发现文件中的后续业务建议不属于本次施工：不实现 I/O 直通/重映射、表加载
+或控制协议。骨架匹配源驱动对应的实际注入对象并记录认领，最小测试验证
+这条骨架路径；设备身份与匹配条件以 Linux 源码及迁移意图为准。
+这些后续建议必须保留：在施工单增加 `deferred_findings` 数组，每项含
+`topic`、`read_when`（后续哪个任务遇到什么需求时应读）、`finding`、
+`evidence`（源码/发现文件指针数组）、`status`（`source_confirmed` 或
+`unverified`）。覆盖前置发现中超出 P0 的有用事实、方案及待验证问题，
+不要把方案写成已实现能力。porter 将它们另发为后续开发 handoff。
+
 ## 方法（先例驱动——这是发现，不是发明）
 
 1. **找同类先例**：在目标树里找与本驱动同类别的**已有驱动**（如 NIC →
@@ -18,13 +31,15 @@
    构建系统没有现成钩子（env 变量/cmd 追加/配置文件皆可），**接线
    edits 必须包含一个树侧注入钩子 edit**（如把约定 env 追加进启动
    命令/参数生成处——QEMU、自制启动脚本同理）——缺了它 boot 会与
-   设备无关地静默通过，认领特征必然 MISS（asterinas 校准实录：树内
+   设备无关地静默通过，认领特征必然 MISS（target-os 校准实录：树内
    qemu_args.sh 无钩子，r1-r3 全败于此）。
 4. **知识库提示**（若有注入）：坑条目是前人踩过的雷（如"组件无显式
    引用则注册钩子静默不执行"类链接/注册陷阱），逐条核对是否适用于
    本目标——提示不是证据，须在树内核实。
 5. 目标树若**没有**同类先例，找最接近的组件（任何被构建收编且启动时
-   被调用的模块）作形态参考，并在 evidence_notes 里声明类比的弱化。
+   被调用的模块）作构建形态参考，并在 evidence_notes 里声明适用范围。
+   设备认领仍须具有对应的总线或框架支持；缺失时报告阻塞和所需能力，
+   不得用另一类设备替代后宣称认领成功。
 
 ## 铁律（违反即整单退回）
 
@@ -52,7 +67,7 @@
 
 ## 施工单 schema（写入输出文件的 JSON，字段名不可改）
 
-> **示例中立声明**：下面的 schema 示例是**Rust 目标树（asterinas
+> **示例中立声明**：下面的 schema 示例是**Rust 目标树（target-os
 > 形态）的一个实例**——契约是**字段语义**，不是路径/语言/构建机制。
 > driver_home 的位置、构建收编方式（Cargo/Kbuild/其他）、注册与
 > 日志习语、单测 substrate，一律以你在目标树里找到的同类先例为准；
@@ -60,24 +75,24 @@
 
 ```json
 {
-  "driver": "e1000",
-  "language": "rust",
-  "driver_home": "kernel/core/comps/e1000",
+  "driver": "example_driver",
+  "language": "<target-language>",
+  "driver_home": "path/to/driver",
   "files": [
-    {"relpath": "kernel/core/comps/e1000/src/lib.rs", "content": "// 完整文件内容…"}
+    {"relpath": "path/to/driver/src/lib.rs", "content": "// 完整文件内容…"}
   ],
   "edits": [
     {"id": "root-build-members", "file": "Cargo.toml",
-     "action": "insert", "marker": "\"kernel/core/comps/e1000\"",
-     "insert": "    \"kernel/core/comps/e1000\",\n",
+     "action": "insert", "marker": "\"path/to/driver\"",
+     "insert": "    \"path/to/driver\",\n",
      "group": "^\\s*\"kernel/core/comps/", "evidence": "Cargo.toml:12",
      "note": "构建收编"},
     {"id": "iface-prefer", "file": "net/iface.c",
-     "action": "replace", "marker": "e1000_probe() ||",
-     "find": "if (virtio_net_probe()) {", "replace": "if (e1000_probe() || virtio_net_probe()) {",
+     "action": "replace", "marker": "example_driver_probe() ||",
+     "find": "if (virtio_net_probe()) {", "replace": "if (example_driver_probe() || virtio_net_probe()) {",
      "evidence": "net/iface.c:88", "note": "优先用迁移网卡"}
   ],
-  "acceptance_patterns": ["skeleton probe hit", "e1000 component initialized"],
+  "acceptance_patterns": ["skeleton probe hit", "example_driver component initialized"],
   "probe_channel": {
     "dormitory_rel": "src/probes.rs",
     "call_site_desc": "注册钩子末尾调用 probes_run_all()",

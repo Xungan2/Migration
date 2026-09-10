@@ -179,7 +179,7 @@ def _judge_driver(r: dict, bo_log: str, runner: dict, label: str) -> dict:
     inject_device 两个可选特征（null/缺省 = 不判该项）：
     - driver_success_pattern：注入设备后 boot 日志中必须命中的目标类别
       驱动初始化特征（目标 OS 无该类别内置驱动时保持 null——P0 只验
-      "设备注入不破坏启动"，Asterinas 式目标的合法态）
+      "设备注入不破坏启动"，target OS 式目标的合法态）
     - driver_fail_pattern：驱动初始化失败特征（命中即 FAIL）
     judge 证据流独立一行（subject=<label>:driver）——与内核级行分开，
     便于归因"内核没起来"还是"驱动没起来"。
@@ -386,9 +386,16 @@ def _run_interactive(cmd: str, cwd: Path, env: dict, timeout_sec: int,
                     replied = True
                     proc.stdin.write((interaction["shutdown_cmd"] + "\n").encode())
                     proc.stdin.flush()
-                if proc.poll() is not None and not selector.get_map():
-                    rc = proc.returncode
-                    break
+                if proc.poll() is not None:
+                    # The command has exited; orphaned helpers may still hold
+                    # stdout open. Clean them, then drain buffered output to EOF.
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    if not selector.get_map():
+                        rc = proc.returncode
+                        break
         except BrokenPipeError:
             rc = proc.poll() if proc.poll() is not None else -1
         finally:

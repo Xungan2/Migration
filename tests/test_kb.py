@@ -27,6 +27,28 @@ def ok(name, cond, extra=""):
 class TestKbSkeleton(unittest.TestCase):
     maxDiff = None
 
+    def test_p0_resume_with_explicit_kb(self):
+        import argparse
+        from porter import main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "project.json").write_text(json.dumps({
+                "kb_dir": "asterinas", "linux_driver": "/source", "target_os": "/target"}))
+            knowledge = ws / "knowledge"
+            knowledge.mkdir()
+            note = knowledge / "local.md"
+            note.write_text("keep local knowledge")
+            args = argparse.Namespace(output_dir=str(ws), kb=["use", "asterinas"],
+                                      intent_file=None, t1_only=True, category=None)
+            self.assertEqual(main.cmd_p0(args), 0)
+            self.assertEqual(note.read_text(), "keep local knowledge")
+            args.kb = ["new", "asterinas"]
+            self.assertEqual(main.cmd_p0(args), 0)
+            args.kb = ["use", "different"]
+            self.assertEqual(main.cmd_p0(args), 2)
+            self.assertEqual(note.read_text(), "keep local knowledge")
+
     def test_registry(self):
         from porter.bootstrap import kb
         print("=== 域注册表 ===")

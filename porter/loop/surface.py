@@ -4,7 +4,7 @@ M 的外部符号 = refs(M) − defs(M)，四分类：
   1. cross_module   其他模块定义（∩ 全模块 defs）——非 OS API，走 deps 边
   2. mapped         全局映射表已有条目（按 verdict 细分；gap 单列供处置分类）
   3. noise          非映射对象：裁剪残留（原树有定义/切分无）、宏拼接碎片
-                    （E1000_##reg 习语的裸段）、纯字段访问位出现（.sym/->sym）
+                    （DRIVER_##reg 习语的裸段）、纯字段访问位出现（.sym/->sym）
   4. missing        真缺失——P3(M) agent 增量映射的输入（按头文件域分组）
 
 另附 #include 清单与每符号使用位置（file:line，截 5 条）供 agent 上下文。

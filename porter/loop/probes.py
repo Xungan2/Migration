@@ -134,7 +134,7 @@ def marker_of(registry_path: Path) -> str:
 
 def _scaffold_ctx(ws: Path, target_os: Path) -> tuple[Path, str, dict]:
     """(宿舍绝对路径, 语言, probe_channel 契约)——唯一真值源 = scaffold
-    manifest（2026-09-05 定案：不留 Asterinas 约定路径回落；缺失 =
+    manifest（2026-09-05 定案：不留 target OS 约定路径回落；缺失 =
     P2b 未成功完成的硬前置错误，静态 panic 而非猜测）。"""
     try:
         p = ws / "P2" / "reports" / "scaffold_manifest.json"
@@ -143,7 +143,7 @@ def _scaffold_ctx(ws: Path, target_os: Path) -> tuple[Path, str, dict]:
         m = None
     if m and m.get("dormitory"):
         return (target_os / str(m["dormitory"]),
-                str(m.get("language") or "rust"),
+                str(m["language"]),
                 m.get("probe_channel") or {})
     raise RuntimeError(
         "probe 生命周期前置缺失：scaffold_manifest.json 不存在或无 "

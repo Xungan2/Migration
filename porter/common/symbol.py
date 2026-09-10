@@ -333,7 +333,7 @@ def _consume_block(lines: list[str], opener_idx: int) -> tuple[str, int]:
     从 opener_idx 起以 depth=0 计数：天然支持单行块（`enum X { .. };`
     同行开合）与多行块。必须等见过开括号后才允许 depth<=0 退出——
     多行函数签名的 `{` 不在首行，若按 depth<=0 立即退出会把签名续行
-    （如 `struct e1000_hw *hw)`）泄漏回外层被重解析成假定义。
+    （如 `struct example_driver_hw *hw)`）泄漏回外层被重解析成假定义。
     """
     depth = 0
     seen_open = False

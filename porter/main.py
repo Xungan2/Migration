@@ -3,8 +3,8 @@
 用法：
 
     python3 porter/main.py p0 \
-        --linux-driver /path/to/linux/drivers/net/ethernet/intel/e1000 \
-        --target-os    /path/to/asterinas \
+        --linux-driver /path/to/linux/drivers/net/ethernet/intel/example_driver \
+        --target-os    /path/to/target-os \
         --materials  /path/to/notes.md  --materials /path/to/docs-dir \
         --output-dir /path/to/my-first-port \
         [--category net]

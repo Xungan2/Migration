@@ -28,8 +28,8 @@
   "categories": ["net"],
   "confidence": "high",
   "evidence": [
-    {"file": "e1000_main.c", "signal": "module_pci_driver(e1000_driver)", "implies": "pci"},
-    {"file": "e1000.h", "signal": "include linux/netdevice.h", "implies": "net"}
+    {"file": "example_driver_main.c", "signal": "module_pci_driver(example_driver_driver)", "implies": "pci"},
+    {"file": "example_driver.h", "signal": "include linux/netdevice.h", "implies": "net"}
   ],
   "subsystems": ["pci", "dma", "irq"],
   "device_id_count": 37,

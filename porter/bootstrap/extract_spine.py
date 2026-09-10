@@ -169,8 +169,8 @@ def run_extract(ws: Path, driver_root: Path) -> int:
     unresolved: list[str] = []
     internal_cut: list[str] = []
     paste_fragments: list[str] = []
-    # 宏拼接碎片检测：`E1000_##reg` 习语使源码出现裸 EECD/CTRL_EXT 等段，
-    # 真身是 E1000_EECD（已在 defs）。orig_defs 按末段 '_' 建尾段集匹配。
+    # 宏拼接碎片检测：`DRIVER_##reg` 习语使源码出现裸 EECD/CTRL_EXT 等段，
+    # 真身是 DRIVER_EECD（已在 defs）。orig_defs 按末段 '_' 建尾段集匹配。
     orig_tails = {d.rsplit("_", 1)[1] for d in orig_defs if "_" in d}
     for sym in external:
         dom = _domain_of(sym, hdr_idx, driver_includes)
