@@ -23,7 +23,7 @@ python3 porter/main.py prepare \
 
 先按[意图指南](docs/intent-guide.md)描述场景、功能范围、约束和最终成功标准。
 源码与目标目录首次运行必填；续跑可只提供 `--output-dir`。`p0` 是同一新入口的别名。
-`--prepare-only` 仅校验、保存输入；`--budget` 是整个执行过程的墙钟预算，默认 10800 秒。
+`--prepare-only` 仅校验、保存输入；`--budget` 是整个执行过程的墙钟预算，默认 3600 秒。
 目标树需可写，工具不会自动切换目标分支、重置代码或提交迁移修改。
 
 该分支只实现新架构。使用新的空工作区；旧工作区不会自动转换，也不会继续旧 P1–P7。
@@ -46,6 +46,13 @@ python3 porter/main.py prepare \
 主 agent 验收证据语义；Python 检查交付、状态和指纹，不把 JSON 成功声明当成独立机器证明。
 
 ## 开发与验证
+
+清理迁移工作区先运行 `python3 scripts/clean-workspace.py` 预览，加 `--apply` 执行。
+清理范围为 `migrations/`、`archive/`、Asterinas 的 `target/` 和 `osdk/target/`，
+以及使用 `asterinas/dev` 镜像的 `porter-*`、`spi-nor-clean-*`、`migration-asterinas-dev`
+容器及匿名卷。`--reset-target` 额外丢弃目标树修改和未跟踪文件，并切回仓库锁定提交。
+脚本保留 intent、Porter 代码、基础镜像和宿主全局模型会话；仓库外的测试副本不自动删除。
+它不清除目标仓库的 Git 历史，要求无历史干扰的实验仍应使用独立源码副本和全新模型数据目录。
 
 实现集中在 CLI、工作区输入、opencode transport、统一执行循环四个模块。
 [规格](docs/specs/unify-p01.md)和[架构决策](docs/adr/0001-unify-p0-p1.md)说明职责与范围。

@@ -188,7 +188,7 @@ agent 调用全部走 `run_agent` 唯一入口——各挂一处即全覆盖，�
 **配套改造**（同轮落地，与本模块的耦合点）：
 - 知识库挪家：`<ws>/knowledge/` + `<ws>/knowledge/temp/`（随 ws git
   入库；`--kb use` 从全局库种子化、promote 后 `sync_to_global` 回流），
-  kb 由此不单独建仓。规范见 `docs/sub-systems/knowledge.md` §3.1。
+  kb 由此不单独建仓。规范见 `docs/legacy/knowledge.md` §3.1。
 - fill 落点约束：P4 fill 平台补齐一律写
   `crate/src/external_interfaces.rs`（骨架预置 mod）——目标树改动
   集中在 crate 内，P4 模块末 commit 的显式路径即可覆盖。

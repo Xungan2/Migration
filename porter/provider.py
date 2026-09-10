@@ -5,8 +5,8 @@ from pathlib import Path
 import signal
 import subprocess
 
-SKILLS = Path(__file__).resolve().parents[1] / 'skills'
-DEFAULT_MODEL = 'zhipu-ai/glm-5.2'
+SKILLS = Path(__file__).resolve().parent / 'skills'
+DEFAULT_MODEL = 'zhipu-ai/glm-5.3-flash'
 
 
 def run(role: str, data: dict, target: Path, stem: Path, timeout: float,

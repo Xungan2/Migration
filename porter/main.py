@@ -20,7 +20,7 @@ def main(argv=None) -> int:
     prepare.add_argument('--intent-file')
     prepare.add_argument('--hints-dir')
     prepare.add_argument('--category')
-    prepare.add_argument('--budget', type=int, default=10800, help='total wall budget in seconds')
+    prepare.add_argument('--budget', type=int, default=3600, help='total wall budget in seconds')
     prepare.add_argument('--prepare-only', '--t1-only', action='store_true')
     args = parser.parse_args(argv)
     try:

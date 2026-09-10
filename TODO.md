@@ -61,7 +61,7 @@ extra_env 注入 + ANSI 变体，p6 改调共享版。
 pitfalls 与工作区 platform_patches 两处漂移。~~§15 失败签名
 （knowledge/failures.md）是事实上的第六类（域外待归位）~~
 ——已解决（2026-09-03）：failures 域归位（base+lineage 两级，
-docs/sub-systems/knowledge.md §3.2）。
+docs/legacy/knowledge.md §3.2）。
 
 要做（后续轮）：
 - 复盘一次真实迁移产生的全部候选，检验五类的实际覆盖度；
@@ -145,7 +145,7 @@ tests/test_vcs_wiring.py（seam/隔离性/panic/answers/loop/P2/P4）。
 agent 段×N+外部静态段/session 续接/总预算/同签名防打转/结果指针化）+
 run_agent_structured，并接线 P4 `_step_migrate`（真实重迁 os-probe +
 P5 判据级 55/55 验证）。存量 19 处 `run_agent` 调用点未迁移
-（覆盖地图见 docs/modules/agent.md §4）。
+（覆盖地图见 docs/legacy/agent.md §4）。
 
 要做：分批替换——🟡 机械可换 9 处（P0 T5 烟测反馈/P1D/P1R/P2a/
 P3×3/P4 fill/P5 补探/P6 draft-l4 → run_agent_structured）；
@@ -164,7 +164,7 @@ errorloop 的 `_prev_context` 手拼上下文可被 session 续接直接替代�
   不可得今天是 exit 3 停车语义，静态段需能表达"infra 中止"而非
   可重试失败（如专用异常 → outcome 映射）。
 - 多操作菜单（statics 封闭集合+窄参数）已与用户设计定案、搁置待
-  需求（docs/modules/agent.md §5 定案 9）。
+  需求（docs/legacy/agent.md §5 定案 9）。
 
 ## 12. 设备注入的命令侧自包含（qemu_args.sh 案的最终解法方向）
 
@@ -175,7 +175,7 @@ boot.cmd 自带一个正确的启动脚本（或直接内联完整 QEMU 参数�
 绕开 qemu_args.sh，使设备注入自包含于命令、不依赖树侧钩子。
 
 连带设计题：inject_device 的 env 机制是否整体退役、改显式命令内注入
-（`<DEVICE_ARGS>` 文本替换 / 命令内 `VAR=` 赋值前缀）；P0-env-extract
+（`<DEVICE_ARGS>` 文本替换 / 命令内 `VAR=` 赋值前缀）；legacy/runner-discover
 skill 加"消费点核实"铁律（grep 启动脚本链给 file:line——消费是静态
 可验证事实：变量名须出现在消费点代码，或存在动态枚举）。
 
@@ -359,7 +359,7 @@ ANSI 假 MISS 只是"清理未前置"问题类的**一个实例**，不是问题
 文件即信号），双产物 runner.json+runner.md（子集按节校验）+ 冻结
 指纹（project.json["t3_frozen"]）；三级输入之① `--hints-dir`（intent
 同款暂存）；耗尽→agent 总结→p0.t3.<cap> 关口→人答→新 session 种子
-（总结+答案）+ 小额资源续跑；skill P0-env-extract.md 重写（零真实
+（总结+答案）+ 小额资源续跑；skill legacy/runner-discover.md 重写（零真实
 OS 实例，中立铁律）。**上表消费侧清单不受影响，照旧分批。**
 
 **入手点**：消费侧清单逐项分批。

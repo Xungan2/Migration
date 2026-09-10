@@ -68,8 +68,8 @@ docker exec -w /root/asterinas/kernel/libs/ring-buffer -e CONSOLE=ttyS0 \
 容器停止后可用 `docker start migration-asterinas-dev` 恢复。构建命令
 应在容器内执行：initramfs 产物包含指向容器内 Nix store 的符号链接。
 
-## 设计与环境验证的区别
+## 历史基线与当前验证
 
-P0 骨架前置、三个 loop 和默认关闭 P2a 的确认方案记录于
-[p0-three-loops.md](p0-three-loops.md)，编排改造已实现；本页记录的是目标 OS 基线验证，完整 agent 发现流程需安装 opencode 后另行实跑。
-本次环境验证针对上游 Asterinas；不表示新驱动骨架或驱动迁移已通过验收。
+本页是上游 Asterinas 的历史环境记录，列出的容器、缓存和旧产物不用于新 P0
+的干净验收。当前执行约定见[自主 P0](p0-three-loops.md)，复验步骤见
+[干净验证](p0-clean-verification.md)。本页不能证明新驱动骨架已经编译或载入。
