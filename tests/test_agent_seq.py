@@ -248,6 +248,32 @@ class TestRunAgentSeq(unittest.TestCase):
         journal = json.loads(Path(f"{stem}.seq.json").read_text())
         self.assertEqual(journal["status"], "done")
 
+    def test_nonphase_json_block_counted(self):
+        # 混排观测：消息里内联非 phase 形状 JSON 块（如交付物形）+
+        # 合法 done 块 → 轮次记 nonphase_json_blocks，解析仍取 done
+        ws, stem = self._ws()
+        # 构造：交付物形块在前、done 块在后
+        text = ("研究说明。\n```json\n"
+                + json.dumps({"module": "fx", "mappings": []},
+                             ensure_ascii=False)
+                + "\n```\n中间叙述\n```json\n"
+                + json.dumps({"phase": "done"}, ensure_ascii=False)
+                + "\n```")
+        r = Runner([(0, _ev("ses_N1", text))])
+        with mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq("T", ws, stem, agent_budget_sec=60)
+        self.assertEqual(out["status"], "done")
+        self.assertEqual(out["rounds"][0]["nonphase_json_blocks"], 1)
+
+    def test_clean_message_no_nonphase_key(self):
+        # 干净消息（仅 done 块）→ 无 nonphase_json_blocks 键
+        ws, stem = self._ws()
+        r = Runner([(0, _ev("ses_N2", _phase_text({"phase": "done"})))])
+        with mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq("T", ws, stem, agent_budget_sec=60)
+        self.assertEqual(out["status"], "done")
+        self.assertNotIn("nonphase_json_blocks", out["rounds"][0])
+
     def test_fallback_transcript(self):
         ws, stem = self._ws()
         fn, calls = _static_fn(False, "compile error boom")
@@ -290,9 +316,13 @@ class TestRunAgentSeq(unittest.TestCase):
         ws, stem = self._ws()
         r = Runner([])
         with mock.patch.dict(os.environ, {"PORTER_NO_AGENT": "1"}):
-            out = agent.run_agent_seq("T", ws, stem)
+            out = agent.run_agent_seq("T-prompt-body", ws, stem)
         self.assertEqual(out["status"], "no-agent")
         self.assertEqual(r.calls, [])
+        # 冒烟模式也落 prompt 文件（观测注入内容）
+        self.assertIn("T-prompt-body",
+                      Path(f"{stem}_S1.prompt.md").read_text(
+                          encoding="utf-8"))
 
     def test_opencode_missing_fail_fast(self):
         ws, stem = self._ws()
@@ -325,6 +355,104 @@ class TestRunAgentSeq(unittest.TestCase):
         sigs = [rd["static"]["sig"] for rd in out["rounds"]]
         self.assertEqual(sigs[0], sigs[1])
         self.assertTrue(all(sigs))
+
+    def test_stall_meta_round_defers_stall(self):
+        # stall_meta_rounds=1：同签名第 2 败注入元反馈续 1 轮，第 3 败
+        # 才 stalled（元反馈打破"同款修改重试"自欺循环）
+        ws, stem = self._ws()
+        A = ("error[E0308]: mismatch at /a/b/c.rs:12:5\n"
+             "build FAILED 2026-09-04T09:00:00")
+        outputs = iter([A, A, A])
+        fn = lambda: (False, next(outputs))          # noqa: E731
+        r = Runner([
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "1"}))),
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "2"}))),
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "3"}))),
+        ])
+        with mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq(
+                "T", ws, stem, static={"describe": "编译", "fn": fn},
+                agent_budget_sec=600, stall_meta_rounds=1)
+        self.assertEqual(out["status"], "stalled")
+        self.assertEqual(len(r.calls), 3)
+        self.assertEqual(out.get("stall_meta_used"), 1)
+        self.assertIn("停滞预警", r.messages[2])
+        self.assertIn("相同错误签名", r.messages[2])
+
+    def test_stall_meta_disabled_keeps_old_behavior(self):
+        # 默认 stall_meta_rounds=0：两次同签名即 stalled（旧语义不变）
+        ws, stem = self._ws()
+        A = "error[E0308]: mismatch at /a/b/c.rs:12:5"
+        outputs = iter([A, A, A])
+        fn = lambda: (False, next(outputs))          # noqa: E731
+        r = Runner([
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "1"}))),
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "2"}))),
+        ])
+        with mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq(
+                "T", ws, stem, static={"describe": "编译", "fn": fn},
+                agent_budget_sec=600)
+        self.assertEqual(out["status"], "stalled")
+        self.assertEqual(len(r.calls), 2)
+        self.assertNotIn("stall_meta_used", out)
+
+    def test_fix_floor_grant_and_bound(self):
+        # fix_floor_sec：预算耗尽后给一次性宽限段（seg>=1 才生效），
+        # 宽限也耗尽 → budget-exhausted（总上界 = 预算 + floor）
+        ws, stem = self._ws()
+        results = iter([("err unique alpha", ), ("err unique beta", )])
+        fn = lambda: (False, next(results)[0])       # noqa: E731
+        r = Runner([
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "1"}))),
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "2"}))),
+        ])
+        times = iter([0.0, 100.0, 100.0, 160.0, 1e9, 1e9])
+
+        def _t():
+            try:
+                return next(times)
+            except StopIteration:
+                return 1e9
+        with mock.patch.object(agent.time, "time", _t), \
+                mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq(
+                "T", ws, stem, static={"describe": "编译", "fn": fn},
+                agent_budget_sec=100, fix_floor_sec=300)
+        self.assertEqual(out["status"], "budget-exhausted")
+        self.assertEqual(len(r.calls), 2)     # 第 2 段是宽限段
+        self.assertTrue(out.get("floor_grace"))
+
+    def test_fix_floor_default_off(self):
+        # 默认 fix_floor_sec=0：预算耗尽即停（旧语义不变）
+        ws, stem = self._ws()
+        fn = lambda: (False, "err unique gamma")     # noqa: E731
+        r = Runner([
+            (0, _ev("ses_S", _phase_text({"phase": "run_static",
+                                          "message": "1"}))),
+        ])
+        times = iter([0.0, 100.0, 1e9])
+
+        def _t():
+            try:
+                return next(times)
+            except StopIteration:
+                return 1e9
+        with mock.patch.object(agent.time, "time", _t), \
+                mock.patch.object(agent, "_opencode_json_runner", r):
+            out = agent.run_agent_seq(
+                "T", ws, stem, static={"describe": "编译", "fn": fn},
+                agent_budget_sec=100)
+        self.assertEqual(out["status"], "budget-exhausted")
+        self.assertEqual(len(r.calls), 1)
+        self.assertNotIn("floor_grace", out)
 
     def test_static_ok_resets_sig_then_done(self):
         ws, stem = self._ws()

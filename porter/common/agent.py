@@ -422,7 +422,7 @@ def _parse_phase(text: str) -> dict | None:
       新协议  {"phase":"run_static"|"done", ...}
       老契约  {"status":"done"|"blocked", ...}——现存 skill（P4-migrate
               等）教的输出格式；done 等价 phase=done，blocked 作为
-              携带 status 的 done 交还调用方走既有 panic 流程。
+      携带 status 的 done 交还调用方走既有 panic 流程。
     找不到返回 None。
     """
     if not text:
@@ -442,6 +442,26 @@ def _parse_phase(text: str) -> dict | None:
         if hit:
             return hit
     return None
+
+
+def _count_nonphase_json(text: str) -> int:
+    """消息里非 phase 形状 JSON 对象块计数（诊断观测，不做判定）。
+
+    用途：agent 把重内容（如研究交付物形 JSON）内联进消息的倾向——
+    设计上重内容应走文件、消息只留薄信号；计数进轮次记录供人审/回灌
+    纠正，非阻断。
+    """
+    if not text:
+        return 0
+    n = 0
+    for obj in _response_objects(text):
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("phase") in _SEQ_PHASES \
+                or obj.get("status") in ("done", "blocked"):
+            continue
+        n += 1
+    return n
 
 
 def _static_sig(text: str, tail_lines: int = SEQ_TAIL_LINES) -> str:
@@ -635,7 +655,9 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                   final_static: bool = False,
                   model: str | None = None,
                   task: dict | None = None,
-                  resume_session: str | None = None) -> dict:
+                  resume_session: str | None = None,
+                  fix_floor_sec: int = 0,
+                  stall_meta_rounds: int = 0) -> dict:
     """split_long_op：agent 段 × N + 中间静态段的非交互长任务执行。
 
     参数：
@@ -651,6 +673,14 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
       resume_session  续接既有 provider 会话（此前超时/中断的 session
                       id）；段 1 即以该会话续跑——task_prompt 重发为
                       再锚定，agent 保留原上下文继续
+      fix_floor_sec   修复段预算下限（opt-in，默认 0 关闭）：预算耗尽
+                      时给**一次性**宽限段（防主段吃光预算后修复段被
+                      秒杀——ids S4 3s 被杀先例）；总时长上界 =
+                      预算 + fix_floor_sec
+      stall_meta_rounds 停滞元反馈轮数（opt-in，默认 0 = 同签名连败
+                      即 stalled 旧行为）：达到阈值时先注入一轮"换思路"
+                      元反馈继续循环，再败才 stalled——自欺型盲点
+                      （replaceAll 只匹配一种形态）靠元提示打破
 
     段间接续：主路径 --session（无信息损失）；session id 解析不到时
     兜底为"模仿交互式轮次"的 prompt 注入（outcome["fallback"]=True）。
@@ -658,7 +688,8 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
     返回 outcome：{"status": done|stalled|budget-exhausted|failed|no-agent,
       "session_id", "fallback", "rounds": [{seg, stem, rc, elapsed_sec,
       phase, schema_errs, static: {ok, sig}|None}], "parsed",
-      "total_agent_sec"}。轮次日志落 <log_stem>.seq.json。
+      "total_agent_sec", "floor_grace"?, "stall_meta_used"?}。
+      轮次日志落 <log_stem>.seq.json。
     """
     workdir = Path(workdir)
     stem_base = str(log_stem)
@@ -666,6 +697,12 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                      "fallback": False,
                      "rounds": [], "parsed": None, "total_agent_sec": 0.0}
     if os.environ.get("PORTER_NO_AGENT"):
+        # 冒烟也落 prompt 文件（观测注入内容——handoff Q7 顺修）
+        try:
+            Path(f"{stem_base}_S1.prompt.md").write_text(
+                task_prompt, encoding="utf-8")
+        except OSError:
+            pass
         outcome["status"] = "no-agent"
         return outcome
 
@@ -682,14 +719,45 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
     seg = 0
     prev_sig = ""
     sig_repeat = 1
+    floor_grace_used = False
+    meta_used = 0
     pending_user: str = ""          # 下一段要发的新增消息（静态结果/反馈）
     session_id: str | None = resume_session
+
+    def _stall_or_meta() -> bool:
+        """同签名连发达阈值：先元反馈续命（有配额时），再败返回 True。
+
+        返回 True = 应置 stalled；False = 已注入元反馈，继续循环。
+        """
+        nonlocal meta_used, pending_user
+        if sig_repeat < SEQ_SAME_SIG_REPEAT:
+            return False
+        if meta_used < stall_meta_rounds:
+            meta_used += 1
+            outcome["stall_meta_used"] = meta_used
+            meta_text = (
+                "\n\n## 停滞预警（元反馈）\n"
+                f"静态验证已连续 {sig_repeat} 次返回**相同错误签名**——"
+                "你此前的修复思路没有生效。请停止重复同款修改：重读"
+                "完整日志定位**第一个**错误、枚举你尚未检查的假设、"
+                "换一条修复路径。若确实无解，输出 blocked 交人工。")
+            pending_user += meta_text
+            turns.append({"role": "user", "text": meta_text.strip()})
+            return False
+        return True
 
     while outcome["status"] is None:
         remaining = agent_budget_sec - used
         if remaining <= 0:
-            outcome["status"] = "budget-exhausted"
-            break
+            # 修复段一次性宽限：已有 ≥1 个完成段且配置了下限——给一段
+            # floor 预算（总上界 = 预算 + fix_floor_sec，不会无限续命）
+            if fix_floor_sec > 0 and seg >= 1 and not floor_grace_used:
+                remaining = fix_floor_sec
+                floor_grace_used = True
+                outcome["floor_grace"] = True
+            else:
+                outcome["status"] = "budget-exhausted"
+                break
         seg += 1
         stem = f"{stem_base}_S{seg}"
         budget_note = (f"\n\n（agent 时间预算剩余约 "
@@ -735,6 +803,10 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                            "elapsed_sec": round(elapsed, 1),
                            "phase": (phase_obj or {}).get("phase"),
                            "schema_errs": [], "static": None}
+        if phase_obj is not None:
+            _nonphase = _count_nonphase_json(final_text)
+            if _nonphase:
+                round_rec["nonphase_json_blocks"] = _nonphase
         if rc != 0:
             outcome["status"] = "failed"
             outcome["rounds"].append(round_rec)
@@ -793,7 +865,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             _run_static()
             outcome["rounds"].append(round_rec)
             _journal()
-            if sig_repeat >= SEQ_SAME_SIG_REPEAT:
+            if _stall_or_meta():
                 outcome["status"] = "stalled"
                 break
             continue
@@ -825,7 +897,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                 outcome["status"] = "done"
                 outcome["parsed"] = phase_obj
                 break
-            if sig_repeat >= SEQ_SAME_SIG_REPEAT:
+            if _stall_or_meta():
                 outcome["status"] = "stalled"
                 break
             continue
