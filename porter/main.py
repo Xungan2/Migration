@@ -1169,6 +1169,39 @@ def cmd_handoff(args) -> int:
     return 2
 
 
+def cmd_exp_mono(args) -> int:
+    """实验：单体模块迁移 loop（P1 结尾直连；三段复合 gate 驱动）。"""
+    from porter.exp import mono as mono_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+    return mono_mod.run_exp_mono(ws, module=args.module,
+                                 budget=args.budget,
+                                 session=args.session)
+
+
+def cmd_exp_accept(args) -> int:
+    """实验：整驱动系统验收（接 exp-mono 终态；4 层判定 + 自动修环）。"""
+    from porter.exp import accept as accept_mod
+    ws = Path(args.output_dir).resolve()
+    if not (ws / "project.json").exists():
+        _log.console_line(f"[porter] 工作区不存在：{ws}（先跑 p0）")
+        return 2
+    mode = "resume"
+    if args.draft:
+        mode = "draft"
+    elif args.execute:
+        mode = "execute"
+    elif args.diagnose:
+        mode = "diagnose"
+    elif args.redraft:
+        mode = "redraft"
+    return accept_mod.run_exp_accept(ws, mode=mode,
+                                     budget=args.budget,
+                                     session=args.session)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="porter",
@@ -1445,6 +1478,33 @@ def main(argv=None) -> int:
     p7cmd.add_argument("--note", default=None,
                        help="（closed 时）处置理由入档")
     p7cmd.set_defaults(func=cmd_p7)
+
+    expm = sub.add_parser("exp-mono", help="实验：单体模块迁移 loop（P1 结尾直连；研究+翻译一体的迁移者 ×N 模块）")
+    expm.add_argument("--output-dir", required=True, help="迁移工作区根目录（须有 P1 modules + P2 scaffold manifest）")
+    expm.add_argument("--module", default=None, metavar="NAME",
+                      help="单模块调试/重跑入口（须在 deps order 内且依赖全 pass）")
+    expm.add_argument("--budget", type=int, default=None, metavar="SEC",
+                      help="覆盖本模块 agent 预算（秒；缺省用行数公式 clamp(900, LOC×1.3, 4200)）")
+    expm.add_argument("--session", default=None, metavar="ID",
+                      help="续接既有 provider 会话（如超时中断后断点续跑；ledger 记录各模块 session_id）")
+    expm.set_defaults(func=cmd_exp_mono)
+
+    expa = sub.add_parser("exp-accept", help="实验：整驱动系统验收（接 exp-mono 终态；L1 编译/L2 单测/L3 设备+驱动启动/L4 端到端，红项自动修环）")
+    expa.add_argument("--output-dir", required=True, help="迁移工作区根目录（须有 exp-mono ledger 全 pass）")
+    expa_modes = expa.add_mutually_exclusive_group()
+    expa_modes.add_argument("--draft", action="store_true",
+                            help="agent 设计验收方案（文件即信号 + 静态证据核查回炉；完成后人审放行）")
+    expa_modes.add_argument("--execute", action="store_true",
+                            help="执行验收矩阵（幂等脚手架 → L1→L3→L4→L2 成本升序 → 红项自动修环）")
+    expa_modes.add_argument("--diagnose", action="store_true",
+                            help="断点续修（对 ledger 红项跑修环；配合 --session 续接）")
+    expa_modes.add_argument("--redraft", action="store_true",
+                            help="数据面缺陷重开草案（带失败证据，须重新人审）")
+    expa.add_argument("--budget", type=int, default=None, metavar="SEC",
+                      help="覆盖 agent 预算（秒；草案缺省 1800 / 修环缺省 2400）")
+    expa.add_argument("--session", default=None, metavar="ID",
+                      help="续接既有 provider 会话（超时/中断后断点续跑）")
+    expa.set_defaults(func=cmd_exp_accept)
 
     args = ap.parse_args(argv)
     from porter.handoff.integration import execute_cli as _execute_handoff

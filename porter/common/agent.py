@@ -634,7 +634,8 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                   gen_schema: dict | None = None,
                   final_static: bool = False,
                   model: str | None = None,
-                  task: dict | None = None) -> dict:
+                  task: dict | None = None,
+                  resume_session: str | None = None) -> dict:
     """split_long_op：agent 段 × N + 中间静态段的非交互长任务执行。
 
     参数：
@@ -647,18 +648,22 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
       gen_schema      done 时必填字段+浅类型，如 {"files": "list"}
       final_static    True 时 done 后编排器再强制跑一次静态段终验，
                       失败则带结果回循环（仿 p4 probe_build 后验）
+      resume_session  续接既有 provider 会话（此前超时/中断的 session
+                      id）；段 1 即以该会话续跑——task_prompt 重发为
+                      再锚定，agent 保留原上下文继续
 
     段间接续：主路径 --session（无信息损失）；session id 解析不到时
     兜底为"模仿交互式轮次"的 prompt 注入（outcome["fallback"]=True）。
 
     返回 outcome：{"status": done|stalled|budget-exhausted|failed|no-agent,
       "session_id", "fallback", "rounds": [{seg, stem, rc, elapsed_sec,
-      phase, schema_errs, static: {ok, sig}|None}], "parsed", 
+      phase, schema_errs, static: {ok, sig}|None}], "parsed",
       "total_agent_sec"}。轮次日志落 <log_stem>.seq.json。
     """
     workdir = Path(workdir)
     stem_base = str(log_stem)
-    outcome: dict = {"status": None, "session_id": None, "fallback": False,
+    outcome: dict = {"status": None, "session_id": resume_session,
+                     "fallback": False,
                      "rounds": [], "parsed": None, "total_agent_sec": 0.0}
     if os.environ.get("PORTER_NO_AGENT"):
         outcome["status"] = "no-agent"
@@ -678,7 +683,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
     prev_sig = ""
     sig_repeat = 1
     pending_user: str = ""          # 下一段要发的新增消息（静态结果/反馈）
-    session_id: str | None = None
+    session_id: str | None = resume_session
 
     while outcome["status"] is None:
         remaining = agent_budget_sec - used
