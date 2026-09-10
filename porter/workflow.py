@@ -21,7 +21,7 @@ def fingerprints(paths: list[str]) -> dict:
             raise ValueError(f'Evidence/input must be an absolute regular file: {name}')
         if not path.stat().st_size:
             raise ValueError(f'Empty evidence/input: {path}')
-        result[str(path.resolve())] = digest(path)
+        result[str(path)] = digest(path)
     return result
 
 
@@ -47,12 +47,14 @@ class Preparation:
 
     def context(self) -> str:
         source = Path(self.project['linux_driver'])
-        files = [p for p in source.rglob('*') if '.git' not in p.relative_to(source).parts]
+        files = [p for p in source.rglob('*')
+                 if '.git' not in p.relative_to(source).parts and not p.is_relative_to(self.ws)]
         files += [self.ws / 'project.json', self.ws / 'goals.md', self.ws / 'answers.md']
         files += list((self.ws / 'inputs').rglob('*.md'))
         for name in self.project.get('materials', []):
             path = Path(name)
-            files += list(path.rglob('*')) if path.is_dir() else [path]
+            files += [p for p in path.rglob('*') if not p.is_relative_to(self.ws)
+                      and '.git' not in p.relative_to(path).parts] if path.is_dir() else [path]
         values = [(str(p), digest(p)) for p in sorted(set(files)) if p.is_file()]
         return hashlib.sha256(json.dumps(values).encode()).hexdigest()
 
@@ -216,10 +218,23 @@ class Preparation:
                     if not isinstance(prompt, str) or not prompt.strip():
                         raise ValueError('Task requires objective, scope and delivery expectations')
                     # ponytail: sequential tasks guarantee one code writer; parallelize read-only research if needed.
-                    task = self.invoke('task', {'prompt': prompt, 'inputs': inputs})
-                    self.handoff('task', task.get('report', ''))
-                    if task.get('status') not in ('delivered', 'blocked'):
-                        raise ValueError('Task status must be delivered or blocked')
+                    delivery = self.handoffs / f'{time.time_ns()}-task-{uuid.uuid4().hex[:8]}.md'
+                    try:
+                        task = self.invoke('task', {'prompt': prompt, 'inputs': inputs,
+                                                    'handoff': str(delivery)})
+                        if task.get('status') not in ('delivered', 'blocked'):
+                            raise ValueError('Task status must be delivered or blocked')
+                        report = task.get('report')
+                        if not isinstance(report, str) or not report.strip():
+                            raise ValueError('Task must deliver a nonempty report')
+                        delivery.write_text(f"# Task: {task['status']}\n\n{report}\n", encoding='utf-8')
+                    except (OSError, ValueError, RuntimeError, KeyboardInterrupt):
+                        # Preserve the executor's checkpoint, even when no final response arrives.
+                        with delivery.open('a', encoding='utf-8') as stream:
+                            stream.write(f'\n\nTask did not finish. Objective: {prompt}\n'
+                                         f'Inputs: {inputs}\nProvider: {self.state.get("last_call")}\n'
+                                         'Any findings not recorded above remain unknown.\n')
+                        raise
                 elif action == 'blocked':
                     self.handoff('owner-blocked', result.get('report', ''))
                     self.sync_knowledge()

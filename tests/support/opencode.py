@@ -14,9 +14,11 @@ role = data['role']
 scenario = os.environ.get('SCENARIO', 'success')
 session = sys.argv[sys.argv.index('--session') + 1] if '--session' in sys.argv else role + '-session'
 with (ws / 'provider-calls.jsonl').open('a') as stream:
-    stream.write(json.dumps({'role': role, 'session': session, 'data': data}) + '\n')
+    stream.write(json.dumps({'role': role, 'session': session, 'resumed': '--session' in sys.argv, 'data': data}) + '\n')
 history = [json.loads(line) for line in (ws / 'provider-calls.jsonl').read_text().splitlines()]
-if scenario == 'timeout':
+if scenario == 'task-timeout' and role == 'task':
+    Path(data['handoff']).write_text('Partial finding: driver has one entry point. Next: inspect dependencies.')
+if scenario == 'timeout' or (scenario == 'task-timeout' and role == 'task'):
     child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])
     (ws / 'child.pid').write_text(str(child.pid))
     print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': 'partial output'}}), flush=True)
@@ -32,7 +34,7 @@ if scenario == 'task-writes-knowledge' and role == 'task':
     (ws / 'knowledgebase/unauthorized.md').write_text('task must not own this')
 if role == 'owner':
     tasks = [c for c in history if c['role'] == 'task']
-    if scenario in ('tasks', 'reorganize', 'task-writes-knowledge') and len(tasks) < 2:
+    if scenario in ('tasks', 'reorganize', 'task-writes-knowledge', 'task-timeout') and len(tasks) < 2:
         inputs = ([str(Path(data['project']['linux_driver']) / 'driver.c')] if not tasks else
                   [p for p in data['handoff_index'] if '-task-' in p][-1:])
         result = {'action': 'task', 'prompt': 'Investigate driver dependencies; report evidence only.', 'inputs': inputs}

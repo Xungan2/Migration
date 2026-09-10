@@ -240,6 +240,55 @@ class UnifiedTest(unittest.TestCase):
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
+    def test_workspace_outputs_do_not_invalidate_enclosing_source_or_material(self):
+        self.ws = self.source / 'work'
+        self.args[self.args.index('--output-dir') + 1] = str(self.ws)
+        result = self.cli('--materials', str(self.source))
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(self.cli('--materials', str(self.source)).returncode, 0)
+
+    def test_interrupted_task_preserves_partial_handoff(self):
+        self.env['SCENARIO'] = 'task-timeout'
+        result = self.cli('--budget', '1')
+        self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+        handoffs = list((self.ws / 'prepare/handoffs').glob('*task*.md'))
+        self.assertTrue(any('Partial finding' in p.read_text() for p in handoffs))
+        self.env['SCENARIO'] = 'success'
+        self.assertEqual(self.cli().returncode, 0)
+        self.assertTrue(any('Partial finding' in p.read_text() for p in handoffs))
+
+    def test_lost_knowledge_session_replays_pending_handoffs(self):
+        self.env['SCENARIO'] = 'knowledge-failed'
+        self.assertEqual(self.cli().returncode, 3)
+        accepted = json.loads((self.ws / 'prepare/state.json').read_text())['acceptance']
+        self.env['SCENARIO'] = 'session-lost'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        state = json.loads((self.ws / 'prepare/state.json').read_text())
+        self.assertEqual(state['acceptance'], accepted)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        knowledge = [c for c in calls if c['role'] == 'knowledge']
+        self.assertEqual([c['resumed'] for c in knowledge], [False, True, False])
+        self.assertEqual(knowledge[-1]['data']['handoffs'], knowledge[-2]['data']['handoffs'])
+        self.assertTrue(all(p in state['incorporated'] for p in knowledge[-1]['data']['handoffs']))
+
+    def test_repointed_source_reference_requires_owner_review(self):
+        first = self.target / 'first.c'
+        first.write_text('initial target source')
+        link = self.target / 'skeleton.c'
+        link.symlink_to(first)
+        self.assertEqual(self.cli().returncode, 0)
+        second = self.target / 'second.c'
+        second.write_text('changed source selected by build')
+        link.unlink()
+        link.symlink_to(second)
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        self.assertTrue(any(c['role'] == 'owner' and
+                            c['data'].get('acceptance', {}).get('skeleton', {}).get('status') == 'needs-review'
+                            for c in calls))
+
 
 if __name__ == '__main__':
     unittest.main()
