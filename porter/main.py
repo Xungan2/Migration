@@ -24,9 +24,17 @@ def main(argv=None) -> int:
     prepare.add_argument('--prepare-only', '--t1-only', action='store_true')
     pre_mono = commands.add_parser('pre-mono', help='prepare executable mono inputs')
     pre_mono.add_argument('--output-dir', required=True)
+    mono = commands.add_parser('mono', help='migrate modules from pre-mono inputs')
+    mono.add_argument('--output-dir', required=True)
+    mono.add_argument('--module')
+    mono.add_argument('--module-research')
+    mono.add_argument('--session')
+    mono.add_argument('--budget', type=int)
+    mono.add_argument('--budget-research', type=int)
+    mono.add_argument('--budget-translate', type=int)
     args = parser.parse_args(argv)
     try:
-        if args.budget <= 0:
+        if getattr(args, 'budget', None) is not None and args.budget <= 0:
             raise ValueError('budget must be positive')
         ws = Path(args.output_dir).resolve()
         with workspace.locked(ws):
@@ -36,6 +44,14 @@ def main(argv=None) -> int:
                 workspace.append_runbook(ws, 'pre-mono', rc, sys.argv,
                                          '- 产物：`mono-input-manifest.json`、`mono-input-report.md`')
                 return rc
+            if args.command == 'mono':
+                from porter.exp.mono import run_exp_mono
+                return run_exp_mono(ws, module=args.module,
+                                    budget=args.budget,
+                                    session=args.session,
+                                    budget_research=args.budget_research,
+                                    budget_translate=args.budget_translate,
+                                    module_research=args.module_research)
             project = workspace.prepare(args)
             if args.prepare_only:
                 print(f'[porter] Inputs ready: {ws}; no acceptance performed.')
