@@ -910,7 +910,7 @@ def _write_report(ws: Path, exp_dir: Path, ledger: dict, order: list[str],
     if terminal:
         term_lines = [f"- 全量单测：{'PASS' if terminal.get('ut_ok') else 'FAIL'}"
                       f" —— {terminal.get('ut_detail', '')}",
-                      f"- 启动冒烟（非阻断留档）："
+                      f"- 驱动自启动（必要验收）："
                       f"{'PASS' if (terminal.get('boot') or {}).get('ok') else 'FAIL'}"
                       f" —— {(terminal.get('boot') or {}).get('detail', '—')}"]
     know_lines = []
@@ -1295,6 +1295,17 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
                           f"{entry.get('notes', '')}——停车（交付物/平台"
                           "能力问题走人工，不硬编）")
     if ok:
+        # Keep current module facts in the shared knowledgebase at the
+        # completion seam; later modules consume this instead of stale logs.
+        kb = ws / "knowledgebase" / "modules"
+        kb.mkdir(parents=True, exist_ok=True)
+        (kb / f"{module}.md").write_text(
+            f"# {module}\n\n"
+            f"- status: pass\n"
+            f"- migrated_functions: {json.dumps(entry.get('migrated_functions', []), ensure_ascii=False)}\n"
+            f"- tests: {json.dumps(entry.get('tests', []), ensure_ascii=False)}\n"
+            f"- untested: {json.dumps(entry.get('untested', []), ensure_ascii=False)}\n"
+            f"- notes: {entry.get('notes', '')}\n", encoding="utf-8")
         try:
             from ..common import vcs as _vcs
             entry["commit"] = _vcs.commit_target(
@@ -1339,10 +1350,12 @@ def _terminal(ws: Path, exp_dir: Path, runner: dict, proj: dict,
                                     label="final_boot")
     except Exception as ex:
         boot = {"ok": False, "detail": f"boot 冒烟异常：{ex!r}"}
-    _log.console_line(f"[porter] exp-mono: 终局全量单测 "
-                      f"{'PASS' if ut_ok else 'FAIL'}；启动冒烟（非阻断）"
-                      f" {'PASS' if boot.get('ok') else 'FAIL'}")
-    return {"ut_ok": ut_ok, "ut_detail": ut_detail, "boot": boot}
+    boot_ok = bool(boot.get("ok"))
+    _log.console_line(f"[porter] exp-mono: 终局编译/单测 "
+                      f"{'PASS' if ut_ok else 'FAIL'}；驱动自启动 "
+                      f"{'PASS' if boot_ok else 'FAIL'}（均为必要验收）")
+    return {"ut_ok": ut_ok, "ut_detail": ut_detail, "boot": boot,
+            "boot_ok": boot_ok}
 
 
 # ---------- 主入口 ----------
@@ -1491,6 +1504,6 @@ def run_exp_mono(ws: Path, module: str | None = None,
     done = sum(1 for m in order
                if (ledger["modules"].get(m) or {}).get("status") == "pass")
     _log.console_line(f"[porter] exp-mono: 结束（{done}/{len(order)} pass）")
-    if terminal and not terminal["ut_ok"]:
+    if terminal and (not terminal["ut_ok"] or not terminal.get("boot_ok")):
         return 1
     return 0
