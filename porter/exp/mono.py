@@ -1,4 +1,4 @@
-"""mono.py — exp-mono：模块迁移 loop（实验子命令，直连 P1 结尾）。
+"""mono.py — exp-mono：模块迁移 loop（实验子命令，接 pre-mono 产物）。
 
 形态（2026-09-10 拆分改造）：每模块两段任务——**研究者 agent**（只读
 目标树，产出结构化研究交付物）+ **翻译者 agent**（消费交付物，写码+
@@ -968,7 +968,7 @@ def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
                   budget_override: int | None = None,
                   session_override: str | None = None,
                   model: str | None = None) -> int:
-    mdir = ws / "P1" / "modules" / module
+    mdir = ws / "mono-input" / "modules" / module
     mod_json = _read_json(mdir / "module.json") or {}
     spec_files = sorted(p for p in mdir.iterdir()
                         if p.is_file() and p.suffix in (".c", ".h"))
@@ -1096,7 +1096,7 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
                    ledger: dict, budget_override: int | None = None,
                    session_override: str | None = None,
                    model: str | None = None) -> int:
-    mdir = ws / "P1" / "modules" / module
+    mdir = ws / "mono-input" / "modules" / module
     mod_json = _read_json(mdir / "module.json") or {}
     spec_files = sorted(p for p in mdir.iterdir()
                         if p.is_file() and p.suffix in (".c", ".h"))
@@ -1405,8 +1405,7 @@ def _run_exp_mono(ws: Path, module: str | None = None,
     model_research, model_coding = models
     proj = _read_json(ws / "project.json") or {}
     runner = _read_json(ws / "runner.json") or {}
-    deps = (_read_json(ws / "migration-plan.json")
-            or _read_json(ws / "P1" / "modules" / "deps.json") or {})
+    deps = _read_json(ws / "migration-plan.json") or {}
     manifest = (_read_json(ws / "mono-input-manifest.json") or
                 _read_json(ws / "P2" / "reports" /
                            "scaffold_manifest.json") or {})

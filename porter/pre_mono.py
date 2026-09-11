@@ -6,9 +6,7 @@ from pathlib import Path
 def run(ws: Path) -> int:
     plan_path = ws / "migration-plan.json"
     if not plan_path.exists():
-        plan_path = ws / "P1" / "modules" / "deps.json"
-    if not plan_path.exists():
-        raise ValueError("pre-mono requires migration-plan.json or P1/modules/deps.json")
+        raise ValueError("pre-mono requires migration-plan.json")
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
     order = list(plan.get("order") or [])
     raw = plan.get("modules") or {}
