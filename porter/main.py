@@ -12,7 +12,7 @@ from porter import workspace
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog='porter')
     commands = parser.add_subparsers(dest='command', required=True)
-    prepare = commands.add_parser('prepare', aliases=['p0'], help='build/load skeleton and suggest migration plan')
+    prepare = commands.add_parser('prepare', help='build/load skeleton and suggest migration plan')
     prepare.add_argument('--output-dir', required=True)
     prepare.add_argument('--linux-driver')
     prepare.add_argument('--target-os')
