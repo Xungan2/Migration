@@ -17,10 +17,15 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def fingerprints(paths: list[str]) -> dict:
+def fingerprints(paths: list[str], *, allow_directories: bool = False) -> dict:
     result = {}
     for name in paths:
         path = Path(name)
+        if allow_directories and path.is_absolute() and path.is_dir():
+            contents = [(str(p.relative_to(path)), digest(p))
+                        for p in sorted(path.rglob('*')) if p.is_file()]
+            result[str(path)] = hashlib.sha256(json.dumps(contents).encode()).hexdigest()
+            continue
         if not path.is_absolute() or not path.is_file():
             raise ValueError(f'Evidence/input must be an absolute regular file: {name}')
         if not path.stat().st_size:
@@ -69,7 +74,7 @@ class Preparation:
             if decision['status'] != 'pass':
                 continue
             try:
-                unchanged = fingerprints(list(decision['files'])) == decision['files']
+                unchanged = fingerprints(list(decision['files']), allow_directories=True) == decision['files']
             except (OSError, ValueError):
                 unchanged = False
             if decision['context'] != context or not unchanged:
@@ -174,10 +179,11 @@ class Preparation:
             if not isinstance(evidence, list) or not isinstance(inputs, list):
                 raise ValueError('Evidence and inputs must be lists')
             if not all(isinstance(p, str) for p in evidence + inputs):
-                raise ValueError('Evidence and inputs must be file paths')
+                raise ValueError('Evidence and inputs must be file or directory paths')
             if value['status'] == 'pass' and (not evidence or not inputs):
                 raise ValueError(f'{name} pass requires evidence and relevant source/config inputs')
-            acceptance[name] = dict(value, files=fingerprints(evidence + inputs), context=self.context())
+            acceptance[name] = dict(value, files=fingerprints(evidence + inputs, allow_directories=True),
+                                    context=self.context())
         completed = result.get('completed_goals', {})
         latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
         if (not isinstance(completed, dict) or any(
@@ -211,9 +217,17 @@ class Preparation:
 
     def dispatch(self, request: dict):
         inputs = request.get('inputs', [])
-        if not isinstance(inputs, list) or not all(isinstance(p, str) for p in inputs):
-            raise ValueError('Task inputs must be a list of absolute file paths')
-        fingerprints(inputs)
+        try:
+            if not isinstance(inputs, list) or not all(isinstance(p, str) for p in inputs):
+                raise ValueError('Task inputs must be a list of absolute file or directory paths')
+            for name in inputs:
+                path = Path(name)
+                if not path.is_absolute() or not (path.is_file() or path.is_dir()):
+                    raise ValueError(f'Task input must be an existing absolute file or directory: {name}')
+        except (OSError, ValueError) as exc:
+            self.state['task_feedback'] = {'rejected': True, 'report': str(exc)}
+            self.save()
+            return
         for key in ('id', 'prompt'):
             if not isinstance(request.get(key), str) or not request[key].strip():
                 raise ValueError(f'Task requires {key}')

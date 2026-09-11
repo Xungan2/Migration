@@ -77,6 +77,12 @@ def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
 
 def response(text: str) -> dict:
     text = text.strip()
+    # Allow introductory prose, but decode the entire first structured block.
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith(('{', '[', '```')):
+            text = ''.join(lines[index:]).strip()
+            break
     if text.startswith('```json\n') and text.endswith('```'):
         text = text[8:-3].strip()
     value = json.loads(text)

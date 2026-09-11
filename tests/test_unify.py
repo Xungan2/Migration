@@ -47,6 +47,26 @@ class UnifiedTest(unittest.TestCase):
         self.assertFalse((self.ws / 'knowledgebase/verification.md').exists())
         self.assertFalse((self.ws / 'runner.json').exists())
 
+    def test_task_inputs_accept_directories(self):
+        self.env['SCENARIO'] = 'directory-inputs'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        tasks = [c for c in calls if c['role'] == 'task']
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual(tasks[0]['data']['inputs'], [str(self.source), str(self.target)])
+
+    def test_missing_task_input_is_corrected_before_dispatch(self):
+        self.env['SCENARIO'] = 'corrected-inputs'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        owners = [c for c in calls if c['role'] == 'owner']
+        self.assertTrue(owners[1]['data']['task_feedback']['rejected'])
+        self.assertIn('missing-boot.log', owners[1]['data']['task_feedback']['report'])
+        self.assertEqual(owners[1]['data']['tasks'], [])
+        self.assertEqual(len([c for c in calls if c['role'] == 'task']), 2)
+
     def test_optional_failure_is_deferred_and_renamed_retry_is_not_dispatched(self):
         self.env['SCENARIO'] = 'optional-once'
         result = self.cli()
@@ -209,6 +229,27 @@ class UnifiedTest(unittest.TestCase):
                    and c['data'].get('acceptance', {}).get('skeleton', {}).get('status') == 'needs-review']
         self.assertTrue(changed)
         self.assertEqual(changed[-1]['planning']['status'], 'pass')
+
+    def test_directory_acceptance_tracks_content_and_membership(self):
+        self.env['SCENARIO'] = 'directory-acceptance'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        extra = self.target / 'extra.rs'
+        for change in ('add', 'edit', 'rename', 'remove'):
+            with self.subTest(change=change):
+                if change in ('add', 'edit'):
+                    extra.write_text(change)
+                elif change == 'rename':
+                    extra = extra.rename(self.target / 'renamed.rs')
+                else:
+                    extra.unlink()
+                calls_file = self.ws / 'provider-calls.jsonl'
+                before = len(calls_file.read_text().splitlines())
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in calls_file.read_text().splitlines()[before:]]
+                owner = next(c for c in calls if c['role'] == 'owner')
+                self.assertEqual(owner['data']['acceptance']['skeleton']['status'], 'needs-review')
 
     def test_session_unavailable_recovers_from_durable_inputs(self):
         self.assertEqual(self.cli().returncode, 0)

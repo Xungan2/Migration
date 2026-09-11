@@ -99,10 +99,14 @@ if role == 'owner':
             result['id'] = 'renamed-check'
             result['prompt'] = 'Use a different command and wait longer.'
             result['timeout'] = 3
-    elif scenario in ('tasks', 'reorganize', 'task-writes-knowledge', 'task-timeout') and len(tasks) < 2:
+    elif scenario in ('tasks', 'directory-inputs', 'corrected-inputs', 'reorganize', 'task-writes-knowledge', 'task-timeout') and len(tasks) < 2:
         inputs = ([str(Path(data['project']['linux_driver']) / 'driver.c')] if not tasks else
                   [p for p in data['handoff_index'] if '-task-' in p][-1:])
         result = {'action': 'task', 'prompt': 'Investigate driver dependencies; report evidence only.', 'inputs': inputs}
+        if scenario in ('directory-inputs', 'corrected-inputs'):
+            result['inputs'] = [data['project']['linux_driver'], data['project']['target_os']]
+        if scenario == 'corrected-inputs' and not tasks and not data.get('task_feedback', {}).get('rejected'):
+            result['inputs'] = [str(ws / 'missing-boot.log')]
     elif scenario == 'knowledge-conflict' and data.get('knowledge_receipt') and not (ws / 'resolved').exists():
         (ws / 'resolved').write_text('owner chose the supported observation')
         result = {'action': 'record', 'report': 'Owner resolved conflicting findings using source evidence.'}
@@ -134,6 +138,8 @@ if role == 'owner':
             evidence.write_text((target / 'driver.d').read_text() + loaded.stdout)
         if scenario == 'missing-evidence':
             evidence.unlink()
+        if scenario == 'directory-acceptance':
+            result['skeleton']['inputs'] = [str(target)]
         if scenario in ('skeleton-only', 'planning-only'):
             key = 'planning' if scenario == 'skeleton-only' else 'skeleton'
             result[key] = {'status': 'blocked', 'reason': 'needs user input', 'evidence': [], 'inputs': []}
