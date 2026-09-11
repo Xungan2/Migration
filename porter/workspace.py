@@ -4,8 +4,20 @@ import fcntl
 import json
 from pathlib import Path
 import tempfile
+import datetime
+import shlex
 
 MODE = 'unified-p01'
+
+def append_runbook(ws: Path, phase: str, rc: int, command: list[str], details: str = '') -> None:
+    path = ws / 'runbook.md'
+    if not path.exists():
+        path.write_text('# Porter 迁移 Runbook\n\n', encoding='utf-8')
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with path.open('a', encoding='utf-8') as out:
+        out.write(f'\n## {phase} — {stamp}\n\n- 退出码：`{rc}`\n\n```bash\n$ {shlex.join(command)}\n```\n\n')
+        if details:
+            out.write(details.rstrip() + '\n')
 
 
 def write_json(path: Path, value: dict) -> None:

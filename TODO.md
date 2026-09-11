@@ -52,7 +52,7 @@ extra_env 注入 + ANSI 变体，p6 改调共享版。
 ## 5. 知识分类子目录（taxonomy）完备性
 
 现状：知识库子目录（maps/gaps/runbook/splits/pitfalls）即知识分类，
-由工具静态决定（kb.py 域注册表、调用点域预选、porter/skills/kb-guide.md
+由工具静态决定（kb.py 域注册表、调用点域预选、porter/skills/knowledgebase.md
 三处），新增分类须改代码。本轮已保证"加一类=单点改动"（注册表一行
 + skill 文本一节 + 域预选一行）。
 
@@ -67,7 +67,7 @@ docs/legacy/knowledge.md §3.2）。
 - 复盘一次真实迁移产生的全部候选，检验五类的实际覆盖度；
 - 若需扩类：按单点改动路径加域；
 - 备选方向：受控扩展机制（用户自建子目录只要带 INDEX 即被
-  kb-guide 宣告可查）——可行性依赖 agent 行为稳定性，需实验评估。
+  knowledgebase 宣告可查）——可行性依赖 agent 行为稳定性，需实验评估。
 
 ## 6. 固定知识的差异化检索/使用设计
 
@@ -83,7 +83,7 @@ docs/legacy/knowledge.md §3.2）。
 - 用 kb_consulted 遥测验证统一指针化后 P3 映射质量无回归
   （持续零咨询 = agent 不读 = 回归信号）；
 - 若有回归，按"注入深度∝相关性"恢复局部内容注入，或加强
-  kb-guide 措辞/调用点提示。
+  knowledgebase 措辞/调用点提示。
 
 ## 7. ktest 静默案的无会话复演验证（SIG-02）
 
