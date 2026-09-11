@@ -41,6 +41,7 @@ from ..common import agent
 from ..common import scope as _scope
 from ..env import probe as probe_mod
 from .. import log as _log
+from .. import workspace as _workspace
 
 SKILL_RESEARCH = "EXP-research"
 SKILL_TRANSLATE = "EXP-mono-migrate"
@@ -1367,9 +1368,31 @@ def run_exp_mono(ws: Path, module: str | None = None,
                  budget_translate: int | None = None,
                  module_research: str | None = None) -> int:
     ws = Path(ws).resolve()
+    started = time.monotonic()
+    rc = 1
+    try:
+        rc = _run_exp_mono(ws, module, budget, session, budget_research,
+                            budget_translate, module_research)
+        return rc
+    finally:
+        ledger = _read_json(ws / 'exp-mono' / 'ledger.json') or {}
+        passed = sum(1 for item in (ledger.get('modules') or {}).values()
+                     if item.get('status') == 'pass')
+        _workspace.append_runbook(ws, 'mono', rc,
+                                  ['porter', 'exp-mono'] + ([module] if module else []),
+                                  f'- 耗时：`{time.monotonic() - started:.2f}s`\n'
+                                  f'- 模块通过：`{passed}`\n'
+                                  f'- 产物：`{ws / "exp-mono/ledger.json"}`、`{ws / "exp-mono/report.md"}`\n'
+                                  f'- 阶段结论：`{"PASS" if rc == 0 else "BLOCKED"}`')
+
+
+def _run_exp_mono(ws: Path, module: str | None = None,
+                  budget: int | None = None, session: str | None = None,
+                  budget_research: int | None = None,
+                  budget_translate: int | None = None,
+                  module_research: str | None = None) -> int:
     research_only = module_research is not None
-    needs = ["project.json", "runner.json",
-             "P2/reports/scaffold_manifest.json"]
+    needs = ["project.json"]
     missing = [n for n in needs if not (ws / n).exists()]
     if missing:
         _log.console_line(f"[porter] exp-mono: 前置缺失："
@@ -1384,8 +1407,9 @@ def run_exp_mono(ws: Path, module: str | None = None,
     runner = _read_json(ws / "runner.json") or {}
     deps = (_read_json(ws / "migration-plan.json")
             or _read_json(ws / "P1" / "modules" / "deps.json") or {})
-    manifest = _read_json(ws / "P2" / "reports" /
-                          "scaffold_manifest.json") or {}
+    manifest = (_read_json(ws / "mono-input-manifest.json") or
+                _read_json(ws / "P2" / "reports" /
+                           "scaffold_manifest.json") or {})
     order = deps.get("order") or []
     if not order or not manifest.get("driver_home"):
         _log.console_line("[porter] exp-mono: deps.json 无 order 或 "
