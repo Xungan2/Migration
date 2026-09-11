@@ -39,9 +39,11 @@ def run(ws: Path) -> int:
             "verification": value.get("verification") or [],
             "status": value.get("status") or "planned",
         }
+        (ws / "mono-input" / "modules").mkdir(parents=True, exist_ok=True)
+        module_dir = ws / "mono-input" / "modules" / name
+        module_dir.mkdir(parents=True, exist_ok=True)
         if plan_text:
-            (ws / "mono-input" / "modules").mkdir(parents=True, exist_ok=True)
-            (ws / "mono-input" / "modules" / f"{name}.md").write_text(
+            (module_dir / "spec.md").write_text(
                 f"# {name}\n\n{value.get('description', '')}\n\n"
                 + "\n".join(value.get("verification") or []) + "\n",
                 encoding="utf-8")

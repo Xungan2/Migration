@@ -1,0 +1,61 @@
+{
+  "model": "zhipu-ai/glm-5.3-flash",
+  "models": {
+    "reasoning": "zhipu-ai/glm-5.2",
+    "coding": "zhipu-ai/glm-5.3-flash",
+    "_notes": "exp-mono 拆分流程双模型：reasoning=研究任务（读多写少的推理），coding=翻译+修复任务（输出密集的生成）。两值允许一致。缺任一键或裸模型名（无 provider 前缀）exp-mono 启动即 rc 2。顶层 model 键与此无关（其他流程的全局缺省）。"
+  },
+  "self_diagnosis": {
+    "enabled": true,
+    "_notes": "§15 重设计（2026-09-03）后为错误处理模块求解循环的总开关兼熔断。true（缺省）= p5/p6/d1 失败走求解循环（≤3 轮 agent + 双信号复验 + 同签名早退），耗尽 → 升级报告 + unsolved 关口（attempts 在挂载点退役）。false = 熔断回退旧人工路径（p5 失败 rc 1 → attempts→panic；--defect-diagnose rc 2）。PORTER_SELF_DIAGNOSIS=1 可强制开（测试惯例）"
+  },
+  "review_gates": {
+    "l4_criteria_finalization": "human",
+    "strategy_review": "human",
+    "_notes": "diagnosis_escalation / b_class_autofix 两键已随 §15 重设计退役（2026-09-03）：criteria 修正撤人工闸改为决策债+阶段末 CP 审计；耗尽终态必停 unsolved 关口，无需模式选择"
+  },
+  "routing": {
+    "default": ["rules", "agent", "human"],
+    "gates": {
+      "p0.t5.env_gate": ["human"],
+      "p0.category": ["human"],
+      "p1.resolve.cycles": ["agent", "human"],
+      "p3.gap": ["rules", "agent", "human"],
+      "p4.blocked": ["agent", "human"],
+      "loop.attempts": ["human"],
+      "p5.deferred": ["agent", "human"],
+      "p6.l4.finalize": ["human"],
+      "cp1.strategy": ["human"],
+      "cp5.promote": ["human"]
+    },
+    "allow_agent_on_human_gates": false,
+    "_notes": "register-fill/功能丢失型 gap 的必人硬路由在 p3 分类代码层实现（转 human 策略），不走配置键"
+  },
+  "checkpoints": {
+    "CP2_enabled": false,
+    "first_module_review": true,
+    "decision_debt_limit": 30
+  },
+  "policy_file": "policy.md",
+  "kb": {
+    "candidates": true,
+    "dedup": true,
+    "min_draft_len": 24,
+    "_notes": "随机知识探查：candidates=总开关；dedup=签名去重闸；min_draft_len=过短草稿视为无知识跳过。候选账在 knowledge/temp/candidates/<驱动>@<目标>.json，不进任何注入面"
+  },
+  "panic": {
+    "same_signature_repeat": 2,
+    "cluster_threshold": 3
+  },
+  "vcs": {
+    "enabled": true,
+    "identity": {
+      "name": "porter",
+      "email": "porter@local"
+    },
+    "target_os": {"enabled": true},
+    "workspace": {"enabled": true},
+    "export": {"format": "bundle"},
+    "_notes": "git 管理总开关。identity=git 身份兜底（容器常无全局 user.name/email，缺则 commit 失败）；target_os/workspace=分 repo 开关；export.format=跨机器可移植导出格式（bundle 保 commit hash）。分支与各仓 baseline 记在 <ws>/project.json['vcs']（工作区级）。PORTER_VCS=0/1 强制覆盖 enabled"
+  }
+}
