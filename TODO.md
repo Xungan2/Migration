@@ -52,7 +52,7 @@ extra_env 注入 + ANSI 变体，p6 改调共享版。
 ## 5. 知识分类子目录（taxonomy）完备性
 
 现状：知识库子目录（maps/gaps/runbook/splits/pitfalls）即知识分类，
-由工具静态决定（kb.py 域注册表、调用点域预选、skills/kb-guide.md
+由工具静态决定（kb.py 域注册表、调用点域预选、porter/skills/kb-guide.md
 三处），新增分类须改代码。本轮已保证"加一类=单点改动"（注册表一行
 + skill 文本一节 + 域预选一行）。
 

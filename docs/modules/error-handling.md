@@ -49,7 +49,7 @@ defect），判定"这是谁的错"，并尝试解决或给出正确处置。它
 4. **人拿结构不拿裸现场**：耗尽终态的关口 context 带 acceptance/
    health 报告 + 升级报告（已排除假设清单在内）+ 快照。
 
-## 3. 动作词表（verdict 契约，skills/solve.md 为准）
+## 3. 动作词表（verdict 契约，porter/skills/solve.md 为准）
 
 | 动作 | 执行方 | 效果 |
 |---|---|---|
@@ -122,7 +122,7 @@ knowledge/failures.md）已于 2026-09-03 删除；幸存改造件 =
 | porter/loop/diagnose.py | 六字段升级报告（编排器生成，零 agent） | `generate_escalation_report` |
 | porter/loop/p5.py | 挂载① + `p5.unsolved.<M>` 关口 | `_solve_failures`、`_unsolved_gate` |
 | porter/loop/p6.py | 挂载② `_execute_judge` + 挂载③ d1 + CP4 债 | `execute`、`diagnose_defect`、`_close_fixed_defect` |
-| skills/solve.md | 求解 skill（方法论/词表/证据纪律） | — |
+| porter/skills/solve.md | 求解 skill（方法论/词表/证据纪律） | — |
 | knowledge/{base,\<lineage\>}/failures/ | 签名知识 | INDEX 薄目录 |
 
 测试：tests/test_errorloop.py（L1-L12：签名/动作/早退/降级/prompt
