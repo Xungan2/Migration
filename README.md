@@ -64,6 +64,69 @@ python3 porter/main.py prepare \
 `130` 中断。失败时保留日志、交接和有效验收，知识维护中断不会冒充整体完成。
 主 agent 验收证据语义；Python 检查交付、状态和指纹，不把 JSON 成功声明当成独立机器证明。
 
+## mono（exp-mono）模块迁移
+
+`pre-mono` 产出 `migration-plan.json` 与 `mono-input/modules/` 后，运行 `mono`
+逐模块迁移：
+
+```bash
+python3 porter/main.py mono --output-dir <ws> [--module M]
+                            [--module-research M] [--budget SEC]
+                            [--budget-research SEC] [--budget-translate SEC]
+                            [--session ID]
+```
+
+每模块跑**两段任务**——研究者 agent（只读目标树，产出结构化研究交付物）→
+翻译者 agent（消费交付物写码+测试，四段复合 gate 验证）。平台事实全部
+走工作区数据面，工具零目标 OS 假设（换 runner/manifest 数据即可跨目标
+复用）。
+
+- **双模型分层**（`porter/config.json` 的 `models` 块，跑前必配）：`reasoning`
+  = 研究任务（读多写少的推理），`coding` = 翻译+修复任务（输出密集
+  的生成）；两值允许一致；缺键或裸模型名（无 provider 前缀）启动即
+  rc 2。
+- 逐模块按 `migration-plan.json` 的 `order` 交错推进（R→T→R→T…，
+  后继研究能读前序翻译的真实产物与契约登记表）；ledger 记 pass 即
+  跳过（幂等断点续）；blocked/失败/预算耗尽 → exit 1 停车，重跑从
+  断点续。
+- **研究任务**：prompt 注入词典/契约登记表/泊车现文 + 规格 + 登记
+  约定/测试基质/driver_home 现有文件；产出
+  `exp-mono/research/<module>.md`（叙事正文 + 尾部 ```json 块：
+  mappings/contracts/prunes/parking/read_list/negatives/
+  open_questions，叙事必含「适配架构与整合方案」「可测面评估」两节
+  标题）；编排器浅校验（verdict 词表/必填/必写节标题/证据路径警告）
+  不过 → 同 session 回灌修（≤2 次）；过 → **机器收割**（mappings→
+  词典、contracts→契约登记表、parking→泊车——agent 不再手写这三个
+  文件，格式错误不可能发生）。预算 `clamp(600, LOC×1.5, 2400)`。
+- **翻译任务**：prompt 注入交付物**全文**+契约登记表+泊车（不注入
+  词典——交付物已含本模块裁定）；skill 授予**兜底研究权**（有界
+  grep）并要求**矛盾上报**（交付物与目标树事实不符时不得静默改判）。
+  预算 `clamp(900, LOC×1.3, 4200)`。
+- **四段复合 gate**（便宜先行失败短路，反馈回灌同 session）：① 产物
+  守卫：driver_home 非注释代码增量 ≥ `max(8, LOC//20)` + 构建单元
+  登记核对 + git 改动白名单；② 构建：`runner.build` 原样；③ 驱动
+  自启动（阻断）：全树构建后启动自检；④ 单测：`unit_test.driver_scope_cmd`
+  （缺键降级全量 cmd）。修复段有**预算下限宽限**（FIX_FLOOR_SEC，
+  防主段吃光预算后修复段被秒杀）；同签名连败先注入**停滞元反馈**
+  （"换思路"警告）再 stalled。
+- **单测验收为记账制，无个数指标**：agent 在 done JSON 声明
+  `migrated_functions` / `tests` / `untested` 三字段；编排器机械核对
+  migrated ⊆ tests ∪ untested、同一单元不双挂、声明测试数 ≤ 测试标记
+  实际增量；**核对不过同 session 自动重试 ≤2 次**（进程内闭环）；
+  `report.md` 渲染每模块函数覆盖台账（已测 fn/aspect、豁免理由）供
+  人审——覆盖质量归人，不归计数器。模块 pass 时把当前事实写入
+  `knowledgebase/modules/<module>.md`，后继模块消费最新知识而非旧日志。
+- 终局验收：全量单测 + 驱动自启动**均为必要验收**，任一 FAIL →
+  exit 1。
+- 调试入口：`--module M` 单模块（须 order 内）；`--module-research M`
+  只跑 M 的研究任务（跳过翻译）；`--budget-research/--budget-translate`
+  覆盖两段预算；`--session` 续接超时中断的 provider 会话（研究续跑与
+  翻译续跑按上次失败位置自动路由）。
+- 工作区产物：`exp-mono/{ledger.json, research/<module>.md（研究
+  交付物）, mapping-notes.md（词典，机器收割）, contracts.md（契约
+  登记表）, parking.md, logs/, report.md, migration-plan.md, change.md}`
+  与 `knowledgebase/`。
+
 ## 知识沉淀
 
 迁移过程中的源码调查、接线方式、构建与载入经验、失败修法和规划决策，会持续整理到
