@@ -2,13 +2,13 @@
 
 ## Problem Statement
 
-`prepare` 能交付源代码范围、目标树骨架、建议性的 migration plan、知识库和验收记录，但 `mono` 把这些结果当作固定且完整的输入。模块边界、依赖顺序、目标接口、构建登记、测试和遗留 TODO 一旦不完整，agent 就只能停车或越过约束继续推进。
+`prepare` 能交付源代码范围、目标树骨架、建议性的 migration plan、知识库和验收记录，但 `mono` 把这些结果当作固定且完整的输入。模块边界、依赖顺序、目标接口、构建登记、测试和遗留 TODO 一旦不完整，agent 就只能停车或越过约束继续推进。中间缺少一个把建议转换为可执行模块输入的 `pre-mono` 任务。
 
 这使 `mono` 难以完成迁移主体工作，也无法消化 prepare 留下的 AUTO-TODO、AUTO-FIXME 和决策。需要一个能阅读并核实 prepare 输出、根据目标树事实补齐输入、用证据修订计划、完成模块迁移并在终局执行必要验收的自主流程。
 
 ## Solution
 
-修改 `mono` 的编排和交接 seam，使它消费 prepare 的全部输出与目标树事实。prepare plan 是起点而非不可变命令；mono 主 agent 可以自主决定模块顺序、模块边界、依赖、迁移方法、接线范围和测试方法，并把变化记录为最新事实和可追溯变更。
+增加 `pre-mono` 大任务，并修改 `mono` 的编排和交接 seam。`pre-mono` 消费 prepare 的全部输出与目标树事实，把建议性的 plan 转成可执行模块清单；它可以自主拆分模块划分、依赖核实、目标落点和验证面等子任务。prepare plan 是起点而非不可变命令；mono 主 agent 仍可以自主决定模块顺序、模块边界、依赖、迁移方法、接线范围和测试方法，并把变化记录为最新事实和可追溯变更。
 
 每个模块完成后同步 mappings、module facts 和 verification knowledge，按节流 hook 领取可处理的 prepare TODO。缺失或有争议的信息先由主 agent 做有界核实，再派一个带预算的 research agent；仍无法解决的必要问题进入 blocked，生成或更新 `HUMAN.md`。全部模块完成后，编译和驱动自启动是阻断验收；设备注入和设备交互是允许失败的 option 验收。
 
@@ -41,10 +41,18 @@
 25. As a migration owner, I want the driver to self-start after all modules, so that module-local success is not mistaken for system integration.
 26. As an operator, I want optional device checks recorded even when they fail, so that useful evidence is retained without weakening required acceptance.
 27. As an operator, I want resumable state after a blocked module or failed gate, so that valid completed work is retained.
+28. As a pre-mono 主 agent, I want to turn the prepare recommendation into an executable module manifest, so that mono receives actionable work rather than a loose plan.
+29. As a pre-mono 主 agent, I want to choose and delegate decomposition sub-tasks, so that the preparation method adapts to the driver.
+30. As a mono 主 agent, I want incomplete but non-blocking manifest items to remain explicit, so that I can continue independent migration work.
 
 ## Implementation Decisions
 
 - Reuse the existing mono orchestration seam; do not create a second workflow engine.
+- Add `pre-mono` as a bounded preparation phase. Its main agent may split the work into any useful sub-tasks; sub-task count, roles, and order are not fixed.
+- `pre-mono` consumes migration plan, prepare handoffs, knowledgebase, runbook, and source/target facts, and produces an executable module manifest plus the latest migration plan and `change.md`.
+- The manifest must assign every in-scope source file to one module or explicitly mark it `unassigned`/`blocked`; each module records source files, target landing, dependencies, status, and a verification surface.
+- Unknown dependencies and conflicts are explicit. Non-blocking unknowns may enter mono; unknowns that prevent necessary acceptance or all progress block and produce `HUMAN.md`.
+- `pre-mono` is content-validated rather than workflow-validated: no fixed decomposition recipe is required.
 - Discover inputs from project/goals, prepare state and handoffs, migration plan, knowledgebase, and target-tree manifests/runner facts. The agent fills missing fields by bounded inspection.
 - Maintain the latest factual migration plan separately from `change.md`. Agents own content; the orchestrator checks parseability, evidence presence, and dependency consistency.
 - Each change records prior value, new value, reason, evidence, affected modules, and rollback condition.
