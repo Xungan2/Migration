@@ -22,7 +22,8 @@ def main(argv=None) -> int:
     prepare.add_argument('--category')
     prepare.add_argument('--budget', type=int, default=3600, help='total wall budget in seconds')
     prepare.add_argument('--prepare-only', '--t1-only', action='store_true')
-    pre_mono = commands.add_parser('pre-mono', help='prepare executable mono inputs')
+    pre_mono = commands.add_parser('pre-mono', aliases=['prepare-mono'],
+                                   help='agent-owned preparation of mono inputs')
     pre_mono.add_argument('--output-dir', required=True)
     mono = commands.add_parser('mono', help='migrate modules from pre-mono inputs')
     mono.add_argument('--output-dir', required=True)
@@ -38,11 +39,12 @@ def main(argv=None) -> int:
             raise ValueError('budget must be positive')
         ws = Path(args.output_dir).resolve()
         with workspace.locked(ws):
-            if args.command == 'pre-mono':
+            if args.command in ('pre-mono', 'prepare-mono'):
                 from porter.pre_mono import run
                 rc = run(ws)
                 workspace.append_runbook(ws, 'pre-mono', rc, sys.argv,
-                                         '- 产物：`mono-input-manifest.json`、`mono-input-report.md`')
+                                       '- 产物：`module-divsion.md`、`module-divsion.json`、'
+                                       '`migration-plan.md`、`migration-plan.json`')
                 return rc
             if args.command == 'mono':
                 from porter.exp.mono import run_exp_mono

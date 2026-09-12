@@ -9,10 +9,60 @@ import shlex
 
 MODE = 'unified-p01'
 
+def ensure_runner(ws: Path) -> Path:
+    """Create the empty three-part runner manual when prepare has no T3 run."""
+    path = ws / 'runner.md'
+    if not path.exists():
+        path.write_text(
+            '# runner 调用手册\n\n'
+            '## 第一部分：构建/编译\n\n'
+            '### 1. 模块编译\n\n'
+            '### 2. 镜像编译\n\n'
+            '## 第二部分：启动\n\n'
+            '### 1. 设备自启动\n\n'
+            '### 2. 设备注入与交互\n\n'
+            '## 第三部分：单元测试\n\n'
+            '## 执行记录\n\n', encoding='utf-8')
+    else:
+        text = path.read_text(encoding='utf-8')
+        required = ('## 第一部分：构建/编译', '### 1. 模块编译',
+                    '### 2. 镜像编译', '## 第二部分：启动',
+                    '### 1. 设备自启动', '### 2. 设备注入与交互',
+                    '## 第三部分：单元测试')
+        if not all(item in text for item in required):
+            text = ('# runner 调用手册\n\n'
+                    '## 第一部分：构建/编译\n\n'
+                    '### 1. 模块编译\n\n'
+                    '### 2. 镜像编译\n\n'
+                    '## 第二部分：启动\n\n'
+                    '### 1. 设备自启动\n\n'
+                    '### 2. 设备注入与交互\n\n'
+                    '## 第三部分：单元测试\n\n'
+                    '## 执行记录\n\n' + text.lstrip())
+            path.write_text(text, encoding='utf-8')
+    return path
+
+
+def append_runner(ws: Path, phase: str, rc: int, command: list[str], details: str = '',
+                  section: str | None = None) -> None:
+    """Append an execution record to the three-part runner manual."""
+    path = ensure_runner(ws)
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with path.open('a', encoding='utf-8') as out:
+        out.write(f'\n## {phase} — {stamp}\n\n- 退出码：`{rc}`\n\n```bash\n$ {shlex.join(command)}\n```\n\n')
+        if details:
+            out.write(details.rstrip() + '\n')
+
+
 def append_runbook(ws: Path, phase: str, rc: int, command: list[str], details: str = '') -> None:
+    """Record how the Porter tool itself was invoked.
+
+    This deliberately remains separate from runner.md, which is the target
+    migration command book.
+    """
     path = ws / 'runbook.md'
     if not path.exists():
-        path.write_text('# Porter 迁移 Runbook\n\n', encoding='utf-8')
+        path.write_text('# Porter 工具运行记录\n\n', encoding='utf-8')
     stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     with path.open('a', encoding='utf-8') as out:
         out.write(f'\n## {phase} — {stamp}\n\n- 退出码：`{rc}`\n\n```bash\n$ {shlex.join(command)}\n```\n\n')

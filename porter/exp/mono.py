@@ -4,7 +4,7 @@
 目标树，产出结构化研究交付物）+ **翻译者 agent**（消费交付物，写码+
 执行式测试，四段复合 gate 验证）。研究/翻译各自独立 session、独立
 预算、独立模型（config.models.reasoning / coding）。平台事实全部来自
-工作区数据面（runner.json / scaffold manifest / module.json），本文件
+工作区数据面（runner.md / module-divsion.json / migration-plan.json / module.json），本文件
 零目标 OS / 目标语言假设。
 
 每模块流程：
@@ -42,6 +42,7 @@ from ..common import scope as _scope
 from ..env import probe as probe_mod
 from .. import log as _log
 from .. import workspace as _workspace
+from ..handoff import latest_success, publish_handoff, require_success
 
 SKILL_RESEARCH = "EXP-research"
 SKILL_TRANSLATE = "EXP-mono-migrate"
@@ -60,6 +61,33 @@ def _read_json(path: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def _read_runner_md(ws: Path) -> str:
+    path = ws / "runner.md"
+    if not path.is_file():
+        raise ValueError("mono requires runner.md")
+    text = path.read_text(encoding="utf-8")
+    required = ("## 第一部分：构建/编译", "### 1. 模块编译",
+                "### 2. 镜像编译", "## 第二部分：启动",
+                "### 1. 设备自启动", "### 2. 设备注入与交互",
+                "## 第三部分：单元测试")
+    missing = [heading for heading in required if heading not in text]
+    if missing:
+        raise ValueError("runner.md 缺少结构：" + "、".join(missing))
+    return text
+
+
+def _upstream_handoffs(ws: Path, modules: list[str]) -> str:
+    """Give agents a bounded index; they decide which handoff to open."""
+    rows = []
+    for name in modules:
+        item = latest_success(ws, f"mono.{name}")
+        if item:
+            rows.append(f"- `{name}`: `{item['handoff']}`")
+    return ("## 可选的前序模块 handoff\n"
+            "按当前问题自主选择阅读，不要预读无关交接：\n" +
+            ("\n".join(rows) if rows else "- （暂无成功的前序模块 handoff）") + "\n\n")
 
 
 def _budget_sec(loc: int) -> int:
@@ -992,6 +1020,7 @@ def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
         _read("contracts.md") if (exp_dir / "contracts.md").exists() else "",
         _read("negatives.md") if (exp_dir / "negatives.md").exists() else "",
         deliverable)
+    prompt = _upstream_handoffs(ws, deps.get(module) or []) + prompt
     _log.console_line(f"[porter] exp-mono: 研究模块 {module}"
                       f"（源 {loc} 行，预算 {budget}s）")
     t0 = time.time()
@@ -1152,6 +1181,7 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
         target_os, driver_home_rel, deps.get(module) or [],
         parking_path.read_text(encoding="utf-8", errors="replace"),
         registry_text, deliverable_text)
+    prompt = _upstream_handoffs(ws, deps.get(module) or []) + prompt
     if session_override:
         if prev.get("status") not in (None, "pass"):
             resume_bits = [f"- 上次状态：{prev.get('status')}"]
@@ -1404,14 +1434,28 @@ def _run_exp_mono(ws: Path, module: str | None = None,
         return 2
     model_research, model_coding = models
     proj = _read_json(ws / "project.json") or {}
+    new_inputs = (ws / "module-divsion.json").is_file()
+    if new_inputs:
+        missing_inputs = [name for name in
+                          ("module-divsion.md", "module-divsion.json",
+                           "migration-plan.md", "migration-plan.json", "runner.md")
+                          if not (ws / name).is_file()]
+        if missing_inputs:
+            _log.console_line("[porter] exp-mono: mono 前置缺失：" +
+                              "、".join(missing_inputs) + "——rc 2")
+            return 2
+        _read_runner_md(ws)
+        try:
+            require_success(ws, "pre-mono")
+        except ValueError as exc:
+            _log.console_line(f"[porter] exp-mono: pre-mono handoff 无效：{exc}——rc 2")
+            return 2
     runner = _read_json(ws / "runner.json") or {}
     deps = _read_json(ws / "migration-plan.json") or {}
-    manifest = (_read_json(ws / "mono-input-manifest.json") or
-                _read_json(ws / "P2" / "reports" /
-                           "scaffold_manifest.json") or {})
+    manifest = _read_json(ws / "module-divsion.json") or {}
     order = deps.get("order") or []
     if not order or not manifest.get("driver_home"):
-        _log.console_line("[porter] exp-mono: deps.json 无 order 或 "
+        _log.console_line("[porter] exp-mono: migration-plan.json 无 order 或 "
                           "manifest 无 driver_home——rc 2")
         return 2
     if module and module not in order:
@@ -1422,6 +1466,15 @@ def _run_exp_mono(ws: Path, module: str | None = None,
         _log.console_line(f"[porter] exp-mono: 模块 {module_research} 不在 "
                           "order 中——rc 2")
         return 2
+    edges = deps.get("edges") or {}
+    if module:
+        prior_ledger = _read_json(ws / "exp-mono" / "ledger.json") or {}
+        blocked = [dep for dep in (edges.get(module) or [])
+                   if (prior_ledger.get("modules") or {}).get(dep, {}).get("status") != "pass"]
+        if blocked:
+            _log.console_line(f"[porter] exp-mono: 模块 {module} 依赖未 pass："
+                              + "、".join(blocked) + "——rc 2")
+            return 2
     exp_dir = ws / "exp-mono"
     (exp_dir / "logs").mkdir(parents=True, exist_ok=True)
     (exp_dir / "research").mkdir(parents=True, exist_ok=True)
@@ -1468,7 +1521,6 @@ def _run_exp_mono(ws: Path, module: str | None = None,
                 _save_ledger(exp_dir, ledger)
             else:
                 p.write_text(text, encoding="utf-8")
-    edges = deps.get("edges") or {}
     if module:
         targets = [module]
     elif research_only:
@@ -1514,6 +1566,25 @@ def _run_exp_mono(ws: Path, module: str | None = None,
                           model=model_coding) != 0:
             stop = True
             break
+        # A passed module becomes the durable input for later modules and
+        # resumptions.  The handoff contains only current facts, not the full
+        # knowledgebase; later agents choose related entries themselves.
+        if new_inputs:
+            try:
+                publish_handoff(
+                    ws, f"mono.{m}",
+                    summary=f"Module {m} passed research, translation and gates.",
+                    artifacts=[exp_dir / "ledger.json", exp_dir / "report.md",
+                               exp_dir / "research" / f"{m}.md",
+                               ws / "knowledgebase" / "modules" / f"{m}.md"],
+                    verification=["module ledger status=pass", "module gate passed"],
+                    dependencies=("pre-mono",),
+                    materials=(ws / "module-divsion.json", ws / "migration-plan.json",
+                               ws / "runner.md"),
+                )
+            except (OSError, ValueError) as exc:
+                _log.console_line(f"[porter] exp-mono: {m} handoff failed: {exc}")
+                return 1
         first_session = None
     if stop:
         _write_report(ws, exp_dir, ledger, order, proj, manifest)

@@ -33,6 +33,8 @@ python3 porter/main.py prepare \
 
 完整执行 `prepare` 后，交付以下成果：
 
+`runner.md` 由迁移 agent 根据目标 OS 日志维护，只记录迁移内部的模块编译、镜像编译、设备自启动、设备注入/交互和单元测试命令；成功、失败均可记录，未涉及项留空。`runbook.md` 只记录 Porter CLI 的调用、退出码和工作区产物。
+
 | 交付物 | 内容与位置 |
 | --- | --- |
 | 原生驱动骨架 | 位于目标 OS 源码树，包含模块骨架、构建依赖、注册与初始化接线 |
@@ -66,8 +68,13 @@ python3 porter/main.py prepare \
 
 ## mono（exp-mono）模块迁移
 
-`pre-mono` 产出 `migration-plan.json` 与 `mono-input/modules/` 后，运行 `mono`
-逐模块迁移：
+`pre-mono`（命令别名 `prepare-mono`）是由 agent 完成的模块划分与计划修订任务。它消费 prepare 成功 handoff，产出
+`module-divsion.md/json`、最新 `migration-plan.md/json` 和 `mono-input/modules/`，再发布
+`pre-mono` 成功 handoff。`mono` 启动前读取 `runner.md` 与这四个计划文件，只消费
+`pre-mono` 最新成功 handoff；模块 handoff 按模块发布，供后续模块和续跑使用。
+
+交接记录位于 `handoffs/tasks/<task-id>/`。`prepare` 和 `pre-mono` 只在宿主验收通过后发布
+`handoff.md`；失败、中断或输入指纹变化发布 `handoff-fail.md`，下游不会消费失败交接。
 
 ```bash
 python3 porter/main.py mono --output-dir <ws> [--module M]

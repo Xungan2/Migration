@@ -214,6 +214,25 @@ class Preparation:
             raise RuntimeError('Both owner acceptances and current, owner-reviewed knowledge are required')
         self.state['status'] = 'complete'
         self.save()
+        # Publish the immutable prepare boundary only after owner acceptance
+        # and knowledge synchronization have both passed.
+        from porter.handoff import publish_handoff
+        from porter.workspace import ensure_runner
+        ensure_runner(self.ws)
+        artifacts = [self.ws / 'project.json', self.ws / 'goals.md',
+                     self.state_path, self.ws / 'runner.md']
+        plan = self.ws / 'plan' / 'migration-plan.md'
+        if plan.exists():
+            artifacts.append(plan)
+        publish_handoff(
+            self.ws, 'prepare',
+            summary=(self.state.get('acceptance_report') or
+                     'prepare completed with owner acceptance'),
+            artifacts=artifacts,
+            verification=['skeleton and planning acceptance passed',
+                          'knowledgebase synchronized and reviewed'],
+            materials=(self.ws / 'project.json',),
+        )
 
     def dispatch(self, request: dict):
         inputs = request.get('inputs', [])

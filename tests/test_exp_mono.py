@@ -29,6 +29,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from porter.exp import mono as mono_mod
+from porter.handoff import publish_handoff
 
 FX_MODELS = ("fx/reasoning-model", "fx/coding-model")
 
@@ -52,7 +53,7 @@ def _mk_fixture(tmp: Path) -> dict:
                     "commit", "-q", "-m", "init"], cwd=tree, check=True,
                    capture_output=True)
     ws = tmp / "ws"
-    for sub in ("P1/modules/fx-a", "P1/modules/fx-b", "P2/reports"):
+    for sub in ("mono-input/modules/fx-a", "mono-input/modules/fx-b"):
         (ws / sub).mkdir(parents=True)
     (ws / "project.json").write_text(json.dumps({
         "name": "ws-fx", "linux_driver": str(linux),
@@ -66,29 +67,47 @@ def _mk_fixture(tmp: Path) -> dict:
                       "timeout_sec": 60,
                       "success_pattern": "UT-DONE",
                       "fail_pattern": "UT-BAD"}}), encoding="utf-8")
-    (ws / "P1" / "modules" / "deps.json").write_text(json.dumps({
-        "modules": ["fx-a", "fx-b"],
+    plan = {
         "edges": {"fx-a": [], "fx-b": ["fx-a"]},
-        "order": ["fx-a", "fx-b"]}), encoding="utf-8")
-    (ws / "P1" / "modules" / "fx-a" / "module.json").write_text(json.dumps({
+        "order": ["fx-a", "fx-b"], "driver_home": "home/drv-x",
+        "modules": {
+            "fx-a": {"depends_on": [], "verification": ["unit a"]},
+            "fx-b": {"depends_on": ["fx-a"], "verification": ["unit b"]},
+        },
+    }
+    (ws / "migration-plan.json").write_text(json.dumps(plan), encoding="utf-8")
+    (ws / "migration-plan.md").write_text("# migration plan\n", encoding="utf-8")
+    division = {**plan, "version": 1, "unknown": [],
+                "integration": {"list_file": "reg.txt",
+                                 "entry_template": "decl {stem};"},
+                "driver": "driver-x", "test_substrate": {"marker": "@MARK"},
+                "source_ext": ".cx",
+                "commit_paths": ["top.txt"],
+                "modules": {
+                    "fx-a": {"depends_on": [], "verification": ["unit a"]},
+                    "fx-b": {"depends_on": ["fx-a"], "verification": ["unit b"]},
+                }}
+    (ws / "module-divsion.json").write_text(json.dumps(division), encoding="utf-8")
+    (ws / "module-divsion.md").write_text("# module divsion\n", encoding="utf-8")
+    (ws / "runner.md").write_text(
+        "# runner\n\n## 第一部分：构建/编译\n\n### 1. 模块编译\n\n"
+        "### 2. 镜像编译\n\n## 第二部分：启动\n\n### 1. 设备自启动\n\n"
+        "### 2. 设备注入与交互\n\n## 第三部分：单元测试\n", encoding="utf-8")
+    (ws / "mono-input" / "modules" / "fx-a" / "module.json").write_text(json.dumps({
         "name": "fx-a", "function": "虚构核心词汇"}), encoding="utf-8")
-    (ws / "P1" / "modules" / "fx-a" / "spec_a.c").write_text(
+    (ws / "mono-input" / "modules" / "fx-a" / "spec_a.c").write_text(
         "\n".join(f"int fa_{i}(void) {{ return {i}; }}" for i in range(40))
         + "\n", encoding="utf-8")
-    (ws / "P1" / "modules" / "fx-b" / "module.json").write_text(json.dumps({
+    (ws / "mono-input" / "modules" / "fx-b" / "module.json").write_text(json.dumps({
         "name": "fx-b", "function": "虚构叶逻辑"}), encoding="utf-8")
-    (ws / "P1" / "modules" / "fx-b" / "spec_b.c").write_text(
+    (ws / "mono-input" / "modules" / "fx-b" / "spec_b.c").write_text(
         "\n".join(f"int fb_{i}(void) {{ return {i}; }}" for i in range(40))
         + "\n", encoding="utf-8")
-    (ws / "P2" / "reports" / "scaffold_manifest.json").write_text(
-        json.dumps({
-            "driver": "driver-x", "driver_home": "home/drv-x",
-            "source_ext": ".cx",
-            "integration": {"list_file": "reg.txt",
-                            "entry_template": "decl {stem};"},
-            "test_substrate": {"marker": "@MARK",
-                               "how": "虚构基质：标记置于测试单元之首"},
-            "commit_paths": ["top.txt"]}), encoding="utf-8")
+    publish_handoff(
+        ws, "pre-mono", summary="fixture pre-mono handoff",
+        artifacts=[ws / name for name in
+                   ("module-divsion.md", "module-divsion.json",
+                    "migration-plan.md", "migration-plan.json", "runner.md")])
     return {"tmp": tmp, "ws": ws, "tree": tree, "home": home,
             "linux": linux}
 
@@ -557,11 +576,15 @@ class TestExpMonoLoop(unittest.TestCase):
         runner = json.loads(runner_p.read_text(encoding="utf-8"))
         del runner["unit_test"]["driver_scope_cmd"]
         runner_p.write_text(json.dumps(runner), encoding="utf-8")
-        man_p = (self.fx["ws"] / "P2" / "reports" /
-                 "scaffold_manifest.json")
+        man_p = self.fx["ws"] / "module-divsion.json"
         man = json.loads(man_p.read_text(encoding="utf-8"))
         del man["integration"]
         man_p.write_text(json.dumps(man), encoding="utf-8")
+        publish_handoff(
+            self.fx["ws"], "pre-mono", summary="updated fixture pre-mono handoff",
+            artifacts=[self.fx["ws"] / name for name in
+                       ("module-divsion.md", "module-divsion.json",
+                        "migration-plan.md", "migration-plan.json", "runner.md")])
 
         def work(module):        # 无登记要求：不写登记也应通过
             _write_module_product(self.fx["home"],
@@ -758,7 +781,7 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertIsNone(tr[0]["resume_session"])
 
     def test_preconditions_rc2(self):
-        (self.fx["ws"] / "P1" / "modules" / "deps.json").unlink()
+        (self.fx["ws"] / "migration-plan.json").unlink()
         self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 2)
         self.setUp()                     # 重建 fixture
         with mock.patch.object(mono_mod, "_load_models",

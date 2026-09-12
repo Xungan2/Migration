@@ -49,11 +49,11 @@
 
 - Reuse the existing mono orchestration seam; do not create a second workflow engine.
 - Add `pre-mono` as a bounded preparation phase. Its main agent may split the work into any useful sub-tasks; sub-task count, roles, and order are not fixed.
-- `pre-mono` consumes migration plan, prepare handoffs, knowledgebase, runbook, and source/target facts, and produces an executable module manifest plus the latest migration plan and `change.md`.
+- `pre-mono` is an agent-owned task. It consumes the prepare success handoff, `runner.md`, knowledgebase, and source/target facts, then produces `module-divsion.md/json`, the latest `migration-plan.md/json`, and module input specs. Porter CLI invocations remain in `runbook.md`.
 - The manifest must assign every in-scope source file to one module or explicitly mark it `unassigned`/`blocked`; each module records source files, target landing, dependencies, status, and a verification surface.
 - Unknown dependencies and conflicts are explicit. Non-blocking unknowns may enter mono; unknowns that prevent necessary acceptance or all progress block and produce `HUMAN.md`.
 - `pre-mono` is content-validated rather than workflow-validated: no fixed decomposition recipe is required.
-- Discover inputs from project/goals, prepare state and handoffs, migration plan, knowledgebase, and target-tree manifests/runner facts. The agent fills missing fields by bounded inspection.
+- Discover inputs from project/goals, the prepare success handoff, knowledgebase, `runner.md`, and target-tree facts. The pre-mono agent fills missing fields by bounded inspection; the host only validates and records the handoff.
 - Maintain the latest factual migration plan separately from `change.md`. Agents own content; the orchestrator checks parseability, evidence presence, and dependency consistency.
 - Each change records prior value, new value, reason, evidence, affected modules, and rollback condition.
 - The agent chooses order. A plan change triggers dependency and cycle checks and marks affected passed modules for regression.
