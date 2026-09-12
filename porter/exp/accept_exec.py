@@ -1,6 +1,6 @@
-"""accept_exec.py — accept 节对 supervisor 与 frozen 节生成器。
+"""accept_exec.py — accept 节对 supervisor。
 
-形态（2026-09-12 定案，本轮简化定稿）：
+形态（2026-09-12 定案；同日归属修正）：
 - 每节验收标准 = 一对文件：exp-accept/acceptance/N-slug.json（数据面，
   须含按顺序排列的命令 + 成功判定标准，其余字段自由）+
   N-slug.check.py（消费者脚本）。
@@ -10,8 +10,11 @@
   PORTER_EVIDENCE_DIR（脚本自产工件归档目录）；PYTHONPATH 含工具根。
 - 工具零格式假设：不解析 JSON 语义、不硬编码节格式——只发现、调用、
   归档。格式纪律写在 skill；诚实性由人审把关。
-- §2/§3 frozen：从 runner.json 机械生成（通用 check 模板，兼作 agent
-  可参考的样例形态）；幂等（runner_sha16 不变则不重生成）。
+- 节归属（三 tier）：t1 = §1-§4（自 mono 执行事实提取；机制未实现，
+  骨架在位——见 accept._T1_READY）；inject = §5/§6（agent 探索制定）；
+  e2e = §7（agent 设计）。frozen 机器（§2/§3 自 runner.json 机械生成）
+  已随归属修正退场（§1-§4 单一属主 = Tier1）；最小格式样例内嵌于
+  EXP-accept-inject skill。
 - 兜底超时 INVOKE_FALLBACK_SEC：单次 invoke 墙钟上限，防脚本挂死；
   超时杀进程组（连带 QEMU/docker 子进程——dmzero-t3 #21 孤儿坑）。
 """
@@ -21,7 +24,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -34,7 +36,7 @@ TOOL_ROOT = Path(__file__).resolve().parents[2]
 ACCEPTANCE_DIRNAME = "acceptance"
 INVOKE_FALLBACK_SEC = 7200      # 兜底防挂死（命令级超时由脚本自管）
 
-SECTION_TIER = {"inject": (1, 4, 5, 6), "e2e": (7,)}
+SECTION_TIER = {"t1": (1, 2, 3, 4), "inject": (5, 6), "e2e": (7,)}
 ALL_SECTIONS = tuple(range(1, 8))
 
 
@@ -51,85 +53,6 @@ def _sha16_file(path: Path) -> str:
         return _sha16_bytes(Path(path).read_bytes())
     except OSError:
         return ""
-
-
-def _esc(s) -> str:
-    """冻结 pattern（runner.json 的子串语义）→ 正则字面量。"""
-    return re.escape(str(s))
-
-
-# ---------- 通用 check 模板（frozen 生成物；agent 可参考的样例形态） ----------
-
-CHECK_TEMPLATE = '''#!/usr/bin/env python3
-"""通用验收消费脚本（工具 frozen 生成物；agent 自由节可参考此形态）。
-
-用法：python <N>-<slug>.check.py <N>-<slug>.json
-本模板私有 JSON 约定（自由节可自定格式）：
-  commands: [{"cmd": "...", "timeout_sec": 900}, ...]     按序执行
-  expect:   {"rc": 0,                                     末条命令退出码
-             "log_contains": ["正则", ...],               全部须命中（合并输出）
-             "log_not_contains": ["正则", ...],           全部须缺席
-             "min_matches": [{"expr": "正则", "count": 8}]}  命中计数下限
-exit 0 = 通过；非零 = 不过。stdout = 证据叙述。
-"""
-import json
-import os
-import re
-import subprocess
-import sys
-
-
-def main() -> int:
-    doc = json.loads(open(sys.argv[1], encoding="utf-8").read())
-    env = dict(os.environ)
-    root = env.get("PORTER_TARGET_OS_ROOT", os.getcwd())
-    out_all, rc_last = [], 0
-    cmds = doc.get("commands") or []
-    if not cmds:
-        print("not-applicable：无命令（依据见 JSON 叙述）")
-        return 0
-    for i, c in enumerate(cmds):
-        cmd = c["cmd"] if isinstance(c, dict) else str(c)
-        for k in ("PORTER_TARGET_OS_ROOT", "PORTER_DRIVER_HOME"):
-            cmd = cmd.replace("{" + k + "}", env.get(k, ""))
-        tmo = int(c.get("timeout_sec", 3600)) if isinstance(c, dict) else 3600
-        print(f"[cmd {i + 1}/{len(cmds)}] {cmd[:160]}")
-        try:
-            p = subprocess.run(["bash", "-c", cmd], env=env, cwd=root,
-                               capture_output=True, text=True, timeout=tmo)
-            out = (p.stdout or "") + (p.stderr or "")
-            rc_last = p.returncode
-        except subprocess.TimeoutExpired:
-            out = f"TIMEOUT after {tmo}s"
-            rc_last = 124
-        out_all.append(out)
-        if out:
-            print(out[-2000:])
-    text = "\\n".join(out_all)
-    exp = doc.get("expect") or {}
-    checks = []
-    if "rc" in exp:
-        checks.append((f"rc={exp['rc']}", rc_last == int(exp["rc"])))
-    for pat in exp.get("log_contains") or []:
-        checks.append((f"contains:{pat[:40]}",
-                       re.search(pat, text) is not None))
-    for pat in exp.get("log_not_contains") or []:
-        checks.append((f"not_contains:{pat[:40]}",
-                       re.search(pat, text) is None))
-    for mm in exp.get("min_matches") or []:
-        n = len(re.findall(mm["expr"], text, re.M))
-        checks.append((f"matches({mm['expr'][:30]}…)={n}>={mm['count']}",
-                       n >= int(mm["count"])))
-    ok = bool(checks) and all(v for _, v in checks)
-    for name, v in checks:
-        print(f"{'PASS' if v else 'FAIL'}  {name}")
-    print("VERDICT:", "pass" if ok else "fail")
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
 
 
 # ---------- 发现与结构校验 ----------
@@ -326,80 +249,3 @@ def fingerprint_problems(ws: Path, index: dict) -> list[str]:
         if _sha16_file(c) != s.get("check_sha16"):
             probs.append(f"§{n} 消费脚本指纹不符：{s.get('check')}")
     return probs
-
-
-# ---------- frozen 生成（§2/§3 自 runner.json 机械绑定，幂等） ----------
-
-def _spec_unit_test(runner: dict) -> dict | None:
-    ut = runner.get("unit_test") or {}
-    cmd = ut.get("driver_scope_cmd") or ut.get("cmd")
-    if not cmd:
-        return None
-    expect: dict = {"rc": 0}
-    if ut.get("success_pattern"):
-        expect["log_contains"] = [_esc(ut["success_pattern"])]
-    if ut.get("fail_pattern"):
-        expect["log_not_contains"] = [_esc(ut["fail_pattern"])]
-    return {"num": 2, "slug": "unit-test", "title": "单元测试",
-            "source": ("runner.unit_test.driver_scope_cmd"
-                       if ut.get("driver_scope_cmd") else "runner.unit_test.cmd"),
-            "commands": [{"cmd": cmd,
-                          "timeout_sec": int(ut.get("timeout_sec") or 3600)}],
-            "expect": expect}
-
-
-def _spec_image_build(runner: dict) -> dict | None:
-    b = runner.get("build") or {}
-    if not b.get("cmd"):
-        return None
-    expect: dict = {"rc": 0}
-    if b.get("success_pattern"):
-        expect["log_contains"] = [_esc(b["success_pattern"])]
-    return {"num": 3, "slug": "image-build", "title": "镜像级编译",
-            "source": "runner.build.cmd",
-            "commands": [{"cmd": b["cmd"],
-                          "timeout_sec": int(b.get("timeout_full_sec")
-                                             or 3000)}],
-            "expect": expect}
-
-
-def frozen_generate(ws: Path, runner: dict) -> list[str]:
-    """生成/刷新 §2/§3 节对。幂等：在场且 runner_sha16 未变 → 跳过。
-    返回日志消息列表（空 = 无事发生）。"""
-    ws = Path(ws)
-    if not runner:
-        return ["runner.json 缺失——§2/§3 frozen 节未生成（后续节仍可进行）"]
-    runner_sha = _sha16_file(ws / "runner.json")
-    msgs: list[str] = []
-    d = acceptance_dir(ws)
-    d.mkdir(parents=True, exist_ok=True)
-    for spec in (_spec_unit_test(runner), _spec_image_build(runner)):
-        if spec is None:
-            continue                      # runner 键缺失：不生成该节
-        num, slug = spec["num"], spec["slug"]
-        jpath = d / f"{num}-{slug}.json"
-        cpath = d / f"{num}-{slug}.check.py"
-        doc = {"section": num, "title": spec["title"], "origin": "frozen",
-               "source": spec["source"],
-               "commands": spec["commands"], "expect": spec["expect"],
-               "paths": [],
-               "notes": ("工具自 runner.json 机械绑定；重新生成条件 = "
-                         "runner.json 指纹变化。语义：按序执行 commands，"
-                         "expect 合取判定（rc/log_contains/log_not_contains"
-                         "/min_matches 词汇见 check 脚本头注）。"),
-               "runner_sha16": runner_sha}
-        if jpath.exists() and cpath.exists():
-            try:
-                old = json.loads(jpath.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                old = None
-            if isinstance(old, dict) and \
-                    old.get("runner_sha16") == runner_sha:
-                continue                      # 幂等：指纹未变不重生成
-            _log.console_line(f"[porter] accept: runner.json 已变——"
-                              f"刷新 frozen §{num}")
-        jpath.write_text(json.dumps(doc, ensure_ascii=False, indent=2)
-                         + "\n", encoding="utf-8")
-        cpath.write_text(CHECK_TEMPLATE, encoding="utf-8")
-        msgs.append(f"§{num} frozen 节对已生成：{jpath.name} + {cpath.name}")
-    return msgs

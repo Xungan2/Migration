@@ -1,14 +1,22 @@
 """accept.py — accept：迁移验收标准制定（节文件 + 消费脚本对形态）。
 
-两段 agent 任务（各一个 session，run_agent_seq 运行协议）：
+三段 tier（§1-§7 七节梯；2026-09-12 归属修正：§1-§4 归 Tier1、
+Tier 2 收缩为 §5/§6，frozen 机器退场）：
 
-  Tier 2（inject）→ §1 模块级编译 / §4 启动-驱动自启动 /
-                    §5 启动-设备注入 / §6 启动-驱动设备简单交互
-                    四对节文件（acceptance/N-slug.json + .check.py）
-                    → ★关口① exp-accept.inject
-  Tier 3（e2e）  → §7 端到端 一对节文件 → ★关口② exp-accept.plan
-  §2/§3 由工具自 runner.json 机械生成（frozen，accept_exec.frozen_generate）
-  双关口放行 → ledger 登记七节索引（acceptance 索引态）
+  Tier 1（t1）    → §1 模块级编译 / §2 单测 / §3 镜像级编译 /
+                    §4 启动-驱动自启动——自 mono 执行事实提取
+                    （源序：runner.md > exp-mono/logs；runner.json 已
+                    从 accept 脱钩、退役方向定案），禁改码（树零变更）。
+                    **机制未定，当前留空跳过**
+                    （骨架在位：_run_tier/关口/CLI 均已接线，
+                    _T1_READY 置 True + 实现 _t1_prompt 即启用）
+                    → ★关口① exp-accept.t1
+  Tier 2（inject）→ §5 启动-设备注入 / §6 启动-驱动设备简单交互
+                    两对节文件（acceptance/N-slug.json + .check.py）
+                    → ★关口② exp-accept.inject
+  Tier 3（e2e）  → §7 端到端 一对节文件 → ★关口③ exp-accept.plan
+  双关口放行 → ledger 登记七节索引（未绑定节记 missing——Tier1 落地前
+  bound 3/7，--execute 被前置检查 rc 2 挡住并提示先完成 Tier1）
 
 设计要点（2026-09-12 定案，格式自由化）：
 - 每节交付物 = JSON 标准（须含按序命令 + 成功判定标准，其余自由）+
@@ -16,6 +24,8 @@
   调用契约/环境见 accept_exec 模块头注。工具零格式假设。
 - agent 直接改码（范围守卫 = driver_home ∪ 各节 JSON 顶层 "paths"
   并集；paths 缺席则该节无机器白名单，git 变更全量进评审材料归人判）。
+  （Tier1 例外：禁改码——提取错修节文件、环境漂移/标准错上报，
+  随 _t1_prompt 一并落地。）
 - 启动/执行一律走外部静态段（运行协议禁自启）：先把候选写进节文件对
   再 run_static；外部按契约真实调用并归档，agent 读指针判定与迭代。
 - 只有跑通过的进标准：done 后编排器逐节真实 invoke，全绿才 commit、
@@ -38,17 +48,26 @@ from ..exp import mono as _mono
 from ..exp import accept_gate as _gate
 from .. import log as _log
 
+SKILL_T1 = "EXP-accept-t1"     # Tier1 skill——机制定案时创建
 SKILL_INJECT = "EXP-accept-inject"
 SKILL_E2E = "EXP-accept-e2e"
 SKILL_EXECUTE = "EXP-accept-execute"
+GATE_T1 = "exp-accept.t1"
 GATE_INJECT = "exp-accept.inject"
 GATE_PLAN = "exp-accept.plan"
+T1_BUDGET_SEC = 3600
 INJECT_BUDGET_SEC = 3600      # Tier 2/3 agent 段总预算缺省（CLI 可覆盖）
 E2E_BUDGET_SEC = 3600
 EXEC_BUDGET_SEC = 3600        # 执行相位 agent 段总预算缺省
 VERIFY_RETRIES = 2            # 结构校验不过的同 session 回灌上限
 
-_TIER_TITLES = {"inject": "§1/§4/§5/§6（模块编译/自启动/注入/交互）",
+# Tier1（§1-§4 提取）机制未实现：三源并集输入 + 禁改码守卫变体 +
+# EXP-accept-t1 skill 待定案。骨架（SECTION_TIER/_run_tier/关口/CLI）
+# 已接线，落地时置 True 并实现 _t1_prompt。
+_T1_READY = False
+
+_TIER_TITLES = {"t1": "§1/§2/§3/§4（模块编译/单测/镜像编译/自启动）",
+                "inject": "§5/§6（设备注入/简单交互）",
                 "e2e": "§7（端到端）"}
 
 
@@ -113,42 +132,60 @@ def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
 # ---------- prompt ----------
 
 def _kb_face(ws: Path) -> str:
-    parts = []
-    for rel in ("knowledgebase/build/README.md", "knowledgebase/boot/README.md"):
-        p = ws / rel
-        if p.exists():
-            try:
-                head = "\n".join(p.read_text(encoding="utf-8",
-                                             errors="replace"
-                                             ).splitlines()[:40])
-                parts.append(f"### {rel}（前 40 行）\n```\n{head}\n```")
-            except OSError:
-                pass
-    return "\n\n".join(parts)
+    """知识库注入面——指针形式（2026-09-12 裁定：prompt 知识注入一律
+    路径指针，禁止无依据的 head-N 原文截断；与 goals/report/parking/
+    negatives 同模式，agent 自读全文）。缺席省略该域。"""
+    rows = []
+    for rel, what in (
+            ("knowledgebase/build/README.md", "构建域（构建命令与坑史）"),
+            ("knowledgebase/boot/README.md",
+             "启动域（boot 命令、成功/panic 特征与坑史）")):
+        if (ws / rel).exists():
+            rows.append(f"- 知识库·{what}，**先读**：`{ws / rel}`")
+    return "\n".join(rows) + "\n" if rows else ""
 
 
-def _boot_hint(ws: Path, runner: dict) -> str:
-    bo = runner.get("boot") or {}
-    if not bo.get("cmd"):
-        return ("（runner.json 缺失或无 boot 键——基线启动命令须你从知识库/"
-                "材料中确立，这本身算探索，记进节 JSON 叙述）")
-    return (f"- boot 命令线索（runner.json）：`{bo.get('cmd')}`\n"
-            f"- 成功特征 `{bo.get('success_pattern')}` / panic 特征 "
-            f"`{bo.get('panic_pattern')}` / 日志 `{bo.get('log_file')
-            or 'stdout'}`")
+def _boot_face(ws: Path) -> str:
+    """基线启动/执行事实注入面——指针形式（2026-09-12 裁定：runner.json
+    已从 accept 全链脱钩——退役方向定案；执行事实 agent 面 = runner.md
+    三部分手册 + mono gate 实跑日志。runner.md 由 accept 前置（exp-mono
+    全 pass）间接保证在场，指针不悬空）。"""
+    return (f"- 基线启动/编译执行事实（boot 命令、成功/panic 特征、"
+            f"坑史——**先读**）：`{ws / 'runner.md'}`（三部分手册："
+            "镜像编译/设备自启动/设备注入与交互/单元测试+执行记录）\n"
+            f"- 执行证据备查（mono gate 实跑输出）："
+            f"`{ws / 'exp-mono' / 'logs'}/`\n")
 
 
-def _frozen_face(ws: Path) -> str:
-    d = _exec.acceptance_dir(ws)
-    pairs = [p.name for p in sorted(d.glob("*.check.py"))] \
-        if d.exists() else []
-    if not pairs:
-        return ""
-    return ("- 工具已自 runner.json 机械生成 frozen 节对（**勿改**，"
-            "形态可作样例参考）：" + "、".join(pairs) + "\n")
+def _mono_knowledge_face(ws: Path) -> str:
+    """mono 知识面指针（G4 接入，2026-09-12）：契约登记表 + API 映射
+    词典。指针形式（同 session 裁定：禁 head-N 截断）。两文件为 mono
+    时代快照、可能落后于树内代码——措辞显式"疑则以树内代码为准"，
+    防过时条目误导（这是注入契约知识的固有风险，与不注入的归因效率
+    损失相权衡后裁定接入）。缺席省略。"""
+    rows = []
+    c = ws / "exp-mono" / "contracts.md"
+    if c.exists():
+        rows.append(f"- 契约登记表（跨模块共享签名与行为纪律——改码前"
+                    f"**必查**；系 mono 快照，疑则以树内代码为准）：`{c}`")
+    m = ws / "exp-mono" / "mapping-notes.md"
+    if m.exists():
+        rows.append(f"- API 映射词典（Linux→目标 OS 映射参考，同上以树"
+                    f"内代码为准）：`{m}`")
+    return "\n".join(rows) + "\n" if rows else ""
 
 
-def _inject_prompt(ws: Path, proj: dict, runner: dict,
+def _t1_prompt(ws: Path, proj: dict,
+               manifest: dict, extra: str) -> str:
+    """Tier1（§1-§4）提取机制——未定，留空（2026-09-12 用户裁定）。
+
+    设计讨论见 AGENTS_2.md（上 session 草案仅备忘、非承诺）。启用 =
+    实现 prompt + skill 后置 _T1_READY=True。
+    """
+    raise NotImplementedError("Tier1（§1-§4）机制未定——留空")
+
+
+def _inject_prompt(ws: Path, proj: dict,
                    manifest: dict, extra: str) -> str:
     skill = agent.load_skill(SKILL_INJECT)
     acc = _exec.acceptance_dir(ws)
@@ -160,19 +197,19 @@ def _inject_prompt(ws: Path, proj: dict, runner: dict,
             f"负结论（已排除死路）`{ws / 'exp-mono' / 'negatives.md'}`"
             "（三者先读）\n"
             f"- 迁移意图：`{ws / 'goals.md'}`\n"
-            + _boot_hint(ws, runner) + "\n"
-            + _frozen_face(ws)
-            + _kb_face(ws) + "\n"
+            + _boot_face(ws)
+            + _kb_face(ws)
+            + _mono_knowledge_face(ws)
             + (extra or "")
-            + f"\n## 输出契约\n- 交付物：`{acc}` 下四对文件——"
-              "`1-<slug>.json`、`4-<slug>.json`、`5-<slug>.json`、"
-              "`6-<slug>.json` 及各自的 `.check.py`（§2/§3 已由工具生成，"
-              "勿动）。每对的 JSON 须含按序命令+成功标准，契约见 SKILL。\n"
+            + f"\n## 输出契约\n- 交付物：`{acc}` 下两对文件——"
+              "`5-<slug>.json`、`6-<slug>.json` 及各自的 `.check.py`"
+              "（§1-§4 归 Tier1 提取，不在你的任务内）。每对的 JSON 须含"
+              "按序命令+成功标准，契约见 SKILL。\n"
               "- done JSON：`status` / `deliverable`（= acceptance 目录"
               "绝对路径）/ `notes`。")
 
 
-def _e2e_prompt(ws: Path, proj: dict, runner: dict,
+def _e2e_prompt(ws: Path, proj: dict,
                 manifest: dict, extra: str) -> str:
     skill = agent.load_skill(SKILL_E2E)
     acc = _exec.acceptance_dir(ws)
@@ -185,9 +222,9 @@ def _e2e_prompt(ws: Path, proj: dict, runner: dict,
               f"`{inj5}`、`{inj6}`\n"
             f"- 迁移意图：`{ws / 'goals.md'}`；exp-mono 报告 "
             f"`{ws / 'exp-mono' / 'report.md'}`\n"
-            + _boot_hint(ws, runner) + "\n"
-            + _frozen_face(ws)
-            + _kb_face(ws) + "\n"
+            + _boot_face(ws)
+            + _kb_face(ws)
+            + _mono_knowledge_face(ws)
             + (extra or "")
             + f"\n## 输出契约\n- 交付物：`{acc}` 下 `7-<slug>.json` + "
               "`7-<slug>.check.py` 一对。JSON 须含按序命令+成功标准，"
@@ -222,7 +259,7 @@ def _write_review(ws: Path, exp_dir: Path, tier: str, nums: tuple[int, ...],
                   "```", "", "### 消费脚本（check.py）", "", "```python",
                   c.read_text(encoding="utf-8", errors="replace").rstrip(),
                   "```", ""]
-    gate_id = GATE_INJECT if tier == "inject" else GATE_PLAN
+    gate_id = _GATE_OF[tier]
     lines += ["## 放行方式", "",
               "answers.md 追加：", "", "```", f"## @{gate_id}",
               "verdict: approve", "```", "",
@@ -234,10 +271,20 @@ def _write_review(ws: Path, exp_dir: Path, tier: str, nums: tuple[int, ...],
 
 # ---------- 关卡执行（一段 tier 的完整编排） ----------
 
-def _run_tier(ws: Path, exp_dir: Path, proj: dict, runner: dict,
+_GATE_OF = {"t1": GATE_T1, "inject": GATE_INJECT, "e2e": GATE_PLAN}
+_PREFIX_OF = {"t1": "T1", "inject": "T2", "e2e": "T3"}
+
+
+def _prompt_fn(tier: str):
+    if tier == "t1":
+        return _t1_prompt       # 机制未定：NotImplementedError（_T1_READY 守卫）
+    return _inject_prompt if tier == "inject" else _e2e_prompt
+
+
+def _run_tier(ws: Path, exp_dir: Path, proj: dict,
               manifest: dict, ledger: dict, tier: str, budget: int,
               session: str | None, extra: str) -> int:
-    """tier ∈ inject|e2e。返回 3=关口待答（已登记）/1=失败或泊车/2=缺 agent。"""
+    """tier ∈ t1|inject|e2e。返回 3=关口待答（已登记）/1=失败或泊车/2=缺 agent。"""
     import os
     if os.environ.get("PORTER_NO_AGENT"):
         _log.console_line("[porter] accept: 需要 agent（PORTER_NO_AGENT=1）"
@@ -246,13 +293,13 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict, runner: dict,
     target_os = Path(proj["target_os"])
     driver_home_rel = str(manifest["driver_home"])
     nums = _exec.SECTION_TIER[tier]
-    prefix = "T2" if tier == "inject" else "T3"
-    gate_id = GATE_INJECT if tier == "inject" else GATE_PLAN
-    prompt_fn = _inject_prompt if tier == "inject" else _e2e_prompt
+    prefix = _PREFIX_OF[tier]
+    gate_id = _GATE_OF[tier]
+    prompt_fn = _prompt_fn(tier)
     baseline = _mono._git_status(target_os)
     static = _make_static(ws, target_os, driver_home_rel, nums,
                           baseline, prefix)
-    prompt = prompt_fn(ws, proj, runner, manifest, extra)
+    prompt = prompt_fn(ws, proj, manifest, extra)
     session_id = session
     attempts = 0
     problems: list[str] = []
@@ -473,7 +520,8 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
             f"泊车 `{ws / 'exp-mono' / 'parking.md'}`；"
             f"负结论 `{ws / 'exp-mono' / 'negatives.md'}`\n"
             f"- 迁移意图：`{ws / 'goals.md'}`\n"
-            f"\n## 输出契约\n- 修复完成后输出 done JSON：`status` / "
+            + _mono_knowledge_face(ws)
+            + f"\n## 输出契约\n- 修复完成后输出 done JSON：`status` / "
               "`notes`（≤200 字：归因、改了什么、为何预期转绿）。\n"
               "- blocked 时：`status: blocked`，notes 说清卡点；"
               "若结论是**标准本身有错**，notes 首行必须是 "
@@ -526,7 +574,7 @@ def _write_panic(exp_dir: Path, ledger: dict, notes: str) -> None:
               notes.strip() or "（空）", "```", "",
               "## 人工选项", "",
               "1. **认同**：修订标准——`porter accept --tier "
-              "<inject|e2e>` 重做涉事节（reject 意见可写进关口），"
+              "<t1|inject|e2e>` 重做涉事节（reject 意见可写进关口），"
               "关口重审放行后重新 `--execute`；",
               "2. **否决**：`porter accept --execute --session "
               f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
@@ -557,9 +605,13 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
         return 2
     fprobs = _exec.fingerprint_problems(ws, idx)
     if fprobs:
-        _log.console_line("[porter] accept: 标准指纹漂移——执行前标准"
-                          "被改动，须先重新人审或恢复原文件：\n- "
-                          + "\n- ".join(fprobs) + "\nrc 2")
+        unbound = {s.get("section") for s in idx["sections"]
+                   if s.get("status") != "bound"}
+        t1hint = ("\n（§1-§4 未绑定属 Tier1——机制未实现，--execute 暂不可用）"
+                  if unbound & {1, 2, 3, 4} else "")
+        _log.console_line("[porter] accept: 标准未齐备/指纹漂移——执行前"
+                          "标准须七节齐备且未被改动：\n- "
+                          + "\n- ".join(fprobs) + t1hint + "\nrc 2")
         return 2
     ex = ledger.setdefault("execute", {})
     ex["status"] = "running"
@@ -705,12 +757,13 @@ def run_accept(ws: Path, tier: str | None = None,
     ws = Path(ws).resolve()
     needs = ["project.json", "exp-mono/ledger.json"]
     missing = [n for n in needs if not (ws / n).exists()]
-    manifest = (_mono._read_json(ws / "mono-input-manifest.json")
-                or _mono._read_json(ws / "P2" / "reports" /
-                                    "scaffold_manifest.json") or {})
+    # driver_home 单源 = module-divsion.json（pre-mono 产物）。accept 前置
+    # （exp-mono 全 pass）在链条上蕴含 mono 跑过，而 mono 无条件要求该文件
+    # 在场，故无需回退；旧源（mono-input-manifest / P2 scaffold_manifest）
+    # 在工具内已无生产者与消费者（2026-09-12 裁定单源，不留死路径）。
+    manifest = _mono._read_json(ws / "module-divsion.json") or {}
     if not manifest.get("driver_home"):
-        missing.append("mono-input-manifest.json（或 P2 scaffold_manifest）"
-                       "[driver_home]")
+        missing.append("module-divsion.json[driver_home]")
     if missing:
         _log.console_line(f"[porter] accept: 前置缺失："
                           + "、".join(missing) + "——rc 2")
@@ -740,19 +793,48 @@ def run_accept(ws: Path, tier: str | None = None,
         return _run_execute(ws, exp_dir, proj, manifest, ledger,
                             int(budget or EXEC_BUDGET_SEC), session)
 
-    runner = _mono._read_json(ws / "runner.json") or {}
-    for m in _exec.frozen_generate(ws, runner):
-        _log.console_line(f"[porter] accept: {m}")
 
-    # ---- Tier 2（§1/§4/§5/§6）----
+    # ---- Tier 1（§1-§4：自 mono 执行事实提取；骨架在位、机制未实现）----
+    if not _T1_READY:
+        if tier == "t1":
+            _log.console_line("[porter] accept: Tier1（§1-§4 提取）机制"
+                              "未实现——骨架已接线，定案后置 _T1_READY 并"
+                              "实现 _t1_prompt——rc 2")
+            return 2
+        _log.console_line("[porter] accept: Tier1 未实现——§1-§4 留空跳过"
+                          "（索引将记 missing；--execute 需七节齐备）")
+    elif tier == "t1" or (not tier and _tier_rerun_needed(ws, ledger, "t1")):
+        note = ""
+        if _exec.pair_json(ws, 1) is not None:
+            rnote = _gate.reject_note(ws, GATE_T1)
+            if rnote:
+                note = f"\n## 关口① reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
+                       "t1", int(budget or T1_BUDGET_SEC), session, note)
+        session = None                     # 会话只续接被指名的 tier
+        if rc != 3:
+            return rc
+        st0, _note0 = _gate.gate_state(ws, GATE_T1)
+        if st0 == "rejected":
+            _log.console_line("[porter] accept: 关口① reject（note 见 "
+                              "GATES.md）——重跑 `--tier t1` 载入意见重做"
+                              " rc 3")
+            return 3
+        if st0 != "approved":
+            _log.console_line(f"[porter] accept: 关口① {st0}——人审放行后"
+                              "重跑（answers.md `## @exp-accept.t1` + "
+                              "`verdict: approve`）rc 3")
+            return 3
+
+    # ---- Tier 2（§5/§6）----
     if tier == "inject" or (not tier
                             and _tier_rerun_needed(ws, ledger, "inject")):
         note = ""
         if _exec.pair_json(ws, 5) is not None:
             rnote = _gate.reject_note(ws, GATE_INJECT)
             if rnote:
-                note = f"\n## 关口① reject 意见（重做依据）\n{rnote}\n"
-        rc = _run_tier(ws, exp_dir, proj, runner, manifest, ledger,
+                note = f"\n## 关口② reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
                        "inject", int(budget or INJECT_BUDGET_SEC),
                        session, note)
         session = None                     # 会话只续接被指名的 tier
@@ -760,11 +842,11 @@ def run_accept(ws: Path, tier: str | None = None,
             return rc
     st1, _note1 = _gate.gate_state(ws, GATE_INJECT)
     if st1 == "rejected":
-        _log.console_line("[porter] accept: 关口① reject（note 见 GATES.md）"
+        _log.console_line("[porter] accept: 关口② reject（note 见 GATES.md）"
                           "——重跑 `--tier inject` 载入意见重做 rc 3")
         return 3
     if st1 != "approved":
-        _log.console_line(f"[porter] accept: 关口① {st1}——人审放行后重跑"
+        _log.console_line(f"[porter] accept: 关口② {st1}——人审放行后重跑"
                           "（answers.md `## @exp-accept.inject` + "
                           "`verdict: approve`）rc 3")
         return 3
@@ -775,19 +857,19 @@ def run_accept(ws: Path, tier: str | None = None,
         if _exec.pair_json(ws, 7) is not None:
             rnote = _gate.reject_note(ws, GATE_PLAN)
             if rnote:
-                note = f"\n## 关口② reject 意见（重做依据）\n{rnote}\n"
-        rc = _run_tier(ws, exp_dir, proj, runner, manifest, ledger,
+                note = f"\n## 关口③ reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
                        "e2e", int(budget or E2E_BUDGET_SEC),
                        session, note)
         if rc != 3:
             return rc
     st2, _note2 = _gate.gate_state(ws, GATE_PLAN)
     if st2 == "rejected":
-        _log.console_line("[porter] accept: 关口② reject——重跑 "
+        _log.console_line("[porter] accept: 关口③ reject——重跑 "
                           "`--tier e2e` 载入意见重做 rc 3")
         return 3
     if st2 != "approved":
-        _log.console_line(f"[porter] accept: 关口② {st2}——人审放行后重跑"
+        _log.console_line(f"[porter] accept: 关口③ {st2}——人审放行后重跑"
                           "（answers.md `## @exp-accept.plan` + "
                           "`verdict: approve`）rc 3")
         return 3
@@ -796,7 +878,12 @@ def run_accept(ws: Path, tier: str | None = None,
     idx = _register_index(ws, exp_dir, ledger)
     bound = [s["section"] for s in idx["sections"]
              if s.get("status") == "bound"]
+    missing = [s["section"] for s in idx["sections"]
+               if s.get("status") != "bound"]
+    extra = (f"；缺节 §{','.join(map(str, missing))}"
+             "——待 Tier1（机制未实现）" if missing else "")
     _log.console_line(f"[porter] accept: 验收标准就绪——七节索引已登记"
-                      f"（bound {len(bound)}/7，见 exp-accept/ledger.json）"
-                      "；执行相位（--execute）待后续实现——rc 0")
+                      f"（bound {len(bound)}/7{extra}，见 "
+                      "exp-accept/ledger.json）；缺节期间 --execute 不可用"
+                      "——rc 0")
     return 0
