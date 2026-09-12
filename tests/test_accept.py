@@ -554,9 +554,32 @@ class TestAcceptExecute(_Base):
             rc = accept_mod.run_accept(self.fx["ws"], execute=True)
         self.assertEqual(rc, 1)
         self.assertEqual(self._ledger()["execute"]["status"], "panic")
+        self.assertEqual(
+            self._ledger()["execute"].get("panic_kind"), "standard")
         panic_md = self.fx["ws"] / "exp-accept" / "execute-panic.md"
         self.assertTrue(panic_md.exists())
         self.assertIn("人工选项", panic_md.read_text(encoding="utf-8"))
+
+    def test_platform_gap_panics(self):
+        self._ready_index(self._exe_agent(s5_tree_dep=True))
+        self._revert_driver()
+        agent = self._exe_agent(
+            s5_tree_dep=True,
+            exe_blocked=("platform-gap: §5 需要目标 OS 侧的总线注册"
+                         "设施（断点位于 kernel/bus/registry，在"
+                         " driver_home 与各节 paths 之外）——修环内无"
+                         "合法闭合途径，建议平台侧补注册接口后重跑。"))
+        with _ctx(self._patches(agent)):
+            rc = accept_mod.run_accept(self.fx["ws"], execute=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(self._ledger()["execute"]["status"], "panic")
+        self.assertEqual(
+            self._ledger()["execute"].get("panic_kind"), "platform")
+        panic_md = self.fx["ws"] / "exp-accept" / "execute-panic.md"
+        text = panic_md.read_text(encoding="utf-8")
+        self.assertIn("平台缺口", text)
+        self.assertIn("platform-gap", text)
+        self.assertIn("扩大允许改动范围", text)   # 处置三选在场
 
     def test_plain_blocked_parks(self):
         self._ready_index(self._exe_agent(s5_tree_dep=True))

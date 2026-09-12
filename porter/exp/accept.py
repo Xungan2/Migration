@@ -521,11 +521,16 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
             f"负结论 `{ws / 'exp-mono' / 'negatives.md'}`\n"
             f"- 迁移意图：`{ws / 'goals.md'}`\n"
             + _mono_knowledge_face(ws)
+            + f"- 修复知识记录：修完在 `{ws / 'exp-accept' / 'fixes.md'}` "
+              "追加一节（归因/改了什么/为何预期转绿/死路教训，见 SKILL"
+              " 纪律；供后续沉淀 knowledgebase）\n"
             + f"\n## 输出契约\n- 修复完成后输出 done JSON：`status` / "
               "`notes`（≤200 字：归因、改了什么、为何预期转绿）。\n"
-              "- blocked 时：`status: blocked`，notes 说清卡点；"
-              "若结论是**标准本身有错**，notes 首行必须是 "
-              "`criteria-defect:` 并附判据定义 vs 实测对照。")
+              "- blocked 时：`status: blocked`，notes 说清卡点，且首行"
+              "按结论打标记：**标准本身有错** → `criteria-defect:` 并附"
+              "判据定义 vs 实测对照（人工裁决标准修订）；**平台缺口**"
+              "（断点在目标 OS 侧、且在可改范围 driver_home ∪ paths 之外）"
+              " → `platform-gap:` 并附缺口位置与建议（人工裁决处置）。")
 
 
 def _write_run_report(ws: Path, exp_dir: Path, ledger: dict) -> None:
@@ -557,30 +562,58 @@ def _write_run_report(ws: Path, exp_dir: Path, ledger: dict) -> None:
                                            encoding="utf-8")
 
 
-def _write_panic(exp_dir: Path, ledger: dict, notes: str) -> None:
-    """criteria-defect 升级报告（人工介入入口）。"""
+def _write_panic(exp_dir: Path, ledger: dict, notes: str,
+                 kind: str = "standard") -> None:
+    """agent 上报争议升级报告（人工介入入口）。kind ∈ standard|platform。
+
+    - standard（criteria-defect）：agent 裁定验收标准本身有错；
+    - platform（platform-gap）：agent 裁定断点在目标 OS 侧、且在可改
+      范围（driver_home ∪ paths）之外——平台缺口，同样须人工裁决。
+    """
     ex = ledger.get("execute") or {}
     secs = ex.get("sections") or {}
-    lines = ["# accept 执行相位 PANIC —— 标准争议，人工介入", "",
-             "> agent 裁定验收标准本身有错（criteria-defect）。标准在"
-             "执行期只读（指纹冻结），此争议只能人工裁决。", "",
-             "## 阶梯实况（各节最新 invoke 记录）", ""]
+    title = {"standard": "标准争议，人工介入",
+             "platform": "平台缺口，人工介入"}.get(kind, "争议，人工介入")
+    lines = [f"# accept 执行相位 PANIC —— {title}", ""]
+    if kind == "standard":
+        lines += ["> agent 裁定验收标准本身有错（criteria-defect）。标准在"
+                  "执行期只读（指纹冻结），此争议只能人工裁决。", ""]
+    else:
+        lines += ["> agent 裁定断点在目标 OS 侧且在其可改范围"
+                  "（driver_home ∪ 各节 paths）之外（platform-gap）。"
+                  "缺口无法在修环内合法闭合，只能人工裁决。", ""]
+    lines += ["## 阶梯实况（各节最新 invoke 记录）", ""]
     for n in _exec.ALL_SECTIONS:
         r = secs.get(str(n)) or {}
         if r:
             lines.append(f"- §{n}: {r.get('status')} exit={r.get('rc')}"
                          f" 输出={r.get('output')}")
-    lines += ["", "## agent 论证（criteria-defect）", "", "```",
-              notes.strip() or "（空）", "```", "",
-              "## 人工选项", "",
-              "1. **认同**：修订标准——`porter accept --tier "
-              "<t1|inject|e2e>` 重做涉事节（reject 意见可写进关口），"
-              "关口重审放行后重新 `--execute`；",
-              "2. **否决**：`porter accept --execute --session "
-              f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
-              "按归因继续修复（最新阶梯实况会随 prompt 重注入）。"]
+    lines += ["", "## agent 论证（" +
+              ("criteria-defect" if kind == "standard" else "platform-gap")
+              + "）", "", "```",
+              notes.strip() or "（空）", "```", ""]
+    if kind == "standard":
+        lines += ["## 人工选项", "",
+                  "1. **认同**：修订标准——`porter accept --tier "
+                  "<inject|e2e>` 重做涉事节（reject 意见可写进关口），"
+                  "关口重审放行后重新 `--execute`；",
+                  "2. **否决**：`porter accept --execute --session "
+                  f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
+                  "按归因继续修复（最新阶梯实况会随 prompt 重注入）。"]
+    else:
+        lines += ["## 人工选项", "",
+                  "1. **认同缺口**，人工处置（三选）：",
+                  "   - 平台侧另行修复（driver_home 之外的目标树改动），"
+                  "完成后重新 `--execute`；",
+                  "   - 调整验收标准（`--tier` 重做涉事节 + 关口重审，或"
+                  "手工修订节文件对后重新登记索引）；",
+                  "   - 扩大允许改动范围（修订涉事节 JSON 顶层 paths 后"
+                  "重走人审）。",
+                  "2. **否决**：`porter accept --execute --session "
+                  f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
+                  "按归因继续修复（最新阶梯实况会随 prompt 重注入）。"]
     (exp_dir / "execute-panic.md").write_text("\n".join(lines) + "\n",
-                                              encoding="utf-8")
+                                               encoding="utf-8")
 
 
 def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
@@ -663,16 +696,28 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
         return 1
     if parsed.get("status") == "blocked":
         notes = str(parsed.get("notes", ""))
-        if notes.strip().lower().startswith("criteria-defect"):
-            ex.update(status="panic", panic_notes=notes[:4000],
-                      time=_now())
+        flat = notes.strip().lower()
+        if flat.startswith("criteria-defect"):
+            ex.update(status="panic", panic_kind="standard",
+                      panic_notes=notes[:4000], time=_now())
             _save_ledger(exp_dir, ledger)
-            _write_panic(exp_dir, ledger, notes)
+            _write_panic(exp_dir, ledger, notes, kind="standard")
             _write_run_report(ws, exp_dir, ledger)
-            _log.console_line("[porter] accept: 执行相位 PANIC——agent "
+            _log.console_line(f"[porter] accept: 执行相位 PANIC——agent "
                               "裁定标准有错（criteria-defect），升级报告 "
                               f"{exp_dir / 'execute-panic.md'}——人工"
                               "介入 rc 1")
+            return 1
+        if flat.startswith("platform-gap"):
+            ex.update(status="panic", panic_kind="platform",
+                      panic_notes=notes[:4000], time=_now())
+            _save_ledger(exp_dir, ledger)
+            _write_panic(exp_dir, ledger, notes, kind="platform")
+            _write_run_report(ws, exp_dir, ledger)
+            _log.console_line(f"[porter] accept: 执行相位 PANIC——agent "
+                              "裁定平台缺口（platform-gap，可改范围之外），"
+                              f"升级报告 {exp_dir / 'execute-panic.md'}——"
+                              "人工介入 rc 1")
             return 1
         ex.update(status="parked", blocked_notes=notes[:2000], time=_now())
         _save_ledger(exp_dir, ledger)
