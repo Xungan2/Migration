@@ -10,8 +10,8 @@
   PORTER_EVIDENCE_DIR（脚本自产工件归档目录）；PYTHONPATH 含工具根。
 - 工具零格式假设：不解析 JSON 语义、不硬编码节格式——只发现、调用、
   归档。格式纪律写在 skill；诚实性由人审把关。
-- 节归属（三 tier）：t1 = §1-§4（自 mono 执行事实提取；机制未实现，
-  骨架在位——见 accept._T1_READY）；inject = §5/§6（agent 探索制定）；
+- 节归属（三 tier）：t1 = §1-§4（自 mono 执行事实提取，目标树零变更）；
+  inject = §5/§6（agent 探索制定）；
   e2e = §7（agent 设计）。frozen 机器（§2/§3 自 runner.json 机械生成）
   已随归属修正退场（§1-§4 单一属主 = Tier1）；最小格式样例内嵌于
   EXP-accept-inject skill。

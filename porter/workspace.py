@@ -54,6 +54,19 @@ def append_runner(ws: Path, phase: str, rc: int, command: list[str], details: st
             out.write(details.rstrip() + '\n')
 
 
+def append_runbook(ws: Path, phase: str, rc: int, command: list[str],
+                   details: str = '') -> None:
+    """Record a Porter orchestration command separately from runner facts."""
+    path = Path(ws) / 'runbook.md'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    with path.open('a', encoding='utf-8') as out:
+        out.write(f'\n## {phase} — {stamp}\n\n- 退出码：`{rc}`\n\n'
+                  f'```bash\n$ {shlex.join(command)}\n```\n\n')
+        if details:
+            out.write(details.rstrip() + '\n')
+
+
 def write_json(path: Path, value: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=path.parent,

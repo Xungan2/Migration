@@ -6,17 +6,14 @@ Tier 2 收缩为 §5/§6，frozen 机器退场）：
   Tier 1（t1）    → §1 模块级编译 / §2 单测 / §3 镜像级编译 /
                     §4 启动-驱动自启动——自 mono 执行事实提取
                     （源序：runner.md > exp-mono/logs；runner.json 已
-                    从 accept 脱钩、退役方向定案），禁改码（树零变更）。
-                    **机制未定，当前留空跳过**
-                    （骨架在位：_run_tier/关口/CLI 均已接线，
-                    _T1_READY 置 True + 实现 _t1_prompt 即启用）
+                    从 accept 脱钩），由 agent 从 mono 事实提取，禁改码
+                    （目标树零变更，仅写验收节文件）。
                     → ★关口① exp-accept.t1
   Tier 2（inject）→ §5 启动-设备注入 / §6 启动-驱动设备简单交互
                     两对节文件（acceptance/N-slug.json + .check.py）
                     → ★关口② exp-accept.inject
   Tier 3（e2e）  → §7 端到端 一对节文件 → ★关口③ exp-accept.plan
-  双关口放行 → ledger 登记七节索引（未绑定节记 missing——Tier1 落地前
-  bound 3/7，--execute 被前置检查 rc 2 挡住并提示先完成 Tier1）
+  三关口放行 → ledger 登记七节索引；--execute 需七节全部绑定
 
 设计要点（2026-09-12 定案，格式自由化）：
 - 每节交付物 = JSON 标准（须含按序命令 + 成功判定标准，其余自由）+
@@ -46,9 +43,10 @@ from ..common import vcs as _vcs
 from ..exp import accept_exec as _exec
 from ..exp import mono as _mono
 from ..exp import accept_gate as _gate
+from ..handoff import latest_success, publish_handoff, require_success
 from .. import log as _log
 
-SKILL_T1 = "EXP-accept-t1"     # Tier1 skill——机制定案时创建
+SKILL_T1 = "EXP-accept-t1"     # Tier1 mono-fact extraction skill
 SKILL_INJECT = "EXP-accept-inject"
 SKILL_E2E = "EXP-accept-e2e"
 SKILL_EXECUTE = "EXP-accept-execute"
@@ -61,10 +59,8 @@ E2E_BUDGET_SEC = 3600
 EXEC_BUDGET_SEC = 3600        # 执行相位 agent 段总预算缺省
 VERIFY_RETRIES = 2            # 结构校验不过的同 session 回灌上限
 
-# Tier1（§1-§4 提取）机制未实现：三源并集输入 + 禁改码守卫变体 +
-# EXP-accept-t1 skill 待定案。骨架（SECTION_TIER/_run_tier/关口/CLI）
-# 已接线，落地时置 True 并实现 _t1_prompt。
-_T1_READY = False
+# Tier1（§1-§4 提取）由 agent 消费 mono 的执行事实，且禁止修改目标树。
+_T1_READY = True
 
 _TIER_TITLES = {"t1": "§1/§2/§3/§4（模块编译/单测/镜像编译/自启动）",
                 "inject": "§5/§6（设备注入/简单交互）",
@@ -93,7 +89,7 @@ def _scope_offenders(target_os: Path, baseline: set[str],
 
 def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
                  nums: tuple[int, ...], baseline: set[str],
-                 prefix: str) -> dict:
+                 prefix: str, *, allow_target_changes: bool = True) -> dict:
     """探索期静态段：结构校验 + 范围守卫 + 逐节真实 invoke + 归档指针。"""
 
     def _fn() -> tuple[bool, str]:
@@ -101,16 +97,24 @@ def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
         if probs:
             return False, ("节文件对结构问题：\n- " + "\n- ".join(probs)
                            + "\n——先补齐/修好文件再请求执行")
-        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
-                                     _exec.touched_paths(ws, nums))
+        offenders = (sorted(_mono._git_status(target_os) - baseline)
+                     if not allow_target_changes else
+                     _scope_offenders(target_os, baseline, driver_home_rel,
+                                      _exec.touched_paths(ws, nums)))
         if offenders:
-            return False, ("改动越出白名单（driver_home ∪ 各节 JSON "
-                           "顶层 paths 并集）："
+            scope = ("Tier1 禁止修改目标树" if not allow_target_changes else
+                     "改动越出白名单（driver_home ∪ 各节 JSON 顶层 paths 并集）")
+            return False, (scope + "："
                            + "、".join(offenders)
-                           + "——收回越界改动（git checkout -- <路径>）"
-                           "或在对应节 JSON 的 paths 里声明后重试")
+                           + "——收回改动（git checkout -- <路径>）后重试")
         records, _p = _exec.invoke_sections(ws, target_os, driver_home_rel,
                                             nums, prefix)
+        if not allow_target_changes:
+            post_offenders = sorted(_mono._git_status(target_os) - baseline)
+            if post_offenders:
+                return False, ("Tier1 执行节脚本改动了目标树："
+                               + "、".join(post_offenders)
+                               + "——检查脚本必须保持只读")
         lines = [f"外部执行完成：{len(records)} 节（输出已归档，"
                  "自行 tail/grep 以下文件）"]
         for n in sorted(records):
@@ -175,14 +179,30 @@ def _mono_knowledge_face(ws: Path) -> str:
     return "\n".join(rows) + "\n" if rows else ""
 
 
+def _mono_handoff_face(ws: Path) -> str:
+    """Point accept agents at the exact successful mono boundary and record."""
+    item = latest_success(ws, "mono")
+    if not item:
+        return ""
+    return (f"- mono 成功 handoff（本阶段事实边界，**先读**）："
+            f"`{item.get('handoff')}`\n"
+            f"- mono execution record：`{item.get('record')}`\n")
+
+
 def _t1_prompt(ws: Path, proj: dict,
                manifest: dict, extra: str) -> str:
-    """Tier1（§1-§4）提取机制——未定，留空（2026-09-12 用户裁定）。
-
-    设计讨论见 AGENTS_2.md（上 session 草案仅备忘、非承诺）。启用 =
-    实现 prompt + skill 后置 _T1_READY=True。
-    """
-    raise NotImplementedError("Tier1（§1-§4）机制未定——留空")
+    skill = agent.load_skill(SKILL_T1)
+    acc = _exec.acceptance_dir(ws)
+    return (f"{skill}\n\n---\n\n## 背景数据（mono 终态，只读事实）\n"
+            f"- 目标 OS 源码树：`{proj.get('target_os')}`\n"
+            f"- driver_home：`{manifest.get('driver_home')}`\n"
+            f"- mono ledger：`{ws / 'exp-mono' / 'ledger.json'}`\n"
+            f"- mono runner：`{ws / 'runner.md'}`\n"
+            f"- mono logs：`{ws / 'exp-mono' / 'logs'}`\n"
+            f"- 输出目录：`{acc}`\n" + _mono_knowledge_face(ws) + (extra or "") +
+            _mono_handoff_face(ws) +
+            "\n先读取上述文件，从已执行且 pass 的事实提取 §1-§4；禁止修改目标树。"
+            "每节写 JSON + .check.py 成对文件，并最终输出 done JSON。")
 
 
 def _inject_prompt(ws: Path, proj: dict,
@@ -200,10 +220,11 @@ def _inject_prompt(ws: Path, proj: dict,
             + _boot_face(ws)
             + _kb_face(ws)
             + _mono_knowledge_face(ws)
+            + _mono_handoff_face(ws)
             + (extra or "")
             + f"\n## 输出契约\n- 交付物：`{acc}` 下两对文件——"
               "`5-<slug>.json`、`6-<slug>.json` 及各自的 `.check.py`"
-              "（§1-§4 归 Tier1 提取，不在你的任务内）。每对的 JSON 须含"
+              "（§1-§4 由 Tier1 提取，不在你的任务内）。每对的 JSON 须含"
               "按序命令+成功标准，契约见 SKILL。\n"
               "- done JSON：`status` / `deliverable`（= acceptance 目录"
               "绝对路径）/ `notes`。")
@@ -225,6 +246,7 @@ def _e2e_prompt(ws: Path, proj: dict,
             + _boot_face(ws)
             + _kb_face(ws)
             + _mono_knowledge_face(ws)
+            + _mono_handoff_face(ws)
             + (extra or "")
             + f"\n## 输出契约\n- 交付物：`{acc}` 下 `7-<slug>.json` + "
               "`7-<slug>.check.py` 一对。JSON 须含按序命令+成功标准，"
@@ -277,7 +299,7 @@ _PREFIX_OF = {"t1": "T1", "inject": "T2", "e2e": "T3"}
 
 def _prompt_fn(tier: str):
     if tier == "t1":
-        return _t1_prompt       # 机制未定：NotImplementedError（_T1_READY 守卫）
+        return _t1_prompt
     return _inject_prompt if tier == "inject" else _e2e_prompt
 
 
@@ -298,7 +320,8 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict,
     prompt_fn = _prompt_fn(tier)
     baseline = _mono._git_status(target_os)
     static = _make_static(ws, target_os, driver_home_rel, nums,
-                          baseline, prefix)
+                          baseline, prefix,
+                          allow_target_changes=tier != "t1")
     prompt = prompt_fn(ws, proj, manifest, extra)
     session_id = session
     attempts = 0
@@ -382,14 +405,16 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict,
         changed = sorted(_mono._git_status(target_os) - baseline)
         offenders = _scope_offenders(target_os, baseline, driver_home_rel,
                                      touched)
-        allowed_changed = [p for p in changed
-                           if p == driver_home_rel
-                           or p.startswith(driver_home_rel.rstrip("/") + "/")
-                           or p in touched]
-        commits = _vcs.commit_target(
-            ws, f"accept({tier}): verified — "
-            f"{len(records)} sections green",
-            paths=allowed_changed or None, phase="accept") or []
+        allowed_changed = ([] if tier == "t1" else
+                           [p for p in changed
+                            if p == driver_home_rel
+                            or p.startswith(driver_home_rel.rstrip("/") + "/")
+                            or p in touched])
+        commits = ([] if tier == "t1" else
+                   _vcs.commit_target(
+                       ws, f"accept({tier}): verified — "
+                       f"{len(records)} sections green",
+                       paths=allowed_changed or None, phase="accept") or [])
         entry["commits"] = commits
         entry["offenders"] = offenders
     except Exception as ex:                     # commit 失败不阻断关口
@@ -521,6 +546,7 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
             f"负结论 `{ws / 'exp-mono' / 'negatives.md'}`\n"
             f"- 迁移意图：`{ws / 'goals.md'}`\n"
             + _mono_knowledge_face(ws)
+            + _mono_handoff_face(ws)
             + f"- 修复知识记录：修完在 `{ws / 'exp-accept' / 'fixes.md'}` "
               "追加一节（归因/改了什么/为何预期转绿/死路教训，见 SKILL"
               " 纪律；供后续沉淀 knowledgebase）\n"
@@ -560,6 +586,25 @@ def _write_run_report(ws: Path, exp_dir: Path, ledger: dict) -> None:
         lines += [f"- {p}" for p in ex["problems"][:8]]
     (exp_dir / "run-report.md").write_text("\n".join(lines) + "\n",
                                            encoding="utf-8")
+
+
+def _publish_execute_handoff(ws: Path, exp_dir: Path) -> bool:
+    """Publish the optional execution boundary after a verified 7/7 run."""
+    if latest_success(ws, "accept") is None:
+        return True
+    try:
+        publish_handoff(
+            ws, "accept.execute",
+            summary="Acceptance execution verified all seven sections.",
+            artifacts=[exp_dir / "run-report.md"],
+            verification=["execution status=pass", "seven-section ladder green"],
+            dependencies=("accept",),
+            materials=(ws / "exp-mono" / "ledger.json", ws / "runner.md"),
+        )
+    except (OSError, ValueError) as exc:
+        _log.console_line(f"[porter] accept: execute handoff failed: {exc}——rc 1")
+        return False
+    return True
 
 
 def _write_panic(exp_dir: Path, ledger: dict, notes: str,
@@ -640,7 +685,7 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
     if fprobs:
         unbound = {s.get("section") for s in idx["sections"]
                    if s.get("status") != "bound"}
-        t1hint = ("\n（§1-§4 未绑定属 Tier1——机制未实现，--execute 暂不可用）"
+        t1hint = ("\n（§1-§4 未绑定属 Tier1——先运行 Tier1 agent）"
                   if unbound & {1, 2, 3, 4} else "")
         _log.console_line("[porter] accept: 标准未齐备/指纹漂移——执行前"
                           "标准须七节齐备且未被改动：\n- "
@@ -660,6 +705,8 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
                   session_id=None, agent_sec=0)
         _save_ledger(exp_dir, ledger)
         _write_run_report(ws, exp_dir, ledger)
+        if not _publish_execute_handoff(ws, exp_dir):
+            return 1
         _log.console_line("[porter] accept: 基线阶梯全绿（7/7）——验收"
                           "复验通过，零 agent——rc 0")
         return 0
@@ -757,6 +804,8 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
     ex.update(status="pass", time=_now())
     _save_ledger(exp_dir, ledger)
     _write_run_report(ws, exp_dir, ledger)
+    if not _publish_execute_handoff(ws, exp_dir):
+        return 1
     _log.console_line("[porter] accept: 执行相位 PASS——阶梯 7/7 全绿，"
                       f"报告 {exp_dir / 'run-report.md'}——rc 0")
     return 0
@@ -800,6 +849,22 @@ def run_accept(ws: Path, tier: str | None = None,
                session: str | None = None,
                execute: bool = False) -> int:
     ws = Path(ws).resolve()
+    mono_handoff = latest_success(ws, "mono")
+    mono_task_dir = ws / "handoffs" / "tasks" / "mono"
+    # Real mono runs always leave report.md (and the task directory).  Keep
+    # the tiny historical fixtures usable when neither exists; they predate
+    # the phase handoff and are covered by the legacy compatibility tests.
+    legacy_workspace = not (ws / "exp-mono" / "report.md").exists()
+    if (mono_handoff is not None or mono_task_dir.exists()
+            or not legacy_workspace):
+        try:
+            require_success(ws, "mono")
+        except ValueError as exc:
+            _log.console_line(f"[porter] accept: mono handoff 无效：{exc}——rc 2")
+            return 2
+    # Historical workspaces without mono/report are kept usable; every current
+    # mono run creates report.md and therefore takes the strict path above.
+    mono_ready = mono_handoff is not None
     needs = ["project.json", "exp-mono/ledger.json"]
     missing = [n for n in needs if not (ws / n).exists()]
     # driver_home 单源 = module-divsion.json（pre-mono 产物）。accept 前置
@@ -839,14 +904,16 @@ def run_accept(ws: Path, tier: str | None = None,
                             int(budget or EXEC_BUDGET_SEC), session)
 
 
-    # ---- Tier 1（§1-§4：自 mono 执行事实提取；骨架在位、机制未实现）----
-    if not _T1_READY:
+    # ---- Tier 1（§1-§4：自 mono 执行事实提取）----
+    if not _T1_READY or not mono_ready:
         if tier == "t1":
-            _log.console_line("[porter] accept: Tier1（§1-§4 提取）机制"
-                              "未实现——骨架已接线，定案后置 _T1_READY 并"
-                              "实现 _t1_prompt——rc 2")
+            reason = ("Tier1 未启用" if not _T1_READY else
+                      "缺少 mono 成功 handoff")
+            _log.console_line(f"[porter] accept: {reason}——rc 2")
             return 2
-        _log.console_line("[porter] accept: Tier1 未实现——§1-§4 留空跳过"
+        reason = ("Tier1 未启用" if not _T1_READY else
+                  "缺少 mono 成功 handoff")
+        _log.console_line(f"[porter] accept: {reason}——§1-§4 留空跳过"
                           "（索引将记 missing；--execute 需七节齐备）")
     elif tier == "t1" or (not tier and _tier_rerun_needed(ws, ledger, "t1")):
         note = ""
@@ -919,16 +986,30 @@ def run_accept(ws: Path, tier: str | None = None,
                           "`verdict: approve`）rc 3")
         return 3
 
-    # ---- 双批 → 七节索引 ----
+    # ---- 三 tier → 七节索引 ----
     idx = _register_index(ws, exp_dir, ledger)
     bound = [s["section"] for s in idx["sections"]
              if s.get("status") == "bound"]
     missing = [s["section"] for s in idx["sections"]
                if s.get("status") != "bound"]
     extra = (f"；缺节 §{','.join(map(str, missing))}"
-             "——待 Tier1（机制未实现）" if missing else "")
+             "——待 Tier1 agent" if missing else "")
     _log.console_line(f"[porter] accept: 验收标准就绪——七节索引已登记"
                       f"（bound {len(bound)}/7{extra}，见 "
                       "exp-accept/ledger.json）；缺节期间 --execute 不可用"
                       "——rc 0")
+    if not missing and mono_ready:
+        try:
+            publish_handoff(
+                ws, "accept",
+                summary="Acceptance standards for all seven sections are ready.",
+                artifacts=[exp_dir / "acceptance"],
+                verification=["seven acceptance section pairs bound",
+                              "human gates approved"],
+                dependencies=("mono",),
+                materials=(ws / "exp-mono" / "ledger.json", ws / "runner.md"),
+            )
+        except (OSError, ValueError) as exc:
+            _log.console_line(f"[porter] accept: accept handoff failed: {exc}——rc 1")
+            return 1
     return 0

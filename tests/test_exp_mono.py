@@ -29,7 +29,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from porter.exp import mono as mono_mod
-from porter.handoff import publish_handoff
+from porter.handoff import latest_success, publish_handoff
 
 FX_MODELS = ("fx/reasoning-model", "fx/coding-model")
 
@@ -362,6 +362,18 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertIn("全量单测：PASS", report)
         self.assertIn("函数覆盖台账", report)
         self.assertIn("词典+1", report)        # 研究列的收割统计
+        self.assertIsNotNone(latest_success(self.fx["ws"], "mono"))
+        runner = (self.fx["ws"] / "runner.md").read_text(encoding="utf-8")
+        self.assertIn("exp-mono fx-a build", runner)
+        self.assertIn("exp-mono exp_fx-a_ut", runner)
+
+    def test_targeted_run_does_not_publish_terminal_handoff(self):
+        def work(module):
+            _write_module_product(self.fx["home"], module.replace("-", "_"))
+
+        r = _run_with_fakes(self, self.fx, work, module="fx-a")
+        self.assertEqual(r["rc"], 0)
+        self.assertIsNone(latest_success(self.fx["ws"], "mono"))
 
     def test_models_wiring(self):
         def work(module):
@@ -796,8 +808,8 @@ class TestExpMonoLoop(unittest.TestCase):
 class TestExpMonoUnits(unittest.TestCase):
 
     def test_budget_clamp(self):
-        self.assertEqual(mono_mod._budget_sec(100), 900)
-        self.assertEqual(mono_mod._budget_sec(653), 900)
+        self.assertEqual(mono_mod._budget_sec(100), 1200)
+        self.assertEqual(mono_mod._budget_sec(653), 1200)
         self.assertEqual(mono_mod._budget_sec(2064), 2683)
         self.assertEqual(mono_mod._budget_sec(9000), 4200)
 

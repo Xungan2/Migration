@@ -1,10 +1,10 @@
 """test_accept.py — accept 子命令的功能性测试（全 mock agent，真实 invoke）。
 
-覆盖（节文件+消费脚本对形态：Tier2 §5/§6 + Tier3 §7 + t1 骨架留空 +
-双关口 + 七节索引）：
-  1. 全链：t1 跳过（未实现）→ Tier2 → 关口② → 放行 → Tier3 → 关口③
-     → 放行 → 七节索引（bound 3/7；§1-§4 missing）
-  2. t1 骨架：--tier t1 rc 2；§1-§4 不被生成；缺节时 --execute rc 2
+覆盖（节文件+消费脚本对形态：Tier1 §1-§4 + Tier2 §5/§6 + Tier3 §7 +
+三关口 + 七节索引）：
+  1. 历史 fixture 无 mono handoff 时保留兼容路径；真实 mono 工作区由
+     handoff 前置保护 Tier1
+  2. t1 目标树零变更守卫；缺节时 --execute rc 2
   3. 结构校验回炉：坏节 JSON → 同 session 续修 → 连坏 → invalid 停车
   4. invoke 判定未过（check.py exit 1）→ unverified rc 1
   5. blocked 停车；PORTER_NO_AGENT rc 2；前置缺失 rc 2；exp-mono 未全

@@ -33,11 +33,10 @@ def main(argv=None) -> int:
     mono.add_argument('--budget', type=int)
     mono.add_argument('--budget-research', type=int)
     mono.add_argument('--budget-translate', type=int)
-    accept = commands.add_parser('accept', help='draft the migration acceptance standard (agent s5-s7 as JSON+check.py pairs, human gates, seven-section index; s1-s4 reserved for tier1 extraction, mechanism TBD); --execute runs the fix loop against the frozen ladder')
+    accept = commands.add_parser('accept', help='draft the migration acceptance standard (agent s1-s7 as JSON+check.py pairs, human gates, seven-section index); --execute runs the fix loop against the frozen ladder')
     accept.add_argument('--output-dir', required=True)
     accept.add_argument('--tier', choices=['t1', 'inject', 'e2e'],
-                        help='force re-run one tier (default: auto-route; '
-                             't1 skeleton wired but mechanism TBD -> rc 2)')
+                        help='force re-run one tier (default: auto-route)')
     accept.add_argument('--execute', action='store_true',
                         help='execute phase: agent fix loop against the '
                              'frozen acceptance ladder (s1..s7 in order, '
@@ -71,7 +70,7 @@ def main(argv=None) -> int:
                     ws, 'accept', rc, sys.argv,
                     '- 产物：`exp-accept/acceptance/` 下七节文件对'
                     '（N-slug.json + N-slug.check.py；§5-§7 agent 设计，'
-                    '§1-§4 归 Tier1 提取——机制未实现，留空记 missing）'
+                    '§1-§4 由 Tier1 agent 从 mono 事实提取）'
                     '+ 关口放行后 ledger 七节索引；'
                     '--execute 时另有 `exp-accept/run-report.md`（终态'
                     '报告）/ `execute-panic.md`（标准争议人工介入）')

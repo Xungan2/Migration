@@ -118,8 +118,8 @@ JSON 至少记录模块的 source_files、target、depends_on、verification、s
             build,
             success=lambda value: bool(value["division"].get("order")),
             summary=lambda value: f"pre-mono produced {len(value['division']['order'])} modules.",
-            # Plan paths are mutable and may be relocated; state.json is the
-            # location index, so neither is an immutable handoff artifact.
+            # Plans are mutable workspace inputs; runner.md is append-only and
+            # require_success validates its presence while allowing growth.
             artifacts=lambda _value: [ws / "runner.md"],
             verification=lambda value: ["four module division and migration plan artifacts are present and parseable",
                                         f"module order: {value['division'].get('order', [])}"],

@@ -21,7 +21,7 @@
   4. gate 全绿 + 记账完备 → ledger=pass + 目标树按白名单 commit；
      blocked / 失败 / 预算耗尽 → 停车 rc 1（ledger 断点续）
 
-预算（秒）：研究 = clamp(600, 行数×1.5, 2400)；翻译 = clamp(900,
+预算（秒）：研究 = clamp(600, 行数×1.5, 2400)；翻译 = clamp(1200,
 行数×1.3, 4200)（CLI 可覆盖）。终局（order 全 pass）：全量单测（阻断）
 + 启动冒烟（非阻断留档）+ report.md。
 """
@@ -41,6 +41,7 @@ from ..common import agent
 from ..common import scope as _scope
 from ..env import probe as probe_mod
 from .. import log as _log
+from ..workspace import append_runner
 from ..artifacts import locate
 from ..handoff import latest_success, publish_handoff, require_success
 
@@ -92,7 +93,7 @@ def _upstream_handoffs(ws: Path, modules: list[str]) -> str:
 
 def _budget_sec(loc: int) -> int:
     """翻译任务预算（静态段时长在预算之外）。"""
-    return max(900, min(4200, int(loc * 1.3)))
+    return max(1200, min(4200, int(loc * 1.3)))
 
 
 def _budget_research(loc: int) -> int:
@@ -675,6 +676,9 @@ def _run_ut(exp_dir: Path, target_os: Path, runner: dict,
     rc, out = _shell_ut(cmd, cwd=target_os, env=env,
                         timeout_sec=int(ut.get("timeout_sec") or 3600),
                         log_path=log_path)
+    # Feed accept's boot face with the exact mono gate invocation.
+    append_runner(exp_dir.parent, f"exp-mono {label}", rc,
+                  ["bash", "-c", cmd], details=f"日志：`{log_path}`")
     succ, fail = ut.get("success_pattern") or "", ut.get("fail_pattern") or ""
     ok = rc == 0
     detail = f"[{src}] rc={rc}"
@@ -687,6 +691,18 @@ def _run_ut(exp_dir: Path, target_os: Path, runner: dict,
         ok = ok and not bad
         detail += f" fail_pattern={'hit' if bad else 'no-hit'}"
     return ok, f"{detail}（全文：{log_path}）", log_path
+
+
+def _record_runner_probe(exp_dir: Path, label: str, spec: dict,
+                         result: dict, log_name: str) -> None:
+    """Expose mono's build/boot probe command to the downstream accept agent."""
+    cmd = spec.get("cmd") if isinstance(spec, dict) else None
+    if not cmd:
+        return
+    append_runner(exp_dir.parent, f"exp-mono {label}",
+                  0 if result.get("ok") else 1,
+                  ["bash", "-c", str(cmd)],
+                  details=f"日志：`{exp_dir / 'logs' / log_name}`")
 
 
 def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
@@ -702,6 +718,9 @@ def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
             return False, "\n".join(problems)
         b = probe_mod.probe_build(exp_dir, target_os, runner,
                                   label=f"exp_{module}_build")
+        _record_runner_probe(exp_dir, f"{module} build",
+                             runner.get("build") or {}, b,
+                             f"exp_{module}_build.log")
         if not b["ok"]:
             build_log = exp_dir / "logs" / f"exp_{module}_build.log"
             return False, (f"② 构建 FAIL：{b.get('detail', '')}"
@@ -710,6 +729,9 @@ def _make_gate(exp_dir: Path, target_os: Path, runner: dict, manifest: dict,
         # commit），全树构建后启动自检。比单测便宜，先行短路。
         boot = probe_mod.probe_boot(exp_dir, target_os, runner,
                                     label=f"exp_{module}_boot")
+        _record_runner_probe(exp_dir, f"{module} boot",
+                             runner.get("boot") or {}, boot,
+                             f"T3_exp_{module}_boot.log")
         if not boot.get("ok"):
             boot_log = exp_dir / "logs" / f"T3_exp_{module}_boot.log"
             return False, (f"③ 启动 FAIL：{boot.get('detail', '')}"
@@ -1379,6 +1401,8 @@ def _terminal(ws: Path, exp_dir: Path, runner: dict, proj: dict,
     try:
         boot = probe_mod.probe_boot(exp_dir, target_os, runner,
                                     label="final_boot")
+        _record_runner_probe(exp_dir, "final boot", runner.get("boot") or {},
+                             boot, "T3_final_boot.log")
     except Exception as ex:
         boot = {"ok": False, "detail": f"boot 冒烟异常：{ex!r}"}
     boot_ok = bool(boot.get("ok"))
@@ -1583,6 +1607,29 @@ def _run_exp_mono(ws: Path, module: str | None = None,
     done = sum(1 for m in order
                if (ledger["modules"].get(m) or {}).get("status") == "pass")
     _log.console_line(f"[porter] exp-mono: 结束（{done}/{len(order)} pass）")
+    if research_only:
+        return 0
+    if terminal is None:
+        # A targeted/module or research run may leave later modules pending;
+        # only the full terminal run can publish the mono→accept boundary.
+        return 0
     if terminal and (not terminal["ut_ok"] or not terminal.get("boot_ok")):
+        return 1
+    # Publish the phase boundary only after every module and terminal checks pass.
+    try:
+        publish_handoff(
+            ws, "mono",
+            summary="All mono modules and terminal verification passed.",
+            artifacts=[exp_dir / "ledger.json", exp_dir / "report.md",
+                       exp_dir / "contracts.md", exp_dir / "mapping-notes.md",
+                       ws / "runner.md"],
+            verification=["all module ledger statuses=pass",
+                          "terminal unit test and boot checks passed"],
+            dependencies=("pre-mono",),
+            materials=(input_paths["module-division.json"],
+                       input_paths["migration-plan.json"], ws / "runner.md"),
+        )
+    except (OSError, ValueError) as exc:
+        _log.console_line(f"[porter] exp-mono: mono handoff failed: {exc}——rc 1")
         return 1
     return 0

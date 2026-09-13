@@ -111,7 +111,7 @@ python3 porter/main.py mono --output-dir <ws> [--module M]
 - **翻译任务**：prompt 注入交付物**全文**+契约登记表+泊车（不注入
   词典——交付物已含本模块裁定）；skill 授予**兜底研究权**（有界
   grep）并要求**矛盾上报**（交付物与目标树事实不符时不得静默改判）。
-  预算 `clamp(900, LOC×1.3, 4200)`。
+  预算 `clamp(1200, LOC×1.3, 4200)`。
 - **四段复合 gate**（便宜先行失败短路，反馈回灌同 session）：① 产物
   守卫：driver_home 非注释代码增量 ≥ `max(8, LOC//20)` + 构建单元
   登记核对 + git 改动白名单；② 构建：`runner.build` 原样；③ 驱动
@@ -136,6 +136,12 @@ python3 porter/main.py mono --output-dir <ws> [--module M]
   交付物）, mapping-notes.md（词典，机器收割）, contracts.md（契约
   登记表）, parking.md, logs/, report.md, migration-plan.md, change.md}`
   与 `knowledgebase/`。
+
+全部模块及终局检查通过后，mono 发布 `handoffs/tasks/mono/` 成功交接。
+随后运行 `python3 porter/main.py accept --output-dir <ws>`；accept 只消费
+该成功交接，Tier1 agent 从 mono 的 runner/logs 提取 §1–§4，再由 inject/e2e
+agent 完成 §5–§7。七节标准放行后发布 `accept` handoff，`--execute` 全绿后
+发布 `accept.execute` handoff。
 
 ## 知识沉淀
 

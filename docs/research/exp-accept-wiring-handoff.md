@@ -10,16 +10,15 @@
 
 | 批 | 内容 | 测试 |
 |---|---|---|
-| ① | 节归属修正：`SECTION_TIER={"t1":(1,2,3,4),"inject":(5,6),"e2e":(7,)}`；Tier2 只管 §5/§6；Tier1 骨架接线（关口①`exp-accept.t1`/CLI/`_run_tier` 泛化）；frozen 机器退场 | 全绿 |
+| ① | 节归属修正：`SECTION_TIER={"t1":(1,2,3,4),"inject":(5,6),"e2e":(7,)}`；Tier2 只管 §5/§6；Tier1 agent 接线（关口①`exp-accept.t1`/CLI/`_run_tier` 泛化）；frozen 机器退场 | 全绿 |
 | ② | 知识注入面全指针化（`_kb_face`/`_boot_face`）；runner.json 从 accept 全链脱钩 | 全绿 |
 | ③④ | driver_home 单源 = `module-divsion.json`（旧源裁定不兼容留） | 全绿 |
 | ⑤ | G4 接入：`_mono_knowledge_face`（契约登记表+词典指针） | 全绿 |
 
-终态基线：`tests.test_accept` 23/23、全量 **174/174**。核心裁定三条：
+接线前基线：`tests.test_accept` 23/23、全量 **174/174**。核心裁定三条：
 prompt 知识注入**一律指针**（禁无依据 head-N）；runner.json **退役方向**
-（accept 零引用）；`_T1_READY=False`——**Tier1 机制留空系用户明令**
-（"具体通过什么方式目前还没定"），stub 为纯空壳，设计讨论归
-AGENTS_2.md、代码不预设。
+（accept 零引用）。Tier1 现已由 agent 从 mono 事实提取，契约见
+`porter/skills/EXP-accept-t1.md`。
 
 ## 2. 接线终态速查表
 
@@ -36,49 +35,32 @@ AGENTS_2.md、代码不预设。
   （改码前必查）+ `mapping-notes.md`；均带"系 mono 快照、疑则以树内
   代码为准"漂移警示；缺席省略
 
-**裁定不接**（AGENTS_2.md 续④，含理由与触发条件）：G2 hints、
-G3 余域、G5 HUMAN.md、G6 goals 缺失容忍、G9 handoff 发布。
+**仍不接**（含理由与触发条件）：G2 hints、G3 余域、G5 HUMAN.md、
+G6 goals 缺失容忍。
 
 ## 3. 剩余工作
 
-### 3.1 Tier1 机制（唯一大项）
+### 3.1 Tier1 机制（已完成）
 
-骨架在位、机制留空。**已具备**：
+Tier1 agent 已启用。**具备**：
 - `SECTION_TIER["t1"]=(1,2,3,4)`（accept_exec.py:39）、`_GATE_OF/
   _PREFIX_OF/_prompt_fn`（accept.py:270-282）——`_run_tier`
   （accept.py:284）对三 tier 通用：结构校验→全量终验（逐节真实
   invoke）→commit→评审摘要→关口登记，全部复用；
-- CLI `--tier t1`（显式要求 → rc 2"机制未实现"）；默认路由打
-  "Tier1 未实现——§1-§4 留空跳过"后继续；
-- 关口① `exp-accept.t1` 常量在位；测试覆盖
-  （`test_t1_skeleton_not_ready`、`_ready_index` 预播 §1-§4 模拟
-  未来 Tier1 产物使执行相位可测）。
+- CLI `--tier t1` 与默认自动路由均运行事实提取 agent；
+- 关口① `exp-accept.t1` 常量在位；测试覆盖 Tier1 路由、结构校验与
+  目标树零变更守卫。
 
-**留空边界（勿越）**：`_t1_prompt`（accept.py:178）是纯空壳
-（raise NotImplementedError）。启用 = 实现 prompt + 写
-`porter/skills/EXP-accept-t1.md`（常量 `SKILL_T1` 已在）+ 置
-`_T1_READY=True`（accept.py:67）——届时 `--tier t1`、自动路由、
-关口①全链自动激活，零新增编排代码。
+Tier1 只允许写 `exp-accept/acceptance/` 节文件；目标树变更会被静态段拒绝。
 
-**落地时要定的设计问题**（上 session 有草案备忘在 AGENTS_2.md
-§4「同事 mono 适配拉入」条 C/D，**非承诺、可推翻**）：
-1. 输入源与提取方式：runner.md 七固定标题（mono.py:66-79 结构
-   契约，与 §1-§4 近乎一一对应——模块编译/镜像编译/设备自启动/
-   单元测试）vs exp-mono/logs 反推 vs 亲读树代码（§4 锚点判据）；
-2. 禁改码守卫变体：现 `_run_tier` 复用的守卫是 driver_home ∪
-   paths 白名单（"agent 直接改码"语义）；t1 需收紧为**树零变更**，
-   修复方向反转——invoke 红只许修节文件或上报，永不修代码让标准
-   过（"忠实提取应当立即全绿，红本身是信号"）；
-3. §2 零测试计数防线（min_matches，计数可取 mono ledger）；
-4. 出处可溯：提取自哪个源写节 notes 供人审。
-   交接时点的一个既定事实：源序讨论中 runner.json 已裁退役，
-   若草案提"三源"按两源（runner.md > logs）理解。
+提取源序为 `runner.md` 与 `exp-mono/logs/`；没有证据的节标记
+`blocked`，不运行新实验。mono 的 runner 记录属于共享 append-only 日志。
 
-### 3.2 交接时已清的欠账（勿重做）
+### 3.2 交接与验证
 
-AGENTS_2.md 续④补记（五项不接裁定收口）、`_t1_prompt` 削纯空壳
-——均于本文落盘同轮完成。**仍欠**：五批改动的 commit 切分
-（建议按 §1 表五行切语义 commit，或一个大 commit，待用户裁定）。
+`mono`、`accept` 与 `accept.execute` 均按成功边界发布 handoff；失败、
+中断或输入指纹变化不会发布成功交接。目标树变更守卫、runner append-only
+处理和旧 fixture 兼容均有测试覆盖。
 
 ### 3.3 真跑准备（spinor-mini）
 
@@ -96,7 +78,7 @@ json.dump({"order": [], "modules": {}, "driver_home": dh, "unknown": []},
 EOF
 ```
 
-之后全链 = `accept --tier t1`（机制落地后）→ 关口① → inject →
+之后全链 = `accept --tier t1` → 关口① → inject →
 关口② → e2e → 关口③ → `accept --execute`。
 
 ## 4. 验证与复现
@@ -109,8 +91,7 @@ python3 porter/main.py accept --help           # --tier {t1,inject,e2e} 接线�
 ```
 
 fixture 两要点（tests/test_accept.py）：刻意**不建 runner.json**
-（证明脱钩）；执行相位测试**预播 §1-§4 节对**模拟未来 Tier1 产物
-（真 Tier1 落地后可改为真跑覆盖）。
+（证明脱钩）；执行相位测试保留历史 fixture 的 §1-§4 预播兼容路径。
 
 ## 5. 给 exp-mono 侧的接口契约与请求
 
@@ -124,15 +105,13 @@ fixture 两要点（tests/test_accept.py）：刻意**不建 runner.json**
 | `exp-mono/ledger.json` | 准入前置（全 pass） | — |
 | `report/parking/negatives/contracts/mapping-notes.md`、`logs/` | prompt 指针（缺席省略，无硬约束） | 措辞按"以树内代码为准"消费，不锁你们的内容形态 |
 
-**请求**：mono gate 的实际执行命令经 `append_runner`
-（porter/workspace.py:46，**API 在场、零调用点**）记入 runner.md
-执行记录（一行调用即可）。这是 Tier1 提取质量的保障——决定 §1-§4
-提到的是"真跑过的命令"还是"手册写的应该这么跑"。Tier1 开工时
-此请求优先级上升。
+**已完成**：mono 单测 gate 的实际执行命令经 `append_runner`
+（porter/workspace.py）记入 runner.md，供 Tier1 提取真实证据；构建与
+启动 probe 也会追加对应命令和日志指针。
 
-**G9 现状**：accept 不发布 handoff（`accept`/`accept.execute` 索引
-未接）——编排脚本**勿依赖** `require_success('accept')`；触发重议
-条件 = accept 出现下游消费者。
+**G9 现状**：mono 完成后发布 `mono` handoff；新工作区的 accept 启动时强制消费，
+七节标准全部绑定后发布 `accept` handoff；`--execute` 七节复验通过后发布
+`accept.execute` handoff。
 
 ## 6. 知识入口与已知坑
 
@@ -140,8 +119,6 @@ fixture 两要点（tests/test_accept.py）：刻意**不建 runner.json**
 - 关键代码：accept.py（prompt 面 134-235 / tier 编排 284 / execute
   586 / 前置与主流程 753-880）、accept_exec.py（SECTION_TIER 39 /
   invoke_ladder / fingerprint_problems）、accept_gate.py（关口协议）
-- 坑：①指针原则是**硬约束**——未来任何注入面不得 head-N 截断；
-  ②runner.json 残余消费者只剩 mono 机器 gate（你们领土），accept
-  已零引用；③`--execute` 在 §1-§4 未绑定（Tier1 未落地）时被前置
-  检查 rc 2 挡住并提示——这是设计行为不是 bug；④执行相位测试对
-  §1-§4 的覆盖靠 fixture 预播，真 Tier1 落地后注意同步。
+- 坑：①指针原则是**硬约束**——注入面不得 head-N 截断；
+  ②runner.json 只供 mono 机器 gate，accept 已零引用；③`--execute`
+  在 §1-§4 未绑定时由前置检查 rc 2；④accept 只消费成功的 mono handoff。

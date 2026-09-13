@@ -1,8 +1,11 @@
-"""Small, durable handoff protocol shared by prepare, pre-mono and mono.
+"""Small, durable handoff protocol shared by prepare, pre-mono, mono and accept.
 
 The workflow only needs one rule: a downstream task consumes the latest
 successful execution and its input fingerprints.  Keep the storage boring so
 the files remain useful when the provider is unavailable.
+
+The workspace runner manual is an append-only cross-phase log.  Handoffs check
+that it still exists while allowing later phases to append execution records.
 """
 
 from __future__ import annotations
@@ -172,6 +175,12 @@ def require_success(ws: Path, task_id: str) -> dict:
         raise ValueError(f"Required handoff is missing or not successful: {task_id}")
     for name, expected in (value.get("record_data", {}).get("artifacts") or {}).items():
         path = Path(name)
+        # runner.md is an append-only execution log shared by phases.  Its
+        # contents are expected to grow after a handoff is published.
+        if path.name == "runner.md":
+            if not path.exists():
+                raise ValueError(f"Handoff artifact missing: {path}")
+            continue
         if not path.exists():
             raise ValueError(f"Handoff artifact changed: {path}")
         actual = fingerprints([path], allow_directories=True).get(str(path.resolve()))
