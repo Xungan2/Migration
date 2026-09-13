@@ -20,8 +20,10 @@
 2. **消费脚本契约**：`python 7-<slug>.check.py 7-<slug>.json`；
    **exit 0 = 通过，非零 = 不过**；stdout = 证据叙述。运行环境：
    cwd=目标树根；环境变量 `PORTER_TARGET_OS_ROOT`（绝对路径）/
-   `PORTER_DRIVER_HOME`（相对路径）/ `PORTER_EVIDENCE_DIR`（你的
-   中间工件写这里）。
+   `PORTER_DRIVER_HOME`（相对路径）/ `PORTER_EVIDENCE_DIR`（证据
+   目录）。参考实现 `porter/skills/assets/check-template.py` 与
+   证据纪律（完整证据落盘红绿对称 / 禁自静默 / boot 类
+   snapshots 快照）同 §5/§6 契约，均为硬性。
 3. **命令自足完整 + 脚本可复现**：同 §5/§6 契约；多场景在脚本内
    按序执行，全部过才 exit 0。
 4. **改动范围**：guest 内工作负载脚本（脚手架）与接线改动直接做、
