@@ -66,7 +66,7 @@ def main(argv=None) -> int:
                 rc = run_accept(ws, tier=args.tier,
                                 budget=args.budget, session=args.session,
                                 execute=args.execute)
-                workspace.append_runbook(
+                workspace.append_runner(
                     ws, 'accept', rc, sys.argv,
                     '- 产物：`exp-accept/acceptance/` 下七节文件对'
                     '（N-slug.json + N-slug.check.py；§5-§7 agent 设计，'
