@@ -1,1192 +1,420 @@
-"""accept.py — exp-accept：整驱动系统验收（实验子命令，接 exp-mono 终态）。
+"""accept.py — accept：迁移验收标准制定（节文件 + 消费脚本对形态）。
 
-4 层判定（全阻断）：
-  L1 编译 / L2 单测 —— 命令与判据机械绑定 runner 键（冻结复用，
-                       agent 不可改，origin=frozen）
-  L3 启动（设备+驱动）—— 执行命令机械绑定（runner.boot /
-                       inject_device 冻结模板）；驱动反应锚点由 agent
-                       从迁移产物代码**引用**（cite 带树内 file:line，
-                       人审，origin=proposed）
-  L4 端到端 —— agent 生成（人审）：载荷样例 / 工作负载 / 收据 /
-                       期望值 / 负向用例 / 脚手架接线
+三段 tier（§1-§7 七节梯；2026-09-12 归属修正：§1-§4 归 Tier1、
+Tier 2 收缩为 §5/§6，frozen 机器退场）：
 
-相位：
-  --draft      P2b 直连形态（文件即信号 + 同 session 增量续接 + 同轮
-               质量微反馈 + 静态证据核查回炉，零启动消耗）→ 合并冻结
-               判据 → gates 审批关口 → exit 3
-  （人审：answers.md `## @exp-accept.plan` + `verdict: approve`）
-  --execute    幂等 prepare（脚手架落树 + 接线 + 独立 commit）→
-               成本升序跑矩阵（L1 → L3 裸/注入 → L4；红集汇总后
-               L2 殿后）→ 红则 infra 分类（瞬态重试 1 次）→ 自动修环
-  --diagnose   断点续修（--budget/--session 续接超时会话）
-  --redraft    数据面缺陷重开草案（带失败证据，须重新人审）
+  Tier 1（t1）    → §1 模块级编译 / §2 单测 / §3 镜像级编译 /
+                    §4 启动-驱动自启动——自 mono 执行事实提取
+                    （源序：runner.md > exp-mono/logs；runner.json 已
+                    从 accept 脱钩、退役方向定案），禁改码（树零变更）。
+                    **机制未定，当前留空跳过**
+                    （骨架在位：_run_tier/关口/CLI 均已接线，
+                    _T1_READY 置 True + 实现 _t1_prompt 即启用）
+                    → ★关口① exp-accept.t1
+  Tier 2（inject）→ §5 启动-设备注入 / §6 启动-驱动设备简单交互
+                    两对节文件（acceptance/N-slug.json + .check.py）
+                    → ★关口② exp-accept.inject
+  Tier 3（e2e）  → §7 端到端 一对节文件 → ★关口③ exp-accept.plan
+  双关口放行 → ledger 登记七节索引（未绑定节记 missing——Tier1 落地前
+  bound 3/7，--execute 被前置检查 rc 2 挡住并提示先完成 Tier1）
 
-诚实闸门（机械，不信自报）：收据 = 内容派生（literal 或
-fill_sha256 字节×长度的通用数学原语，语义活在数据里）；工作负载
-运行证明行缺席即红；跨单元 must-not（防日志串判/收据泄漏）；判据
-在 execute 期只读已放行版本（指纹）；脚手架对修码 agent 冻结
-（漂移即还原）；git 白名单（driver_home ∪ 登记接线文件）。
+设计要点（2026-09-12 定案，格式自由化）：
+- 每节交付物 = JSON 标准（须含按序命令 + 成功判定标准，其余自由）+
+  消费脚本（python check.py <json>，exit 0=过/非零=不过，stdout=证据）；
+  调用契约/环境见 accept_exec 模块头注。工具零格式假设。
+- agent 直接改码（范围守卫 = driver_home ∪ 各节 JSON 顶层 "paths"
+  并集；paths 缺席则该节无机器白名单，git 变更全量进评审材料归人判）。
+  （Tier1 例外：禁改码——提取错修节文件、环境漂移/标准错上报，
+  随 _t1_prompt 一并落地。）
+- 启动/执行一律走外部静态段（运行协议禁自启）：先把候选写进节文件对
+  再 run_static；外部按契约真实调用并归档，agent 读指针判定与迭代。
+- 只有跑通过的进标准：done 后编排器逐节真实 invoke，全绿才 commit、
+  登记关口（绑定节文件对联合指纹）；诚实性由人审把关。
+- 超时设计沿用 exp-mono：--budget 只计 agent 段；耗尽存 session 可续接。
 
-本文件零目标 OS / 驱动假设：命令 / 判据 / 脚手架全部来自工作区
-数据面（runner.json / acceptance.json / scaffold manifest）。
+本文件零目标 OS 假设：命令/判据全部来自节文件数据面。
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
-import subprocess
-import time
 from datetime import datetime
 from pathlib import Path
 
 from ..common import agent
-from ..env import probe as probe_mod
+from ..common import vcs as _vcs
+from ..exp import accept_exec as _exec
 from ..exp import mono as _mono
+from ..exp import accept_gate as _gate
 from .. import log as _log
 
-SKILL_DRAFT = "EXP-accept-draft"
-SKILL_FIX = "EXP-accept-fix"
-GATE_ID = "exp-accept.plan"
-GATE_FAIL_ID = "exp-accept.draft.fail"
-DRAFT_ROUNDS = 4            # 方案回炉有界轮数（证据核查类失败消耗轮）
-QUALITY_TRIES = 3           # 同轮文件质量微反馈（不烧轮）
-DRAFT_BUDGET_SEC = 1800     # 草案 agent 总预算缺省
-DIAG_BUDGET_SEC = 2400      # 修环 agent 总预算缺省
-_CALL_CAP_SEC = 1200        # 单次 provider 调用时长上限
-CRIT_LAYERS = ("L1", "L2", "L3", "L4")
-FROZEN_BOOT_IDS = ("B_build", "B_bare", "B_inject", "B_unit")
+SKILL_T1 = "EXP-accept-t1"     # Tier1 skill——机制定案时创建
+SKILL_INJECT = "EXP-accept-inject"
+SKILL_E2E = "EXP-accept-e2e"
+SKILL_EXECUTE = "EXP-accept-execute"
+GATE_T1 = "exp-accept.t1"
+GATE_INJECT = "exp-accept.inject"
+GATE_PLAN = "exp-accept.plan"
+T1_BUDGET_SEC = 3600
+INJECT_BUDGET_SEC = 3600      # Tier 2/3 agent 段总预算缺省（CLI 可覆盖）
+E2E_BUDGET_SEC = 3600
+EXEC_BUDGET_SEC = 3600        # 执行相位 agent 段总预算缺省
+VERIFY_RETRIES = 2            # 结构校验不过的同 session 回灌上限
 
+# Tier1（§1-§4 提取）机制未实现：三源并集输入 + 禁改码守卫变体 +
+# EXP-accept-t1 skill 待定案。骨架（SECTION_TIER/_run_tier/关口/CLI）
+# 已接线，落地时置 True 并实现 _t1_prompt。
+_T1_READY = False
 
-def _read_json(path: Path):
-    return _mono._read_json(path)
+_TIER_TITLES = {"t1": "§1/§2/§3/§4（模块编译/单测/镜像编译/自启动）",
+                "inject": "§5/§6（设备注入/简单交互）",
+                "e2e": "§7（端到端）"}
 
 
 def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _sha16(path: Path) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
-    except OSError:
-        return ""
-
-
-def _tree_head(tree: Path) -> str:
-    try:
-        proc = subprocess.run(["git", "-C", str(tree), "rev-parse", "HEAD"],
-                              capture_output=True, text=True, timeout=60)
-        return proc.stdout.strip() if proc.returncode == 0 else "nogit"
-    except (OSError, subprocess.TimeoutExpired):
-        return "nogit"
-
-
-def _safe_rel(rel: str) -> bool:
-    """树内相对路径白名单形：非绝对、无 `..` 段。"""
-    if not isinstance(rel, str) or not rel.strip():
-        return False
-    p = Path(rel)
-    if p.is_absolute() or any(seg == ".." for seg in p.parts):
-        return False
-    return True
-
-
-# ---------- 判定核心（纯函数） ----------
-
-def resolve_expect(exp) -> str | None:
-    """期望值解析：literal 字面量；fill_sha256 = 字节×长度 的 sha256
-    （通用数学原语——"应读到什么"的语义由数据声明，工具不做解读）。"""
-    if not isinstance(exp, dict):
-        return None
-    if isinstance(exp.get("literal"), str) and exp["literal"]:
-        return exp["literal"]
-    fh = exp.get("fill_sha256")
-    if isinstance(fh, dict):
-        b, n = fh.get("byte"), fh.get("length")
-        if isinstance(b, int) and not isinstance(b, bool) \
-                and 0 <= b <= 255 and isinstance(n, int) \
-                and not isinstance(n, bool) and n > 0:
-            return hashlib.sha256(bytes([b]) * n).hexdigest()
-    return None
-
-
-def judge_criteria(criteria: list[dict], results: dict) -> list[dict]:
-    """判据 → 判定记录。results = {boot_id: {rc, log, log_state, green}}。
-    单元未运行 → ok=None（pending，不计红）。"""
-    out: list[dict] = []
-    for c in criteria:
-        r = results.get(c.get("boot"))
-        rec = {"id": c.get("id"), "layer": c.get("layer"),
-               "boot": c.get("boot"), "origin": c.get("origin"),
-               "ok": None, "detail": ""}
-        if r is None:
-            rec["detail"] = "单元未运行（pending）"
-            out.append(rec)
-            continue
-        kind, pol = c.get("kind"), c.get("polarity")
-        if kind == "rc":
-            ok = (r["rc"] == 0) == (pol == "hit")
-            rec.update(ok=ok, detail=f"rc={r['rc']}")
-        elif kind == "log":
-            hit = re.search(c.get("expr") or "", r.get("log") or "") \
-                is not None
-            ok = hit == (pol == "hit")
-            rec.update(ok=ok, detail=f"hits={'yes' if hit else 'no'}"
-                                     f" log_state={r.get('log_state')}")
-        elif kind == "receipt":
-            ms = list(re.finditer(c.get("expr") or "", r.get("log") or ""))
-            if not ms:
-                rec.update(ok=False, detail="收据行未出现")
-            else:
-                m = ms[-1]                     # 多次出现取末次（末位语义）
-                val = (m.group(1) if m.groups() else m.group(0)).strip()
-                expv = resolve_expect(c.get("expect"))
-                ok = expv is not None and val == expv
-                rec.update(ok=ok,
-                           detail=f"receipt={val[:20]}… "
-                                  f"expect={'一致' if ok else '不符'}")
-        else:
-            rec.update(ok=False, detail=f"未知判据 kind {kind}")
-        out.append(rec)
-    return out
-
-
-# ---------- 草案 schema 校验（agent 部分） ----------
-
-def _boot_log_spec_ok(b: dict) -> bool:
-    if b.get("log_is_stdout") is True:
-        return not b.get("log_file")
-    return isinstance(b.get("log_file"), str) and bool(b["log_file"].strip())
-
-
-def validate_draft(draft, runner: dict) -> list[str]:
-    """草案（agent 部分）schema 校验。返回错误清单（空 = 合格）。"""
-    errs: list[str] = []
-    if not isinstance(draft, dict):
-        return ["草案不是 JSON 对象"]
-
-    def _s(v) -> bool:
-        return isinstance(v, str) and bool(v.strip())
-
-    # inject_args_key
-    inj = runner.get("inject_device") or {}
-    examples = inj.get("example_args") or {}
-    iak = draft.get("inject_args_key")
-    if iak is not None and (not _s(iak) or iak not in examples):
-        errs.append(f"inject_args_key 非法（须为 example_args 的键："
-                    f"{sorted(examples)}）")
-    if inj and len(examples) > 1 and iak is None:
-        errs.append("example_args 有多键——inject_args_key 必填")
-
-    # boots（模板单元，agent 只造这类）
-    boots = draft.get("boots")
-    if not isinstance(boots, list) or not boots:
-        errs.append("boots 须为非空数组（至少一个模板启动单元）")
-        boots = []
-    ids = set()
-    for i, b in enumerate(boots):
-        tag = f"boots[{i}]"
-        if not isinstance(b, dict) or not _s(b.get("id")):
-            errs.append(f"{tag}: id 缺失")
-            continue
-        bid = b["id"].strip()
-        if bid in ids or bid in FROZEN_BOOT_IDS:
-            errs.append(f"{tag}: id 重复或占用冻结名 `{bid}`")
-        ids.add(bid)
-        if not _s(b.get("cmd")):
-            errs.append(f"{tag}({bid}): cmd 缺失")
-        if not _boot_log_spec_ok(b):
-            errs.append(f"{tag}({bid}): 日志定位缺失（log_file 或 "
-                        "log_is_stdout=true 二选一）")
-        if b.get("timeout_sec") is not None and \
-                (not isinstance(b["timeout_sec"], int)
-                 or isinstance(b["timeout_sec"], bool)
-                 or b["timeout_sec"] <= 0):
-            errs.append(f"{tag}({bid}): timeout_sec 须为正整数")
-        if b.get("args") is not None and not isinstance(b["args"], str):
-            errs.append(f"{tag}({bid}): args 须为字符串")
-
-    # scaffold
-    scaff = draft.get("scaffold")
-    scaff_files: dict[str, str] = {}
-    if scaff is not None:
-        if not isinstance(scaff, dict):
-            errs.append("scaffold 须为对象")
-        else:
-            files = scaff.get("files")
-            if not isinstance(files, list):
-                errs.append("scaffold.files 须为数组")
-                files = []
-            for i, f in enumerate(files):
-                if not isinstance(f, dict) or not _safe_rel(f.get("path")):
-                    errs.append(f"scaffold.files[{i}]: path 非法（须为树内"
-                                "安全相对路径）")
-                    continue
-                if not isinstance(f.get("content"), str):
-                    errs.append(f"scaffold.files[{i}]({f['path']}): "
-                                "content 缺失")
-                    continue
-                scaff_files[f["path"]] = f["content"]
-            wc = scaff.get("wiring_cmd")
-            if wc is not None and not _s(wc):
-                errs.append("scaffold.wiring_cmd 须为非空字符串")
-            wp = scaff.get("wiring_paths")
-            if wc is not None:
-                if not isinstance(wp, list) or not wp \
-                        or not all(_safe_rel(x) for x in wp):
-                    errs.append("wiring_cmd 在场时 wiring_paths 必填"
-                                "（树内安全相对路径数组）")
-            if wc is None and isinstance(wp, list) and wp:
-                errs.append("wiring_paths 只在 wiring_cmd 在场时有效")
-
-    # criteria（proposed）
-    crit = draft.get("criteria")
-    if not isinstance(crit, list) or not crit:
-        errs.append("criteria 须为非空数组")
-        crit = []
-    cids = set()
-    for i, c in enumerate(crit):
-        tag = f"criteria[{i}]"
-        if not isinstance(c, dict) or not _s(c.get("id")):
-            errs.append(f"{tag}: id 缺失")
-            continue
-        cid = c["id"].strip()
-        if cid in cids:
-            errs.append(f"{tag}({cid}): id 重复")
-        cids.add(cid)
-        probs = []
-        if c.get("layer") not in ("L3", "L4"):
-            probs.append("layer 须为 L3|L4（L1/L2 为冻结层）")
-        if c.get("boot") not in ids and c.get("boot") not in \
-                ("B_bare", "B_inject"):
-            probs.append(f"boot `{c.get('boot')}` 不存在（可用：草案 "
-                         f"boots 或 B_bare/B_inject）")
-        if c.get("kind") not in ("log", "receipt"):
-            probs.append("kind 须为 log|receipt（rc 为冻结专用）")
-        if c.get("polarity") not in ("hit", "miss"):
-            probs.append("polarity 须为 hit|miss")
-        expr = c.get("expr")
-        if not _s(expr):
-            probs.append("expr 缺失")
-        else:
-            try:
-                re.compile(expr)
-            except re.error as e:
-                probs.append(f"expr 非法正则: {e}")
-        if c.get("kind") == "receipt":
-            if c.get("polarity") != "hit":
-                probs.append("receipt 判据 polarity 须为 hit")
-            if resolve_expect(c.get("expect")) is None:
-                probs.append("receipt 须带合法 expect（literal 或 "
-                             "fill_sha256{byte,length}）")
-        cite = c.get("cite")
-        if not isinstance(cite, dict):
-            probs.append("cite 缺失（tree 或 scaffold 二选一）")
-        else:
-            t, s = cite.get("tree"), cite.get("scaffold")
-            if isinstance(t, dict):
-                if not _safe_rel(t.get("path")) or not isinstance(
-                        t.get("line"), int) or isinstance(t.get("line"), bool) \
-                        or t["line"] <= 0 or not _s(t.get("quote")):
-                    probs.append("cite.tree 须含 path/line(正整数)/quote")
-            elif isinstance(s, dict):
-                if not _s(s.get("file")) or s["file"] not in scaff_files \
-                        or not _s(s.get("contains")):
-                    probs.append("cite.scaffold 须含 file（在 "
-                                "scaffold.files 中）与 contains")
-            else:
-                probs.append("cite 须为 tree 或 scaffold 之一")
-        if not _s(c.get("evidence")):
-            probs.append("evidence（人读理由）缺失")
-        if probs:
-            errs.append(f"{tag}({cid}): " + "；".join(probs))
-    return errs
-
-
-# ---------- 证据核查（反幻觉：引用必须在场） ----------
-
-def check_cites(tree: Path, draft: dict) -> list[str]:
-    """对草案逐条 criteria 核实 cite：tree 引用允许 ±2 行窗口命中
-    quote；scaffold 引用须在对应脚手架文件内容中命中 contains。"""
-    errs: list[str] = []
-    scaff = {f.get("path"): f.get("content")
-             for f in (draft.get("scaffold") or {}).get("files") or []
-             if isinstance(f, dict)}
-    for c in draft.get("criteria") or []:
-        if not isinstance(c, dict) or not c.get("id"):
-            continue
-        cite = c.get("cite") or {}
-        t, s = cite.get("tree"), cite.get("scaffold")
-        if isinstance(t, dict):
-            p = tree / str(t.get("path"))
-            try:
-                lines = p.read_text(encoding="utf-8",
-                                    errors="replace").splitlines()
-            except OSError:
-                errs.append(f"{c['id']}: cite 文件不可读 "
-                            f"`{t.get('path')}`（相对目标树）")
-                continue
-            ln = int(t.get("line") or 0)
-            quote = str(t.get("quote") or "")
-            window = lines[max(0, ln - 3):ln + 2]
-            if not any(quote in w for w in window):
-                errs.append(f"{c['id']}: cite 未命中——{t.get('path')}:"
-                            f"{ln} 前后 ±2 行内无 `{quote[:60]}`"
-                            "（锚点必须是树中真实存在的语句）")
-        elif isinstance(s, dict):
-            content = scaff.get(s.get("file"))
-            if content is None or str(s.get("contains")) not in content:
-                errs.append(f"{c['id']}: scaffold cite 未命中——"
-                            f"{s.get('file')} 内容中无 "
-                            f"`{str(s.get('contains'))[:60]}`")
-    return errs
-
-
-def dry_assemble(draft: dict, runner: dict, target_os: Path,
-                 driver_home_rel: str) -> list[str]:
-    """模板干装配：占位符可替换、判据可引用到单元。零启动消耗。"""
-    errs: list[str] = []
-    ids = {b.get("id") for b in draft.get("boots") or []
-           if isinstance(b, dict)}
-    inj = runner.get("inject_device") or {}
-    examples = inj.get("example_args") or {}
-    iak = draft.get("inject_args_key") or (next(iter(examples))
-                                           if len(examples) == 1 else None)
-    for b in draft.get("boots") or []:
-        if not isinstance(b, dict) or not b.get("cmd"):
-            continue
-        cmd = _subst(str(b["cmd"]), target_os, driver_home_rel,
-                     b.get("args") if b.get("args") is not None
-                     else (examples.get(iak) if "<DEVICE_ARGS>"
-                           in str(b["cmd"]) else None))
-        if "<DEVICE_ARGS>" in cmd:
-            errs.append(f"boots({b.get('id')}): <DEVICE_ARGS> 占位符无"
-                        "替换值（args 缺失且 example_args 无键可取）")
-    for c in draft.get("criteria") or []:
-        if isinstance(c, dict) and c.get("boot") not in ids \
-                and c.get("boot") not in ("B_bare", "B_inject"):
-            errs.append(f"criteria({c.get('id')}): 引用了不存在的单元 "
-                        f"`{c.get('boot')}`")
-    return errs
-
-
-def _subst(tpl: str, target_os: Path, driver_home_rel: str,
-           args: str | None) -> str:
-    """占位符替换：单花括号 {PORTER_*} 负向后顾（shell 形态 ${VAR}
-    经 env 展开，勿咬）；<DEVICE_ARGS> 全量替换。"""
-    cmd = re.sub(r"(?<!\$)\{PORTER_TARGET_OS_ROOT\}",
-                 lambda _m: str(target_os.resolve()), str(tpl))
-    cmd = re.sub(r"(?<!\$)\{PORTER_DRIVER_HOME\}",
-                 lambda _m: driver_home_rel, cmd)
-    if args is not None:
-        cmd = cmd.replace("<DEVICE_ARGS>", args)
-    return cmd
-
-
-# ---------- 冻结层合并（L1/L2/L3 命令机械绑定 runner 键） ----------
-
-def _esc(s) -> str | None:
-    return re.escape(str(s)) if s else None
-
-
-def frozen_boots(runner: dict, inject_key: str | None) -> list[dict]:
-    b = runner.get("build") or {}
-    bo = runner.get("boot") or {}
-    ut = runner.get("unit_test") or {}
-    inj = runner.get("inject_device") or {}
-    units = [
-        {"id": "B_build", "origin": "frozen", "from": "runner.build",
-         "cmd": b.get("cmd"), "timeout_sec": b.get("timeout_full_sec"),
-         "log_is_stdout": True, "success": b.get("success_pattern")},
-        {"id": "B_bare", "origin": "frozen", "from": "runner.boot",
-         "cmd": bo.get("cmd"), "timeout_sec": bo.get("timeout_sec"),
-         "log_file": bo.get("log_file"),
-         "log_is_stdout": bo.get("log_is_stdout"),
-         "success": bo.get("success_pattern"),
-         "panic": bo.get("panic_pattern")},
-        {"id": "B_unit", "origin": "frozen", "from": "runner.unit_test",
-         "cmd": ut.get("cmd"), "timeout_sec": ut.get("timeout_sec"),
-         "log_is_stdout": True, "success": ut.get("success_pattern"),
-         "fail": ut.get("fail_pattern")},
-    ]
-    if inj:
-        units.append({"id": "B_inject", "origin": "frozen",
-                      "from": "runner.inject_device",
-                      "mechanism": inj.get("mechanism", "env"),
-                      "args_key": inject_key})
-    return units
-
-
-def frozen_criteria(runner: dict) -> list[dict]:
-    b = runner.get("build") or {}
-    bo = runner.get("boot") or {}
-    ut = runner.get("unit_test") or {}
-    inj = runner.get("inject_device") or {}
-    crit: list[dict] = []
-
-    def add(cid, layer, boot, kind, pol, expr, ev):
-        crit.append({"id": cid, "layer": layer, "boot": boot, "kind": kind,
-                     "polarity": pol, "expr": expr, "expect": None,
-                     "evidence": ev, "origin": "frozen"})
-
-    add("L1.build.rc", "L1", "B_build", "rc", "hit", None,
-        "runner.build 退出码")
-    if b.get("success_pattern"):
-        add("L1.build.success", "L1", "B_build", "log", "hit",
-            _esc(b["success_pattern"]), "runner.build.success_pattern")
-    add("L3.bare.rc", "L3", "B_bare", "rc", "hit", None,
-        "runner.boot 退出码")
-    if bo.get("success_pattern"):
-        add("L3.bare.success", "L3", "B_bare", "log", "hit",
-            _esc(bo["success_pattern"]), "runner.boot.success_pattern")
-    if bo.get("panic_pattern"):
-        add("L3.bare.no_panic", "L3", "B_bare", "log", "miss",
-            _esc(bo["panic_pattern"]), "runner.boot.panic_pattern")
-    if inj:
-        add("L3.inject.rc", "L3", "B_inject", "rc", "hit", None,
-            "注入启动退出码")
-        if bo.get("success_pattern"):
-            add("L3.inject.success", "L3", "B_inject", "log", "hit",
-                _esc(bo["success_pattern"]), "注入启动健康特征")
-        if inj.get("driver_success_pattern"):
-            add("L3.inject.driver_success", "L3", "B_inject", "log", "hit",
-                _esc(inj["driver_success_pattern"]),
-                "runner.inject_device.driver_success_pattern（冻结）")
-        if inj.get("driver_fail_pattern"):
-            add("L3.inject.driver_fail", "L3", "B_inject", "log", "miss",
-                _esc(inj["driver_fail_pattern"]),
-                "runner.inject_device.driver_fail_pattern（冻结）")
-    add("L2.unit.rc", "L2", "B_unit", "rc", "hit", None,
-        "runner.unit_test 退出码")
-    if ut.get("success_pattern"):
-        add("L2.unit.success", "L2", "B_unit", "log", "hit",
-            _esc(ut["success_pattern"]), "runner.unit_test.success_pattern")
-    if ut.get("fail_pattern"):
-        add("L2.unit.no_fail", "L2", "B_unit", "log", "miss",
-            _esc(ut["fail_pattern"]), "runner.unit_test.fail_pattern")
-    return crit
-
-
-def merge_frozen(draft: dict, runner: dict) -> tuple[dict, str | None]:
-    """草案 + 冻结层 → acceptance.json。返回 (文档, inject_key)。"""
-    inj = runner.get("inject_device") or {}
-    examples = inj.get("example_args") or {}
-    iak = draft.get("inject_args_key")
-    if iak is None and len(examples) == 1:
-        iak = next(iter(examples))
-    boots = frozen_boots(runner, iak)
-    for b in draft.get("boots") or []:
-        if isinstance(b, dict):
-            boots.append({"id": b.get("id"), "origin": "proposed",
-                          "cmd": b.get("cmd"), "args": b.get("args"),
-                          "timeout_sec": b.get("timeout_sec"),
-                          "log_file": b.get("log_file"),
-                          "log_is_stdout": b.get("log_is_stdout"),
-                          "success": b.get("success_pattern"),
-                          "panic": b.get("panic_pattern")})
-    criteria = frozen_criteria(runner)
-    for c in draft.get("criteria") or []:
-        if isinstance(c, dict):
-            criteria.append({**c, "origin": "proposed"})
-    doc = {"status": "draft", "generated": _now(),
-           "inject_args_key": iak,
-           "boots": boots,
-           "scaffold": draft.get("scaffold") or {"files": []},
-           "criteria": criteria}
-    return doc, iak
-
-
-# ---------- 单元执行（runner 驱动 + 日志快照 + infra 重试） ----------
-
-def _expand_unit(entry: dict, runner: dict, target_os: Path,
-                 driver_home_rel: str) -> dict:
-    """boot 条目 → 可执行 spec。B_inject 在此展开冻结模板机制。"""
-    bo = runner.get("boot") or {}
-    if entry.get("from") == "runner.inject_device":
-        inj = runner.get("inject_device") or {}
-        args = (inj.get("example_args") or {}).get(entry.get("args_key"))
-        if args is None:
-            raise ValueError(f"B_inject: example_args 无键 "
-                             f"`{entry.get('args_key')}`")
-        if entry.get("mechanism", "env") == "cmd":
-            suffix = str(inj.get("cmd_suffix") or "").replace(
-                "<DEVICE_ARGS>", args)
-            return {"id": "B_inject", "cmd": f"{bo['cmd']} {suffix}",
-                    "extra_env": None, "timeout_sec": bo.get("timeout_sec"),
-                    "log_file": bo.get("log_file"),
-                    "log_is_stdout": bo.get("log_is_stdout"),
-                    "success": bo.get("success_pattern"),
-                    "panic": bo.get("panic_pattern")}
-        extra = {k: v.replace("<DEVICE_ARGS>", args)
-                 for k, v in (inj.get("env") or {}).items()}
-        return {"id": "B_inject", "cmd": bo["cmd"], "extra_env": extra,
-                "timeout_sec": bo.get("timeout_sec"),
-                "log_file": bo.get("log_file"),
-                "log_is_stdout": bo.get("log_is_stdout"),
-                "success": bo.get("success_pattern"),
-                "panic": bo.get("panic_pattern")}
-    cmd = _subst(str(entry.get("cmd") or ""), target_os, driver_home_rel,
-                 entry.get("args"))
-    return {"id": entry.get("id"), "cmd": cmd,
-            "extra_env": None, "timeout_sec": entry.get("timeout_sec"),
-            "log_file": entry.get("log_file"),
-            "log_is_stdout": entry.get("log_is_stdout"),
-            "success": entry.get("success"),
-            "panic": entry.get("panic")}
-
-
-def _run_unit_once(spec: dict, exp_dir: Path, target_os: Path,
-                   runner: dict) -> dict:
-    env = probe_mod._base_env(target_os, runner, spec.get("extra_env"))
-    label = str(spec["id"])
-    if not spec.get("log_is_stdout"):
-        # 清旧日志防串判（probe._boot_once 同款惯例）：上一次启动的
-        # 日志若残留，瞬态判定与判据都会读到陈旧内容
-        lp, _mode = probe_mod._resolve_log(target_os, spec)
-        if lp is not None:
-            try:
-                lp.unlink()
-            except FileNotFoundError:
-                pass
-            except OSError:
-                pass
-    rc, out = probe_mod._run(spec["cmd"], cwd=target_os, env=env,
-                             timeout_sec=int(spec.get("timeout_sec")
-                                             or 600),
-                             log_path=exp_dir / "logs" / f"T3_{label}.log")
-    if spec.get("log_is_stdout"):
-        log, state = probe_mod._strip_ansi(out), "stdout"
-    else:
-        lp, mode = probe_mod._resolve_log(target_os, spec)
-        log = ""
-        if lp is not None:
-            try:
-                if lp.exists():
-                    log = probe_mod._strip_ansi(
-                        lp.read_text(encoding="utf-8", errors="replace"))
-            except OSError:
-                log = ""
-        state = mode if log else f"{mode}:missing_or_empty"
-    green = rc == 0
-    parts = [f"rc={rc}"]
-    if spec.get("success"):
-        hit = spec["success"] in log
-        green = green and hit
-        parts.append(f"success={'hit' if hit else 'MISS'}")
-    if spec.get("panic"):
-        bad = spec["panic"].lower() in log.lower()
-        green = green and not bad
-        parts.append(f"panic={'hit' if bad else 'no-hit'}")
-    if spec.get("fail"):
-        bad = spec["fail"] in log
-        green = green and not bad
-        parts.append(f"fail={'hit' if bad else 'no-hit'}")
-    snap = exp_dir / "logs" / f"{label}.log"
-    try:
-        snap.write_text(log or "", encoding="utf-8")
-    except OSError:
-        pass
-    return {"rc": rc, "log": log, "log_state": state, "green": green,
-            "detail": " ".join(parts), "snapshot": str(snap)}
-
-
-def _run_unit(spec: dict, exp_dir: Path, target_os: Path,
-              runner: dict) -> dict:
-    """执行一次单元；infra 签名（rc≠0 ∧ 日志缺失/空）→ 重试 1 次。"""
-    res = _run_unit_once(spec, exp_dir, target_os, runner)
-    res["attempts"] = 1
-    if res["rc"] != 0 and res["log_state"].endswith("missing_or_empty"):
-        _log.console_line(f"[porter] exp-accept: 单元 {spec['id']} 疑似"
-                          "瞬态（rc≠0 ∧ 日志空）——重试 1 次")
-        res2 = _run_unit_once(spec, exp_dir, target_os, runner)
-        res2["attempts"] = 2
-        res = res2
-    return res
-
-
-# ---------- 草案相位（P2b 直连：文件即信号） ----------
-
-def _draft_prompt(ws: Path, exp_dir: Path, proj: dict, runner: dict,
-                  manifest: dict, mono_ledger: dict,
-                  evidence_text: str) -> str:
-    skill = agent.load_skill(SKILL_DRAFT)
-    bo = runner.get("boot") or {}
-    inj = runner.get("inject_device") or {}
-    b = runner.get("build") or {}
-    ut = runner.get("unit_test") or {}
-    mono_dir = ws / "exp-mono"
-    kb_face = ""
-    try:
-        from ..bootstrap import kb as _kb
-        kb_face = _kb.kb_face(ws, ["pitfalls"]) or ""
-    except Exception:
-        kb_face = ""
-    n_pass = sum(1 for m, e in (mono_ledger.get("modules") or {}).items()
-                 if (e or {}).get("status") == "pass")
-    runner_md = ""
-    if (ws / "runner.md").exists():
-        runner_md = (f"- runner 调用手册（**先精读**，含各命令来龙去脉与"
-                     f"坑史）：`{ws / 'runner.md'}`\n")
-    draft_path = exp_dir / "acceptance.draft.json"
-    return (f"{skill}\n\n---\n\n## 背景数据（平台事实，以数据面为准）\n"
-            f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
-            f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
-            f"- 前序迁移：exp-mono {n_pass}/{len(mono_ledger.get('modules') or {})}"
-            f" 模块 pass；报告 `{mono_dir / 'report.md'}`；泊车记录 "
-            f"`{mono_dir / 'parking.md'}`；迁移词典 "
-            f"`{mono_dir / 'mapping-notes.md'}`（三者先读）\n"
-            f"{runner_md}"
-            f"- 冻结命令（L1/L2/L3 机械绑定，你不可改）：\n"
-            f"  - build：`{b.get('cmd')}`（成功特征 `{b.get('success_pattern')}`）\n"
-            f"  - boot：`{bo.get('cmd')}`（成功 `{bo.get('success_pattern')}` / "
-            f"panic `{bo.get('panic_pattern')}` / 日志 "
-            f"`{bo.get('log_file') or 'stdout'}`）\n"
-            f"  - inject_device：mechanism `{inj.get('mechanism')}`；"
-            f"example_args `{json.dumps(inj.get('example_args') or {}, ensure_ascii=False)}`；"
-            f"driver_success_pattern `{inj.get('driver_success_pattern')}`\n"
-            f"  - unit_test：`{ut.get('cmd')}`\n"
-            + (f"\n## 知识库 pitfalls 目录\n{kb_face}\n" if kb_face else "")
-            + evidence_text
-            + f"\n## 输出契约\n- 完整 JSON（裸 JSON，勿包 markdown 代码块）"
-              f"写到：`{draft_path}`\n- schema 字段与 cite 规则见 SKILL；"
-              "写完文件后在消息里简述即可（编排器读文件不读消息）。\n")
-
-
-def _rework_message(errs: list[str], stem: str) -> str:
-    return ("---\n\n## 上一轮方案的问题（修正后**重写整个文件**）\n- "
-            + "\n- ".join(errs[:12])
-            + f"\n\n证据核查详情可查日志 `{stem}.log`。")
-
-
-def _register_plan_gate(ws: Path, acc_path: Path) -> None:
-    from ..loop import gates as gates_mod
-    sha = _sha16(acc_path)
-    led = gates_mod.GateLedger(ws).load()
-    g = led.find(GATE_ID)
-    if g is None:
-        led.add(id=GATE_ID, lane="checkpoint", kind="approval",
-                gate_type="decision", phase="exp-accept",
-                question=("系统验收方案审批（这是对'驱动作为系统工作'的"
-                          "完成定义签字）。评审摘要见 "
-                          "exp-accept/review.md——frozen 部分为冻结复用，"
-                          "proposed 部分为 agent 提案（锚点引用/端到端"
-                          "负载/期望值/负向例/脚手架），逐条过目。批准"
-                          "绑定方案指纹——文件变更后批准自动失效。"),
-                context_files=["exp-accept/acceptance.json",
-                               "exp-accept/review.md"],
-                answer_form=[
-                    {"field": "verdict", "type": "enum",
-                     "options": ["approve", "reject"], "required": True}],
-                artifact_path=str(acc_path.relative_to(ws)),
-                artifact_sha=sha)
-    else:
-        # 既有关口（redraft/重开）——重置为待答并刷新指纹
-        g.update({"status": "open", "artifact_sha": sha, "answer": None,
-                  "answered_by": None, "answered_at": None,
-                  "resolution": None})
-        g.setdefault("history", []).append(
-            {"time": _now(), "event": "re-registered",
-             "detail": f"新方案草案，指纹刷新 {sha}"})
-        led.save()
-    gates_mod.render_human_questions(ws)
-
-
-def _write_review(exp_dir: Path, doc: dict, runner: dict) -> None:
-    lines = ["# exp-accept 验收方案评审摘要", "",
-             f"- 生成时间：{doc.get('generated')}",
-             f"- inject_args_key：`{doc.get('inject_args_key')}`", "",
-             "## 冻结层（机械绑定 runner 键，无需审）", ""]
-    frozen = [c for c in doc.get("criteria") or []
-              if c.get("origin") == "frozen"]
-    lines += [f"- 判据 {len(frozen)} 条：L1/L2 命令与特征、L3 裸/注入"
-              "启动健康与冻结消费锚，全部逐字取自 runner.json", "",
-              "## agent 提案（本次评审焦点）", "",
-              "### 启动单元（proposed）", "",
-              "| id | 命令模板 | 日志定位 |", "|---|---|---|"]
-    for b in doc.get("boots") or []:
-        if b.get("origin") != "proposed":
-            continue
-        logspec = ("stdout" if b.get("log_is_stdout")
-                   else f"file:{b.get('log_file')}")
-        lines.append(f"| {b.get('id')} | `{str(b.get('cmd'))[:120]}` "
-                     f"| {logspec} |")
-    scaff = doc.get("scaffold") or {}
-    lines += ["", "### 脚手架", ""]
-    for f in scaff.get("files") or []:
-        lines.append(f"- 落树文件 `{f.get('path')}`（{len(f.get('content') or '')} 字符）")
-    if scaff.get("wiring_cmd"):
-        lines.append(f"- 接线命令：`{str(scaff['wiring_cmd'])[:160]}`")
-        lines.append(f"- 接线涉及路径：{scaff.get('wiring_paths')}")
-    lines += ["", "### 判据（proposed）", "",
-              "| id | 层 | 单元 | kind/极性 | expr | expect | 证据 |",
-              "|---|---|---|---|---|---|---|"]
-    for c in doc.get("criteria") or []:
-        if c.get("origin") != "proposed":
-            continue
-        exp = c.get("expect")
-        exp_s = ("—" if not exp else
-                 json.dumps(exp, ensure_ascii=False)[:60])
-        cite = c.get("cite") or {}
-        cite_s = (f"{cite.get('tree', {}).get('path')}:"
-                  f"{cite.get('tree', {}).get('line')}"
-                  if "tree" in cite else
-                  f"scaffold:{cite.get('scaffold', {}).get('file')}")
-        lines.append(f"| {c.get('id')} | {c.get('layer')} | {c.get('boot')} "
-                     f"| {c.get('kind')}/{c.get('polarity')} "
-                     f"| `{str(c.get('expr'))[:80]}` | {exp_s} "
-                     f"| {cite_s} |")
-    for c in doc.get("criteria") or []:
-        if c.get("origin") == "proposed":
-            lines += ["", f"#### {c.get('id')}",
-                      f"- 理由：{c.get('evidence')}"]
-    lines += ["", "## 放行方式", "",
-              "answers.md 追加：", "",
-              "```",
-              f"## @{GATE_ID}",
-              "verdict: approve",
-              "```", "",
-              "或 `python3 porter/main.py gate answer "
-              f"{GATE_ID} --set verdict=approve --output-dir <ws>`。"]
-    (exp_dir / "review.md").write_text("\n".join(lines) + "\n",
-                                       encoding="utf-8")
-
-
-def _run_draft(ws: Path, exp_dir: Path, proj: dict, runner: dict,
-               manifest: dict, mono_ledger: dict, ledger: dict,
-               budget: int | None, session: str | None,
-               evidence_text: str = "") -> int:
-    import os
-    if os.environ.get("PORTER_NO_AGENT"):
-        _log.console_line("[porter] exp-accept: 草案需要 agent"
-                          "（PORTER_NO_AGENT=1）——rc 2")
-        return 2
-    target_os = Path(proj["target_os"])
-    draft_path = exp_dir / "acceptance.draft.json"
-    base_prompt = _draft_prompt(ws, exp_dir, proj, runner, manifest,
-                                mono_ledger, evidence_text)
-    total = int(budget or DRAFT_BUDGET_SEC)
-    used = 0.0
-    session_id = session
-    feedback = ""
-    for rnd in range(1, DRAFT_ROUNDS + 1):
-        _log.console_line(f"[porter] exp-accept: 草案第 {rnd}/"
-                          f"{DRAFT_ROUNDS} 轮（设计 → 静态核查）")
-        draft_path.unlink(missing_ok=True)      # 防脏读（上轮残留）
-        draft, quality_note = None, ""
-        for attempt in range(1, QUALITY_TRIES + 1):
-            remaining = total - int(used)
-            if remaining <= 0:
-                _log.console_line(f"[porter] exp-accept: 草案预算耗尽"
-                                  f"（session={session_id}）——可用 "
-                                  "--session 续跑，rc 1")
-                ledger["draft"] = {"rounds": rnd - 1, "session_id":
-                                   session_id, "budget_exhausted": True}
-                _save_ledger(exp_dir, ledger)
-                return 1
-            if rnd == 1 and attempt == 1:
-                message = base_prompt
-            elif attempt == 1:
-                message = feedback
-            else:
-                message = quality_note
-            stem = str(exp_dir / "logs" /
-                       f"DRAFT_r{rnd}_R{attempt}")
-            t0 = time.time()
-            rc, out = agent._opencode_json_runner(
-                message, workdir=target_os, log_stem=stem,
-                timeout_sec=min(remaining, _CALL_CAP_SEC),
-                session_id=session_id,
-                task={"phase": "exp-accept", "step": "draft", "attempt":
-                      rnd, "task_id": "exp-accept.draft"})
-            used += time.time() - t0
-            # 超时/失败也捞 session id（agent.py 捞取设计：被杀会话
-            # 仍可 --session 续接）
-            salvaged = (agent._parse_events(out) or {}).get("session_id")
-            if salvaged:
-                session_id = salvaged
-            if rc != 0:
-                ledger["draft"] = {"rounds": rnd, "session_id": session_id,
-                                   "provider_rc": rc}
-                _save_ledger(exp_dir, ledger)
-                _log.console_line(f"[porter] exp-accept: provider 会话终态"
-                                  f"失败 rc={rc}（session={session_id}"
-                                  "——诊断日志后可 --session 续跑）rc 1")
-                return 1
-            if session_id is None:
-                _log.console_line("[porter] exp-accept: 事件流无 session "
-                                  "id（检查 opencode 登录/版本）——rc 1")
-                ledger["draft"] = {"rounds": rnd, "session_id": None}
-                _save_ledger(exp_dir, ledger)
-                return 1
-            draft = _read_json(draft_path)
-            if draft is not None:
-                errs = validate_draft(draft, runner)
-                if not errs:
-                    break
-                quality_note = ("---\n\n## 上一次方案文件的校验缺陷（修订后"
-                                "重写整个文件）\n- "
-                                + "\n- ".join(errs[:12]))
-                draft = None
-            else:
-                quality_note = (f"---\n\n## 上一次输出的问题\n方案文件不可"
-                                f"读/未写：`{draft_path}`。把**完整**方案"
-                                "（裸 JSON）写到该文件。")
-        if draft is None:
-            feedback = quality_note
-            continue
-        # 静态证据核查 + 模板干装配
-        errs = check_cites(target_os, draft) + dry_assemble(
-            draft, runner, target_os, str(manifest.get("driver_home")))
-        if not errs:
-            doc, _iak = merge_frozen(draft, runner)
-            acc_path = exp_dir / "acceptance.json"
-            acc_path.write_text(json.dumps(doc, ensure_ascii=False,
-                                           indent=2) + "\n",
-                                encoding="utf-8")
-            _write_review(exp_dir, doc, runner)
-            ledger["draft"] = {"rounds": rnd, "session_id": session_id,
-                               "time": _now()}
-            _save_ledger(exp_dir, ledger)
-            _register_plan_gate(ws, acc_path)
-            _log.console_line(f"[porter] exp-accept: 草案就绪（冻结 "
-                              f"{sum(1 for c in doc['criteria'] if c['origin'] == 'frozen')}"
-                              f" + 提案 {sum(1 for c in doc['criteria'] if c['origin'] == 'proposed')}"
-                              f" 条判据）→ 评审摘要 {exp_dir / 'review.md'}"
-                              "——人审放行（exit 3）")
-            return 3
-        feedback = _rework_message(errs, stem)
-    from ..loop import gates as gates_mod
-    ledger["draft"] = {"rounds": DRAFT_ROUNDS, "session_id": session_id,
-                       "exhausted": True, "time": _now()}
-    _save_ledger(exp_dir, ledger)
-    return gates_mod.panic(ws, {
-        "id": GATE_FAIL_ID, "kind": "retry", "gate_type": "failure",
-        "phase": "exp-accept",
-        "question": (f"验收方案 {DRAFT_ROUNDS} 轮回炉仍未通过静态核查"
-                     "（schema/证据引用/模板装配）。各轮证据见 "
-                     "exp-accept/logs/DRAFT_*。人工诊断后可用 --session "
-                     f"续接（上次会话 {session_id}）或重跑 --draft。"),
-        "context_files": ["exp-accept/acceptance.draft.json"],
-        "answer_form": [
-            {"field": "note", "type": "text", "required": False,
-             "hint": "诊断笔记（如锚点漂移/正则缺陷）"}],
-    })
-
-
-# ---------- 放行处理 ----------
-
-def _approval_state(ws: Path, exp_dir: Path, ledger: dict) -> str:
-    """missing | draft | approved。approved 时冻结指纹入 ledger。"""
-    from ..loop import gates as gates_mod
-    acc_path = exp_dir / "acceptance.json"
-    doc = _read_json(acc_path)
-    if doc is None:
-        return "missing"
-    if doc.get("status") == "approved":
-        return "approved"
-    gates_mod.process_answered_gates(ws)
-    led = gates_mod.GateLedger(ws).load()
-    g = led.find(GATE_ID)
-    ok = bool(g and g.get("status") in ("applied", "resolved")
-              and str((g.get("answer") or {}).get("verdict", ""))
-              .lower() in ("approve", "release", "放行", "通过"))
-    if not ok or doc.get("status") != "draft":
-        return "draft"
-    #  belts-and-braces：作答指向的指纹须与当前文件一致（作答后文件
-    #  被改过 → 关口重置为待答，人重新审阅当前内容）
-    cur = _sha16(acc_path)
-    if g.get("artifact_sha") and cur != g.get("artifact_sha"):
-        _log.console_line("[porter] exp-accept: 作答后方案文件已变更"
-                          "（指纹不符）——关口重置为待答，请重新审阅"
-                          "表态 rc 3")
-        g.update({"status": "open", "artifact_sha": cur, "answer": None,
-                  "answered_by": None, "answered_at": None,
-                  "resolution": None})
-        led.save()
-        gates_mod.render_human_questions(ws)
-        return "draft"
-    sha = cur
-    doc["status"] = "approved"
-    doc["approved_time"] = _now()
-    acc_path.write_text(json.dumps(doc, ensure_ascii=False, indent=2)
-                        + "\n", encoding="utf-8")
-    # status 字段变更会改变文件——放行后指纹以 approved 态为准
-    ledger["approval"] = {"sha": _sha16(acc_path), "time": _now()}
-    gates_mod.resolve_applied(led, GATE_ID, "exp-accept 方案放行")
-    gates_mod.render_human_questions(ws)
-    _log.console_line("[porter] exp-accept: 方案已放行（指纹冻结）")
-    return "approved"
-
-
-# ---------- execute：脚手架 / 矩阵 / 修环 ----------
-
-def _apply_scaffold(ws: Path, exp_dir: Path, target_os: Path,
-                    acc: dict, ledger: dict) -> bool:
-    scaff = acc.get("scaffold") or {}
-    files = scaff.get("files") or []
-    if not files and not scaff.get("wiring_cmd"):
-        ledger["scaffold"] = {"applied": True, "files": [],
-                              "time": _now()}
-        return True
-    if (ledger.get("scaffold") or {}).get("applied"):
-        # 幂等：文件与冻结内容一致 → 跳过
-        drift = [f["path"] for f in files
-                 if not (target_os / f["path"]).exists()
-                 or (target_os / f["path"]).read_text(
-                     encoding="utf-8", errors="replace") != f["content"]]
-        if not drift:
-            return True
-        _log.console_line(f"[porter] exp-accept: 脚手架漂移 {drift}——"
-                          "按冻结内容重写")
-    for f in files:
-        p = target_os / f["path"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f["content"], encoding="utf-8")
-    if scaff.get("wiring_cmd"):
-        cmd = _subst(str(scaff["wiring_cmd"]), target_os, "", None)
-        rc, _out = probe_mod._run(
-            cmd, cwd=target_os,
-            env=probe_mod._base_env(target_os, {}),
-            timeout_sec=600,
-            log_path=exp_dir / "logs" / "scaffold_wiring.log")
-        if rc != 0:
-            _log.console_line(f"[porter] exp-accept: 脚手架接线失败 "
-                              f"rc={rc}（全文 {exp_dir / 'logs' / 'scaffold_wiring.log'}）"
-                              "——数据面缺陷，建议 --redraft，rc 1")
-            return False
-    ledger["scaffold"] = {"applied": True,
-                          "files": [f["path"] for f in files],
-                          "time": _now()}
-    try:
-        from ..common import vcs as _vcs
-        paths = [f["path"] for f in files] + \
-            list(scaff.get("wiring_paths") or [])
-        ledger["scaffold"]["commit"] = _vcs.commit_target(
-            ws, "exp-accept(scaffold): guest workload scaffolding",
-            paths=paths, phase="exp-accept") or []
-    except Exception as ex:
-        _log.console_line(f"[porter] exp-accept: 脚手架 commit 失败"
-                          f"（{ex!r}）——ledger 照记")
-    return True
-
-
-def _scaffold_drift(target_os: Path, acc: dict) -> list[str]:
-    return [f["path"] for f in (acc.get("scaffold") or {}).get("files") or []
-            if not (target_os / f["path"]).exists()
-            or (target_os / f["path"]).read_text(
-                encoding="utf-8", errors="replace") != f["content"]]
-
-
-def _restore_scaffold(target_os: Path, acc: dict) -> None:
-    for f in (acc.get("scaffold") or {}).get("files") or []:
-        p = target_os / f["path"]
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f["content"], encoding="utf-8")
-
-
-def _allowed_paths(manifest: dict) -> list[str]:
-    dh = str(manifest.get("driver_home") or "")
-    return [dh] + list(manifest.get("commit_paths") or [])
-
+# ---------- 范围守卫 ----------
 
 def _scope_offenders(target_os: Path, baseline: set[str],
-                     manifest: dict) -> list[str]:
-    def _allowed(p: str) -> bool:
+                     driver_home_rel: str, touched: list[str]) -> list[str]:
+    allowed = [driver_home_rel] + [t for t in touched if t]
+
+    def ok(p: str) -> bool:
         return any(p == a or p.startswith(a.rstrip("/") + "/")
-                   for a in _allowed_paths(manifest) if a)
+                   for a in allowed if a)
+
     return sorted(p for p in _mono._git_status(target_os) - baseline
-                  if not _allowed(p))
+                  if not ok(p))
 
 
-def _red_summary(judged: list[dict], results: dict) -> str:
-    lines = []
-    for j in judged:
-        if j.get("ok") is not False:
-            continue
-        r = results.get(j.get("boot")) or {}
-        lines.append(f"- {j['id']} [{j.get('layer')}/{j.get('boot')}] "
-                     f"{j.get('detail')}（日志快照 {r.get('snapshot', '—')}，"
-                     "自行 tail/grep）")
-    return "\n".join(lines)
+# ---------- 静态段（run_static 请求的执行体） ----------
 
+def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
+                 nums: tuple[int, ...], baseline: set[str],
+                 prefix: str) -> dict:
+    """探索期静态段：结构校验 + 范围守卫 + 逐节真实 invoke + 归档指针。"""
 
-def _diagnose_prompt(acc: dict, judged: list[dict], results: dict,
-                     manifest: dict, red_text: str, kb_face: str) -> str:
-    skill = agent.load_skill(SKILL_FIX)
-    return (f"{skill}\n\n---\n\n## 失败现场（本轮待解红项）\n{red_text}\n\n"
-            "## 判据定义（量尺，已冻结——改量尺须报 plan-defect）\n"
-            + "\n".join(f"- {c.get('id')}: layer={c.get('layer')} "
-                        f"boot={c.get('boot')} kind={c.get('kind')} "
-                        f"polarity={c.get('polarity')} "
-                        f"expr=`{c.get('expr')}`"
-                        for c in acc.get("criteria") or []
-                        if any(j.get("id") == c.get("id")
-                               and j.get("ok") is False for j in judged))
-            + "\n\n## 改动范围（硬约束）\n"
-            f"- 允许：驱动目录 `{manifest.get('driver_home')}` 与数据面"
-            f"登记的接线文件 {_allowed_paths(manifest)[1:] or '（无）'}\n"
-            "- 脚手架文件已冻结：漂移会被自动还原并把守卫失败反馈给你\n"
-            "- 数据面（判据/命令/脚本本身有错）→ 输出 action="
-            "plan-defect，勿硬修\n"
-            + (f"\n## 知识库目录\n{kb_face}\n" if kb_face else ""))
-
-
-def _run_diagnose(ws: Path, exp_dir: Path, proj: dict, runner: dict,
-                  manifest: dict, acc: dict, judged: list[dict],
-                  results: dict, ledger: dict,
-                  budget: int | None, session: str | None) -> tuple[str, dict]:
-    """修环：agent 修码（范围守卫）+ 静态段复跑受影响单元重判。
-    返回 (solved|parked|plan-defect|no-agent|failed, outcome)。"""
-    import os
-    target_os = Path(proj["target_os"])
-    if os.environ.get("PORTER_NO_AGENT"):
-        return "no-agent", {}
-    red_ids = [j["id"] for j in judged if j.get("ok") is False]
-    red_boots = sorted({j["boot"] for j in judged
-                        if j.get("ok") is False and j.get("boot")})
-    crit_by_id = {c.get("id"): c for c in acc.get("criteria") or []}
-    baseline = _mono._git_status(target_os)
-    kb_face = ""
-    try:
-        from ..bootstrap import kb as _kb
-        kb_face = _kb.kb_face(ws, ["failures", "pitfalls"]) or ""
-    except Exception:
-        pass
-
-    def _static() -> tuple[bool, str]:
-        problems: list[str] = []
-        drift = _scaffold_drift(target_os, acc)
-        if drift:
-            _restore_scaffold(target_os, acc)
-            problems.append("脚手架漂移已还原：" + "、".join(drift)
-                            + "（脚手架冻结，数据面问题走 plan-defect）")
-        offenders = _scope_offenders(target_os, baseline, manifest)
+    def _fn() -> tuple[bool, str]:
+        probs = _exec.structural_problems(ws, nums)
+        if probs:
+            return False, ("节文件对结构问题：\n- " + "\n- ".join(probs)
+                           + "\n——先补齐/修好文件再请求执行")
+        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
+                                     _exec.touched_paths(ws, nums))
         if offenders:
-            problems.append("改动越出白名单（driver_home ∪ 登记接线文件）："
-                            + "、".join(offenders))
-        if problems:
-            return False, "\n".join(problems)
-        sub_results = dict(results)
-        for bid in red_boots:
-            entry = next(b for b in acc["boots"] if b.get("id") == bid)
-            spec = _expand_unit(entry, runner, target_os,
-                                str(manifest.get("driver_home")))
-            sub_results[bid] = _run_unit(spec, exp_dir, target_os, runner)
-        sub_judged = judge_criteria(
-            [crit_by_id[i] for i in red_ids if i in crit_by_id],
-            sub_results)
-        red_left = [j for j in sub_judged if j["ok"] is False]
-        text = ("复跑受影响单元重判：红项 "
-                f"{len(red_ids) - len(red_left)}/{len(red_ids)} 转绿\n"
-                + _red_summary(sub_judged, sub_results))
-        return (not red_left), text
+            return False, ("改动越出白名单（driver_home ∪ 各节 JSON "
+                           "顶层 paths 并集）："
+                           + "、".join(offenders)
+                           + "——收回越界改动（git checkout -- <路径>）"
+                           "或在对应节 JSON 的 paths 里声明后重试")
+        records, _p = _exec.invoke_sections(ws, target_os, driver_home_rel,
+                                            nums, prefix)
+        lines = [f"外部执行完成：{len(records)} 节（输出已归档，"
+                 "自行 tail/grep 以下文件）"]
+        for n in sorted(records):
+            r = records[n]
+            lines.append(f"- §{n}: exit={r['rc']} {r['duration_sec']}s"
+                         f" 输出={r['output']}"
+                         + ("（兜底超时）" if r["timed_out"] else ""))
+            if r["status"] != "pass":
+                lines.append("  尾部摘录：\n"
+                             + "\n".join("  | " + ln for ln in
+                                         _exec._tail_of(r["output"]).splitlines()))
+        return True, "\n".join(lines)
 
-    prompt = _diagnose_prompt(acc, judged, results, manifest,
-                              _red_summary(judged, results), kb_face)
-    outcome = agent.run_agent_seq(
-        prompt, workdir=target_os,
-        log_stem=str(exp_dir / "logs" / "DIAG"),
-        static={"describe": "复跑受影响单元并重判（含脚手架漂移还原"
-                            "与改动范围守卫）", "fn": _static},
-        gen_schema={"status": "str", "circuit": "str", "action": "str",
-                    "evidence": "list", "summary": "str"},
-        final_static=True,
-        agent_budget_sec=int(budget or DIAG_BUDGET_SEC),
-        resume_session=session,
-        task={"phase": "exp-accept", "step": "diagnose",
-              "task_id": "exp-accept.diagnose"})
-    ledger.setdefault("diagnose", []).append({
-        "time": _now(), "red": red_ids,
-        "status": outcome.get("status"),
-        "session_id": outcome.get("session_id"),
-        "rounds": len(outcome.get("rounds") or []),
-        "agent_sec": outcome.get("total_agent_sec")})
-    _save_ledger(exp_dir, ledger)      # 修环历史即时落盘（续修依据）
-    parsed = outcome.get("parsed") or {}
-    action = str(parsed.get("action") or "")
-    if outcome.get("status") == "done" and \
-            parsed.get("status") != "blocked":
-        summary = str(parsed.get("summary") or "fix")[:80]
-        try:
-            from ..common import vcs as _vcs
-            _vcs.commit_target(
-                ws, f"exp-accept(fix): {summary}",
-                paths=_allowed_paths(manifest), phase="exp-accept")
-        except Exception as ex:
-            _log.console_line(f"[porter] exp-accept: 修码 commit 失败"
-                              f"（{ex!r}）——继续")
-        return "solved", outcome
-    if action == "plan-defect":
-        return "plan-defect", outcome
-    return "parked", outcome
+    return {"describe": "按 acceptance/ 节文件对真实执行并归档证据"
+                        "（编译/启动/差分试跑）",
+            "fn": _fn}
 
 
-def _park(exp_dir: Path, title: str, note: str) -> None:
-    p = exp_dir / "parking.md"
-    body = p.read_text(encoding="utf-8", errors="replace") if p.exists() \
-        else "# 泊车记录\n\n> 需要人工裁定/平台侧能力的事项。\n"
-    p.write_text(body + f"\n## {title} ({_now()})\n{note}\n",
-                 encoding="utf-8")
+# ---------- prompt ----------
+
+def _kb_face(ws: Path) -> str:
+    """知识库注入面——指针形式（2026-09-12 裁定：prompt 知识注入一律
+    路径指针，禁止无依据的 head-N 原文截断；与 goals/report/parking/
+    negatives 同模式，agent 自读全文）。缺席省略该域。"""
+    rows = []
+    for rel, what in (
+            ("knowledgebase/build/README.md", "构建域（构建命令与坑史）"),
+            ("knowledgebase/boot/README.md",
+             "启动域（boot 命令、成功/panic 特征与坑史）")):
+        if (ws / rel).exists():
+            rows.append(f"- 知识库·{what}，**先读**：`{ws / rel}`")
+    return "\n".join(rows) + "\n" if rows else ""
 
 
-def _write_report(ws: Path, exp_dir: Path, acc: dict, ledger: dict,
-                  units: dict, judged: list[dict],
-                  verdict: str | None) -> None:
-    by_layer: dict[str, list] = {}
-    for j in judged:
-        by_layer.setdefault(j.get("layer") or "?", []).append(j)
-    lines = ["# exp-accept 系统验收报告", "",
-             f"- 生成时间：{_now()}",
-             f"- 驱动身份：{acc.get('driver') or (ledger.get('identity') or '—')}",
-             f"- 结论：{'全绿（4 层通过）' if verdict == 'all-green' else (verdict or '未完成')}",
-             "", "## 四层判定", "", "| 层 | 判据数 | 通过 | 红 | 待定 |",
-             "|---|---|---|---|---|"]
-    for layer in CRIT_LAYERS:
-        js = by_layer.get(layer) or []
-        lines.append(f"| {layer} | {len(js)} "
-                     f"| {sum(1 for j in js if j.get('ok') is True)} "
-                     f"| {sum(1 for j in js if j.get('ok') is False)} "
-                     f"| {sum(1 for j in js if j.get('ok') is None)} |")
-    lines += ["", "## 执行单元", "",
-              "| 单元 | 来源 | rc | 健康 | 尝试 | 日志快照 |",
-              "|---|---|---|---|---|---|"]
-    for b in acc.get("boots") or []:
-        u = units.get(b.get("id")) or {}
-        if not u:
+def _boot_face(ws: Path) -> str:
+    """基线启动/执行事实注入面——指针形式（2026-09-12 裁定：runner.json
+    已从 accept 全链脱钩——退役方向定案；执行事实 agent 面 = runner.md
+    三部分手册 + mono gate 实跑日志。runner.md 由 accept 前置（exp-mono
+    全 pass）间接保证在场，指针不悬空）。"""
+    return (f"- 基线启动/编译执行事实（boot 命令、成功/panic 特征、"
+            f"坑史——**先读**）：`{ws / 'runner.md'}`（三部分手册："
+            "镜像编译/设备自启动/设备注入与交互/单元测试+执行记录）\n"
+            f"- 执行证据备查（mono gate 实跑输出）："
+            f"`{ws / 'exp-mono' / 'logs'}/`\n")
+
+
+def _mono_knowledge_face(ws: Path) -> str:
+    """mono 知识面指针（G4 接入，2026-09-12）：契约登记表 + API 映射
+    词典。指针形式（同 session 裁定：禁 head-N 截断）。两文件为 mono
+    时代快照、可能落后于树内代码——措辞显式"疑则以树内代码为准"，
+    防过时条目误导（这是注入契约知识的固有风险，与不注入的归因效率
+    损失相权衡后裁定接入）。缺席省略。"""
+    rows = []
+    c = ws / "exp-mono" / "contracts.md"
+    if c.exists():
+        rows.append(f"- 契约登记表（跨模块共享签名与行为纪律——改码前"
+                    f"**必查**；系 mono 快照，疑则以树内代码为准）：`{c}`")
+    m = ws / "exp-mono" / "mapping-notes.md"
+    if m.exists():
+        rows.append(f"- API 映射词典（Linux→目标 OS 映射参考，同上以树"
+                    f"内代码为准）：`{m}`")
+    return "\n".join(rows) + "\n" if rows else ""
+
+
+def _t1_prompt(ws: Path, proj: dict,
+               manifest: dict, extra: str) -> str:
+    """Tier1（§1-§4）提取机制——未定，留空（2026-09-12 用户裁定）。
+
+    设计讨论见 AGENTS_2.md（上 session 草案仅备忘、非承诺）。启用 =
+    实现 prompt + skill 后置 _T1_READY=True。
+    """
+    raise NotImplementedError("Tier1（§1-§4）机制未定——留空")
+
+
+def _inject_prompt(ws: Path, proj: dict,
+                   manifest: dict, extra: str) -> str:
+    skill = agent.load_skill(SKILL_INJECT)
+    acc = _exec.acceptance_dir(ws)
+    return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
+            f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
+            f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- 迁移终态：exp-mono 报告 `{ws / 'exp-mono' / 'report.md'}`；"
+            f"泊车 `{ws / 'exp-mono' / 'parking.md'}`；"
+            f"负结论（已排除死路）`{ws / 'exp-mono' / 'negatives.md'}`"
+            "（三者先读）\n"
+            f"- 迁移意图：`{ws / 'goals.md'}`\n"
+            + _boot_face(ws)
+            + _kb_face(ws)
+            + _mono_knowledge_face(ws)
+            + (extra or "")
+            + f"\n## 输出契约\n- 交付物：`{acc}` 下两对文件——"
+              "`5-<slug>.json`、`6-<slug>.json` 及各自的 `.check.py`"
+              "（§1-§4 归 Tier1 提取，不在你的任务内）。每对的 JSON 须含"
+              "按序命令+成功标准，契约见 SKILL。\n"
+              "- done JSON：`status` / `deliverable`（= acceptance 目录"
+              "绝对路径）/ `notes`。")
+
+
+def _e2e_prompt(ws: Path, proj: dict,
+                manifest: dict, extra: str) -> str:
+    skill = agent.load_skill(SKILL_E2E)
+    acc = _exec.acceptance_dir(ws)
+    inj5 = _exec.pair_json(ws, 5)
+    inj6 = _exec.pair_json(ws, 6)
+    return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
+            f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
+            f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- **已批注入/交互方案（§5/§6 节文件，事实基线，先读）**："
+              f"`{inj5}`、`{inj6}`\n"
+            f"- 迁移意图：`{ws / 'goals.md'}`；exp-mono 报告 "
+            f"`{ws / 'exp-mono' / 'report.md'}`\n"
+            + _boot_face(ws)
+            + _kb_face(ws)
+            + _mono_knowledge_face(ws)
+            + (extra or "")
+            + f"\n## 输出契约\n- 交付物：`{acc}` 下 `7-<slug>.json` + "
+              "`7-<slug>.check.py` 一对。JSON 须含按序命令+成功标准，"
+              "契约见 SKILL。\n"
+              "- done JSON：`status` / `deliverable`（= acceptance 目录"
+              "绝对路径）/ `notes`。")
+
+
+# ---------- 评审摘要 ----------
+
+def _write_review(ws: Path, exp_dir: Path, tier: str, nums: tuple[int, ...],
+                  records: dict, entry: dict) -> None:
+    """关口评审材料：各节 JSON+脚本全文 + invoke 记录 + commit/范围。"""
+    lines = [f"# accept {tier} 评审摘要", "",
+             f"- 生成时间：{entry.get('time')}",
+             f"- 节范围：{_TIER_TITLES[tier]}",
+             f"- 验证：{len(records)} 节真实 invoke 全绿（exit=0）",
+             f"- 验收期代码改动 commit：{entry.get('commits') or '（无）'}",
+             f"- 范围外变更（人判）：{entry.get('offenders') or '（无）'}",
+             ""]
+    for n in nums:
+        j = _exec.pair_json(ws, n)
+        if j is None:
             continue
-        lines.append(f"| {b.get('id')} | {b.get('origin')} "
-                     f"| {u.get('rc')} | {'绿' if u.get('green') else '红'} "
-                     f"| {u.get('attempts', 1)} | `{u.get('snapshot', '—')}` |")
-    lines += ["", "## 判据明细", "",
-              "| 判据 | 层 | 单元 | 来源 | 结果 | 说明 |", "|---|---|---|---|---|---|"]
-    for j in judged:
-        mark = "PASS" if j.get("ok") else ("PEND" if j.get("ok") is None
-                                           else "FAIL")
-        lines.append(f"| {j.get('id')} | {j.get('layer')} "
-                     f"| {j.get('boot')} | {j.get('origin')} | {mark} "
-                     f"| {j.get('detail')} |")
-    hist = ledger.get("diagnose") or []
-    if hist:
-        lines += ["", "## 修环历史", ""]
-        for h in hist:
-            lines.append(f"- {_h_line(h)}")
-    sc = ledger.get("scaffold") or {}
-    if sc.get("applied"):
-        ch = sc.get("commit") or []
-        lines += ["", "## 脚手架", "",
-                  f"- 文件：{sc.get('files')}",
-                  f"- commit：{ch[0][:10] if ch else '—'}"]
-    (exp_dir / "report.md").write_text("\n".join(lines) + "\n",
-                                       encoding="utf-8")
+        c = j.with_name(j.stem + ".check.py")
+        r = records.get(n) or {}
+        lines += [f"## §{n}（{j.stem}）", "",
+                  f"- invoke：exit={r.get('rc')}，输出归档 "
+                  f"`{r.get('output')}`（{r.get('duration_sec')}s）", "",
+                  "### 标准（JSON）", "", "```json",
+                  j.read_text(encoding="utf-8", errors="replace").rstrip(),
+                  "```", "", "### 消费脚本（check.py）", "", "```python",
+                  c.read_text(encoding="utf-8", errors="replace").rstrip(),
+                  "```", ""]
+    gate_id = _GATE_OF[tier]
+    lines += ["## 放行方式", "",
+              "answers.md 追加：", "", "```", f"## @{gate_id}",
+              "verdict: approve", "```", "",
+              "reject 时附 `note:` 行——意见会注入下一轮重做"
+              "（`--tier " + tier + "`）。"]
+    (exp_dir / f"{tier}-review.md").write_text("\n".join(lines) + "\n",
+                                               encoding="utf-8")
 
 
-def _h_line(h: dict) -> str:
-    ch = h.get("commit")
-    return (f"{h.get('time')} 红 {len(h.get('red') or [])} 项 → "
-            f"{h.get('status')}（agent {h.get('agent_sec')}s，"
-            f"session {h.get('session_id')}）")
+# ---------- 关卡执行（一段 tier 的完整编排） ----------
+
+_GATE_OF = {"t1": GATE_T1, "inject": GATE_INJECT, "e2e": GATE_PLAN}
+_PREFIX_OF = {"t1": "T1", "inject": "T2", "e2e": "T3"}
+
+
+def _prompt_fn(tier: str):
+    if tier == "t1":
+        return _t1_prompt       # 机制未定：NotImplementedError（_T1_READY 守卫）
+    return _inject_prompt if tier == "inject" else _e2e_prompt
+
+
+def _run_tier(ws: Path, exp_dir: Path, proj: dict,
+              manifest: dict, ledger: dict, tier: str, budget: int,
+              session: str | None, extra: str) -> int:
+    """tier ∈ t1|inject|e2e。返回 3=关口待答（已登记）/1=失败或泊车/2=缺 agent。"""
+    import os
+    if os.environ.get("PORTER_NO_AGENT"):
+        _log.console_line("[porter] accept: 需要 agent（PORTER_NO_AGENT=1）"
+                          "——rc 2")
+        return 2
+    target_os = Path(proj["target_os"])
+    driver_home_rel = str(manifest["driver_home"])
+    nums = _exec.SECTION_TIER[tier]
+    prefix = _PREFIX_OF[tier]
+    gate_id = _GATE_OF[tier]
+    prompt_fn = _prompt_fn(tier)
+    baseline = _mono._git_status(target_os)
+    static = _make_static(ws, target_os, driver_home_rel, nums,
+                          baseline, prefix)
+    prompt = prompt_fn(ws, proj, manifest, extra)
+    session_id = session
+    attempts = 0
+    problems: list[str] = []
+    outcome: dict = {}
+    while True:
+        attempts += 1
+        outcome = agent.run_agent_seq(
+            prompt, workdir=target_os,
+            log_stem=str(exp_dir / "logs" / f"{prefix}"),
+            static=static,
+            gen_schema={"status": "str", "deliverable": "str",
+                        "notes": "str"},
+            final_static=False,
+            agent_budget_sec=int(budget),
+            resume_session=session_id,
+            task={"phase": "accept", "step": tier, "task_id":
+                  f"accept.{tier}"})
+        session_id = outcome.get("session_id") or session_id
+        parsed = outcome.get("parsed") or {}
+        if outcome.get("status") != "done" or \
+                parsed.get("status") == "blocked":
+            break
+        problems = _exec.structural_problems(ws, nums)
+        if not problems:
+            break
+        if attempts > VERIFY_RETRIES:
+            break
+        _log.console_line(f"[porter] accept: {tier} 节文件结构校验未过"
+                          f"（第 {attempts} 次）——同 session 回灌修")
+        prompt = ("## 节文件结构校验未通过\n"
+                  + "\n".join(f"- {p}" for p in problems)
+                  + "\n请修复上述节文件（只修这些问题，不要重做已完成的"
+                  "工作），然后按运行协议重新输出 done JSON。")
+    parsed = outcome.get("parsed") or {}
+    blocked = parsed.get("status") == "blocked"
+    ok = (not problems and outcome.get("status") == "done" and not blocked)
+    entry = {"status": "pass" if ok else ("blocked" if blocked else "invalid"),
+             "session_id": session_id,
+             "seq_status": outcome.get("status"),
+             "agent_sec": outcome.get("total_agent_sec"),
+             "validate_attempts": attempts,
+             "problems": problems if not ok else [],
+             "notes": str(parsed.get("notes", ""))[:400],
+             "time": _now()}
+    ledger.setdefault("tiers", {})[tier] = entry
+    _save_ledger(exp_dir, ledger)
+    if not ok:
+        if blocked:
+            _log.console_line(f"[porter] accept: {tier} 被报 blocked："
+                              f"{entry['notes']}——停车 rc 1")
+        else:
+            _log.console_line(f"[porter] accept: {tier} 未通过"
+                              f"（{problems[:2] or outcome.get('status')}）"
+                              f"——rc 1；session={session_id}，可 --session "
+                              "续接或 --tier 重跑")
+        return 1
+
+    # 全量终验：逐节真实 invoke（只有跑通过的进标准）
+    try:
+        records, fv_problems = _exec.invoke_sections(
+            ws, target_os, driver_home_rel, nums, f"{prefix}FV")
+    except Exception as ex:            # 执行异常按终验失败处理
+        records, fv_problems = {}, [f"全量终验异常：{ex!r}"]
+    if fv_problems:
+        entry.update(status="unverified", problems=fv_problems)
+        _save_ledger(exp_dir, ledger)
+        _log.console_line(f"[porter] accept: {tier} 全量终验未过——"
+                          "节标准未全部真实执行通过：\n- "
+                          + "\n- ".join(fv_problems[:6])
+                          + f"\n修复后重跑（--tier {tier} --session "
+                          f"{session_id} 续接）rc 1")
+        return 1
+    entry["verify"] = {str(n): {"rc": r["rc"], "status": r["status"],
+                                "output": r["output"],
+                                "duration_sec": r["duration_sec"]}
+                       for n, r in records.items()}
+    # 验证绿 → 目标树改动 commit（agent 的代码/脚手架落地留痕）
+    try:
+        touched = _exec.touched_paths(ws, nums)
+        changed = sorted(_mono._git_status(target_os) - baseline)
+        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
+                                     touched)
+        allowed_changed = [p for p in changed
+                           if p == driver_home_rel
+                           or p.startswith(driver_home_rel.rstrip("/") + "/")
+                           or p in touched]
+        commits = _vcs.commit_target(
+            ws, f"accept({tier}): verified — "
+            f"{len(records)} sections green",
+            paths=allowed_changed or None, phase="accept") or []
+        entry["commits"] = commits
+        entry["offenders"] = offenders
+    except Exception as ex:                     # commit 失败不阻断关口
+        entry["commit_error"] = repr(ex)
+    _save_ledger(exp_dir, ledger)
+    _write_review(ws, exp_dir, tier, nums, records, entry)
+    arts = []
+    for n in nums:
+        j = _exec.pair_json(ws, n)
+        if j is not None:
+            arts += [j, j.with_name(j.stem + ".check.py")]
+    _gate.register_gate(
+        ws, gate_id,
+        question=(f"验收标准 {_TIER_TITLES[tier]} 审批：逐节过目评审摘要"
+                  "——JSON 标准、消费脚本、invoke 验证记录、代码改动 "
+                  "commit。批准绑定全部节文件对联合指纹。"),
+        context_files=[str((exp_dir / f"{tier}-review.md").relative_to(ws))]
+        + [str(a.relative_to(ws)) for a in arts],
+        artifact_path=arts)
+    _log.console_line(f"[porter] accept: {tier} 节文件就绪（{len(records)} "
+                      f"节 invoke 全绿，commit "
+                      f"{len(entry.get('commits') or [])}）→ 评审摘要 "
+                      f"{exp_dir / (tier + '-review.md')}——人审放行"
+                      "（exit 3）")
+    return 3
 
 
 def _save_ledger(exp_dir: Path, ledger: dict) -> None:
@@ -1196,237 +424,511 @@ def _save_ledger(exp_dir: Path, ledger: dict) -> None:
         encoding="utf-8")
 
 
-def _run_execute(ws: Path, exp_dir: Path, proj: dict, runner: dict,
-                 manifest: dict, acc: dict, ledger: dict,
-                 budget: int | None, session: str | None) -> int:
-    target_os = Path(proj["target_os"])
-    driver_home_rel = str(manifest.get("driver_home"))
-    # 指纹核验（approved 态）
-    cur = _sha16(exp_dir / "acceptance.json")
-    if cur != (ledger.get("approval") or {}).get("sha"):
-        _log.console_line("[porter] exp-accept: acceptance.json 与放行"
-                          "指纹不符（方案被改过？）——须重新人审：把 "
-                          "status 改回 draft 后重跑放行，或 --redraft，"
-                          "rc 2")
-        return 2
-    if not _apply_scaffold(ws, exp_dir, target_os, acc, ledger):
-        return 1
+# ---------- 执行相位（--execute：agent session 循环 + 机器阶梯） ----------
+
+def _record_execute(exp_dir: Path, ledger: dict, records: dict,
+                    tag: str) -> None:
+    """阶梯记录写入 ledger（逐节最新实况；静态段/终验共用）。"""
+    ex = ledger.setdefault("execute", {})
+    secs = ex.setdefault("sections", {})
+    for n, r in records.items():
+        secs[str(n)] = {"status": r.get("status"), "rc": r.get("rc"),
+                        "output": r.get("output") or "",
+                        "duration_sec": r.get("duration_sec"),
+                        "tag": tag, "time": _now()}
     _save_ledger(exp_dir, ledger)
-    criteria = acc.get("criteria") or []
-    prev_head = None
-    while True:
-        head = _tree_head(target_os)
-        # 执行序：L1 → L3 裸/注入 → L4 模板单元 →（无红才）L2 殿后
-        order = ["B_build", "B_bare", "B_inject"] + \
-            [b["id"] for b in acc.get("boots") or []
-             if b.get("origin") == "proposed"] + ["B_unit"]
-        results: dict = {}
-        units = ledger.setdefault("units", {})
-        red_seen = False
-        for bid in order:
-            entry = next((b for b in acc.get("boots") or []
-                          if b.get("id") == bid), None)
-            if entry is None:
-                continue
-            if bid == "B_unit" and red_seen:
-                _log.console_line("[porter] exp-accept: 已有红项——"
-                                  "L2 全量单测本轮跳过（修好后再跑）")
-                break
-            cached = units.get(bid) or {}
-            if cached.get("green") and cached.get("tree_head") == head:
-                _log.console_line(f"[porter] exp-accept: {bid} 已绿且"
-                                  "树未变——复用缓存结果")
-                results[bid] = {"rc": cached.get("rc"),
-                                "log": _read_log(cached.get("snapshot")),
-                                "log_state": cached.get("log_state"),
-                                "green": True,
-                                "detail": cached.get("detail"),
-                                "snapshot": cached.get("snapshot"),
-                                "reused": True}
-            else:
-                _log.console_line(f"[porter] exp-accept: 执行单元 {bid}")
-                spec = _expand_unit(entry, runner, target_os,
-                                    driver_home_rel)
-                res = _run_unit(spec, exp_dir, target_os, runner)
-                rec = {k: v for k, v in res.items() if k != "log"}
-                rec.update(tree_head=head, time=_now())
-                units[bid] = rec
-                _save_ledger(exp_dir, ledger)
-                results[bid] = res
-            judged = judge_criteria(criteria, results)
-            if any(j.get("ok") is False for j in judged):
-                red_seen = True
-        judged = judge_criteria(criteria, results)
-        ledger["criteria"] = {j["id"]: {"ok": j["ok"],
-                                        "detail": j["detail"]}
-                              for j in judged}
+
+
+def _ladder_lines(records: dict) -> list[str]:
+    lines = []
+    for n in sorted(records):
+        r = records[n]
+        if r.get("status") == "skipped":
+            lines.append(f"- §{n}: 未跑（{r.get('reason')}）")
+            continue
+        lines.append(f"- §{n}: exit={r.get('rc')} "
+                     f"{r.get('duration_sec', 0)}s 输出={r.get('output')}"
+                     + ("（兜底超时）" if r.get("timed_out") else ""))
+        if r.get("status") != "pass":
+            tail = _exec._tail_of(r.get("output") or "")
+            if tail:
+                lines.append("  尾部摘录：\n"
+                             + "\n".join("  | " + ln
+                                         for ln in tail.splitlines()))
+    return lines
+
+
+def _make_exec_static(ws: Path, exp_dir: Path, target_os: Path,
+                      driver_home_rel: str, ledger: dict,
+                      baseline: set[str]) -> dict:
+    """执行期静态段：指纹复核 + 范围守卫 + invoke_ladder + 回灌。"""
+    import itertools
+    counter = itertools.count(1)
+
+    def _fn() -> tuple[bool, str]:
+        probs = _exec.fingerprint_problems(ws, ledger.get("acceptance")
+                                           or {})
+        if probs:
+            return False, ("标准文件指纹不符（标准在执行期被改动）：\n- "
+                           + "\n- ".join(probs)
+                           + "\n——标准只读：恢复原内容；若你认为标准本身"
+                           "有错，按 blocked + criteria-defect 上报，"
+                           "不要改它")
+        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
+                                     _exec.touched_paths(ws,
+                                                         range(1, 8)))
+        if offenders:
+            return False, ("改动越出白名单（driver_home ∪ 各节 JSON "
+                           "顶层 paths 并集）："
+                           + "、".join(offenders)
+                           + "——收回越界改动（git checkout -- <路径>）"
+                           "或在对应节 JSON 的 paths 里声明（标准文件"
+                           "本身不许改，声明须在设计期完成）")
+        tag = f"EXEC{next(counter)}"
+        records, ladder_probs = _exec.invoke_ladder(ws, target_os,
+                                                    driver_home_rel, tag)
+        _record_execute(exp_dir, ledger, records, tag)
+        lines = [f"阶梯执行完成（tag={tag}）："] + _ladder_lines(records)
+        if ladder_probs:
+            lines.append("阶梯未全绿——按归因修复后再次请求执行。")
+        else:
+            lines.append("阶梯全绿——验收可收敛，请输出 done JSON。")
+        return True, "\n".join(lines)
+
+    return {"describe": "按序执行验收阶梯（§1→§7，首错即停）并归档证据",
+            "fn": _fn}
+
+
+def _execute_prompt(ws: Path, proj: dict, manifest: dict,
+                    records: dict) -> str:
+    skill = agent.load_skill(SKILL_EXECUTE)
+    first_red = next((n for n in sorted(records)
+                      if records[n].get("status") not in ("pass",
+                                                          "skipped")),
+                     None)
+    head = (f"当前首红节：§{first_red}（其前各节本轮已过）"
+            if first_red else "当前无红节（复验）")
+    return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
+            f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
+            f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- 验收标准（**只读**，指纹冻结）：`{_exec.acceptance_dir(ws)}`"
+            "（七节 JSON+check.py 对；判定语义自读各节文件）\n"
+            f"- {head}\n"
+            f"- 阶梯实况（基线/最近一轮，输出已归档自行读）：\n"
+            + "\n".join("  " + ln for ln in _ladder_lines(records)) + "\n"
+            f"- 迁移终态：exp-mono 报告 `{ws / 'exp-mono' / 'report.md'}`；"
+            f"泊车 `{ws / 'exp-mono' / 'parking.md'}`；"
+            f"负结论 `{ws / 'exp-mono' / 'negatives.md'}`\n"
+            f"- 迁移意图：`{ws / 'goals.md'}`\n"
+            + _mono_knowledge_face(ws)
+            + f"- 修复知识记录：修完在 `{ws / 'exp-accept' / 'fixes.md'}` "
+              "追加一节（归因/改了什么/为何预期转绿/死路教训，见 SKILL"
+              " 纪律；供后续沉淀 knowledgebase）\n"
+            + f"\n## 输出契约\n- 修复完成后输出 done JSON：`status` / "
+              "`notes`（≤200 字：归因、改了什么、为何预期转绿）。\n"
+              "- blocked 时：`status: blocked`，notes 说清卡点，且首行"
+              "按结论打标记：**标准本身有错** → `criteria-defect:` 并附"
+              "判据定义 vs 实测对照（人工裁决标准修订）；**平台缺口**"
+              "（断点在目标 OS 侧、且在可改范围 driver_home ∪ paths 之外）"
+              " → `platform-gap:` 并附缺口位置与建议（人工裁决处置）。")
+
+
+def _write_run_report(ws: Path, exp_dir: Path, ledger: dict) -> None:
+    """执行相位 run report（机器渲染，判定事实源=invoke 记录）。"""
+    ex = ledger.get("execute") or {}
+    secs = ex.get("sections") or {}
+    lines = ["# accept 执行相位 run report", "",
+             f"- 终态：`{ex.get('status')}`（{ex.get('time', '')}）",
+             f"- session：`{ex.get('session_id')}`；agent 段时长 "
+             f"{ex.get('agent_sec')}s",
+             f"- 代码改动 commit：{ex.get('commits') or '（无）'}",
+             f"- 范围外变更（人判）：{ex.get('offenders') or '（无）'}",
+             "", "## 阶梯实况（各节最新 invoke 记录）", ""]
+    for n in _exec.ALL_SECTIONS:
+        r = secs.get(str(n)) or {}
+        if not r:
+            lines.append(f"- §{n}:（无记录）")
+            continue
+        if r.get("status") == "skipped":
+            lines.append(f"- §{n}: 未跑（{r.get('reason')}）")
+        else:
+            lines.append(f"- §{n}: **{r.get('status')}** exit="
+                         f"{r.get('rc')}（tag={r.get('tag')}）输出归档 "
+                         f"`{r.get('output')}`")
+    if ex.get("problems"):
+        lines += ["", "## 未决问题", ""]
+        lines += [f"- {p}" for p in ex["problems"][:8]]
+    (exp_dir / "run-report.md").write_text("\n".join(lines) + "\n",
+                                           encoding="utf-8")
+
+
+def _write_panic(exp_dir: Path, ledger: dict, notes: str,
+                 kind: str = "standard") -> None:
+    """agent 上报争议升级报告（人工介入入口）。kind ∈ standard|platform。
+
+    - standard（criteria-defect）：agent 裁定验收标准本身有错；
+    - platform（platform-gap）：agent 裁定断点在目标 OS 侧、且在可改
+      范围（driver_home ∪ paths）之外——平台缺口，同样须人工裁决。
+    """
+    ex = ledger.get("execute") or {}
+    secs = ex.get("sections") or {}
+    title = {"standard": "标准争议，人工介入",
+             "platform": "平台缺口，人工介入"}.get(kind, "争议，人工介入")
+    lines = [f"# accept 执行相位 PANIC —— {title}", ""]
+    if kind == "standard":
+        lines += ["> agent 裁定验收标准本身有错（criteria-defect）。标准在"
+                  "执行期只读（指纹冻结），此争议只能人工裁决。", ""]
+    else:
+        lines += ["> agent 裁定断点在目标 OS 侧且在其可改范围"
+                  "（driver_home ∪ 各节 paths）之外（platform-gap）。"
+                  "缺口无法在修环内合法闭合，只能人工裁决。", ""]
+    lines += ["## 阶梯实况（各节最新 invoke 记录）", ""]
+    for n in _exec.ALL_SECTIONS:
+        r = secs.get(str(n)) or {}
+        if r:
+            lines.append(f"- §{n}: {r.get('status')} exit={r.get('rc')}"
+                         f" 输出={r.get('output')}")
+    lines += ["", "## agent 论证（" +
+              ("criteria-defect" if kind == "standard" else "platform-gap")
+              + "）", "", "```",
+              notes.strip() or "（空）", "```", ""]
+    if kind == "standard":
+        lines += ["## 人工选项", "",
+                  "1. **认同**：修订标准——`porter accept --tier "
+                  "<inject|e2e>` 重做涉事节（reject 意见可写进关口），"
+                  "关口重审放行后重新 `--execute`；",
+                  "2. **否决**：`porter accept --execute --session "
+                  f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
+                  "按归因继续修复（最新阶梯实况会随 prompt 重注入）。"]
+    else:
+        lines += ["## 人工选项", "",
+                  "1. **认同缺口**，人工处置（三选）：",
+                  "   - 平台侧另行修复（driver_home 之外的目标树改动），"
+                  "完成后重新 `--execute`；",
+                  "   - 调整验收标准（`--tier` 重做涉事节 + 关口重审，或"
+                  "手工修订节文件对后重新登记索引）；",
+                  "   - 扩大允许改动范围（修订涉事节 JSON 顶层 paths 后"
+                  "重走人审）。",
+                  "2. **否决**：`porter accept --execute --session "
+                  f"{ex.get('session_id') or '<session-id>'}` 续接，令其"
+                  "按归因继续修复（最新阶梯实况会随 prompt 重注入）。"]
+    (exp_dir / "execute-panic.md").write_text("\n".join(lines) + "\n",
+                                               encoding="utf-8")
+
+
+def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
+                 ledger: dict, budget: int,
+                 session: str | None) -> int:
+    """执行相位：基线阶梯 → agent session 循环（静态段=阶梯）→ 终验。
+
+    终态 rc：0=pass / 1=interrupted|parked|panic|unverified|failed /
+    2=前置（索引缺失、指纹漂移、缺 agent）。
+    """
+    import os
+    if os.environ.get("PORTER_NO_AGENT"):
+        _log.console_line("[porter] accept: 需要 agent（PORTER_NO_AGENT=1）"
+                          "——rc 2")
+        return 2
+    target_os = Path(proj["target_os"])
+    driver_home_rel = str(manifest["driver_home"])
+    idx = ledger.get("acceptance") or {}
+    if not idx.get("sections"):
+        _log.console_line("[porter] accept: 七节索引缺失——先完成标准制定"
+                          "（双关口放行后索引自动登记）rc 2")
+        return 2
+    fprobs = _exec.fingerprint_problems(ws, idx)
+    if fprobs:
+        unbound = {s.get("section") for s in idx["sections"]
+                   if s.get("status") != "bound"}
+        t1hint = ("\n（§1-§4 未绑定属 Tier1——机制未实现，--execute 暂不可用）"
+                  if unbound & {1, 2, 3, 4} else "")
+        _log.console_line("[porter] accept: 标准未齐备/指纹漂移——执行前"
+                          "标准须七节齐备且未被改动：\n- "
+                          + "\n- ".join(fprobs) + t1hint + "\nrc 2")
+        return 2
+    ex = ledger.setdefault("execute", {})
+    ex["status"] = "running"
+    _save_ledger(exp_dir, ledger)
+    baseline = _mono._git_status(target_os)
+
+    # 基线阶梯（零 agent 入口：全绿即验收复验通过）
+    records0, ladder0 = _exec.invoke_ladder(ws, target_os, driver_home_rel,
+                                            "EXEC0")
+    _record_execute(exp_dir, ledger, records0, "EXEC0")
+    if not ladder0:
+        ex.update(status="pass", zero_agent=True, time=_now(),
+                  session_id=None, agent_sec=0)
         _save_ledger(exp_dir, ledger)
-        reds = [j for j in judged if j.get("ok") is False]
-        for j in judged:
-            mark = "PASS" if j["ok"] else ("PEND" if j["ok"] is None
-                                           else "FAIL")
-            _log.console_line(f"[porter] exp-accept: {str(j.get('id')):<44} "
-                              f"{mark}  {j.get('detail', '')[:80]}")
-        if not reds and all((units.get(b) or {}).get("green")
-                            for b in results):
-            ledger["verdict"] = "all-green"
+        _write_run_report(ws, exp_dir, ledger)
+        _log.console_line("[porter] accept: 基线阶梯全绿（7/7）——验收"
+                          "复验通过，零 agent——rc 0")
+        return 0
+    _log.console_line("[porter] accept: 基线阶梯有红——进入修环循环")
+
+    static = _make_exec_static(ws, exp_dir, target_os, driver_home_rel,
+                               ledger, baseline)
+    prompt = _execute_prompt(ws, proj, manifest, records0)
+    outcome = agent.run_agent_seq(
+        prompt, workdir=target_os,
+        log_stem=str(exp_dir / "logs" / "EXE"),
+        static=static,
+        gen_schema={"status": "str", "notes": "str"},
+        final_static=True,
+        agent_budget_sec=int(budget),
+        resume_session=session,
+        task={"phase": "accept", "step": "execute", "task_id":
+              "accept.execute"})
+    sid = outcome.get("session_id") or session
+    ex.update(session_id=sid, agent_sec=outcome.get("total_agent_sec"),
+              seq_status=outcome.get("status"))
+    parsed = outcome.get("parsed") or {}
+
+    if outcome.get("status") != "done":
+        st = {"budget-exhausted": "interrupted",
+              "stalled": "parked"}.get(outcome.get("status"), "failed")
+        ex.update(status=st, time=_now())
+        _save_ledger(exp_dir, ledger)
+        _write_run_report(ws, exp_dir, ledger)
+        hint = (f"--session {sid} 续接" if st == "interrupted"
+                else "人工检视后可 --session 续接或调整")
+        _log.console_line(f"[porter] accept: 执行相位 {st}"
+                          f"（seq={outcome.get('status')}）——{hint} rc 1")
+        return 1
+    if parsed.get("status") == "blocked":
+        notes = str(parsed.get("notes", ""))
+        flat = notes.strip().lower()
+        if flat.startswith("criteria-defect"):
+            ex.update(status="panic", panic_kind="standard",
+                      panic_notes=notes[:4000], time=_now())
             _save_ledger(exp_dir, ledger)
-            _write_report(ws, exp_dir, acc, ledger, units, judged,
-                          "all-green")
-            _log.console_line("[porter] exp-accept: 4 层全绿——验收通过")
-            return 0
-        if not reds:
-            # 有单元未跑（如 B_unit 被跳过）但无红——不应发生，防御
-            _log.console_line("[porter] exp-accept: 存在未执行单元——"
-                              "继续执行序")
-            reds = [{"id": "(pending)"}]
-        if prev_head is not None and head == prev_head:
-            _park(exp_dir, "修环无进展",
-                  "修环后树头未变且仍有红项——诊断未产生可验证修复。"
-                  f"红项：{'、'.join(j['id'] for j in reds)}")
-            _write_report(ws, exp_dir, acc, ledger, units, judged, None)
+            _write_panic(exp_dir, ledger, notes, kind="standard")
+            _write_run_report(ws, exp_dir, ledger)
+            _log.console_line(f"[porter] accept: 执行相位 PANIC——agent "
+                              "裁定标准有错（criteria-defect），升级报告 "
+                              f"{exp_dir / 'execute-panic.md'}——人工"
+                              "介入 rc 1")
             return 1
-        _log.console_line(f"[porter] exp-accept: 红项 {len(reds)} 个——"
-                          "进入自动修环")
-        state, diag_out = _run_diagnose(ws, exp_dir, proj, runner,
-                                        manifest, acc, judged, results,
-                                        ledger, budget, session)
-        session = None                # 会话只续接首轮
-        diag_sid = diag_out.get("session_id") if diag_out else None
-        if state == "plan-defect":
-            _park(exp_dir, "数据面缺陷（待 redraft）",
-                  "修环判定失败根因在验收方案数据面（判据/命令/脚手架"
-                  "本身）——人工用 --redraft 修订方案并重新人审。")
-            _write_report(ws, exp_dir, acc, ledger, units, judged, None)
+        if flat.startswith("platform-gap"):
+            ex.update(status="panic", panic_kind="platform",
+                      panic_notes=notes[:4000], time=_now())
+            _save_ledger(exp_dir, ledger)
+            _write_panic(exp_dir, ledger, notes, kind="platform")
+            _write_run_report(ws, exp_dir, ledger)
+            _log.console_line(f"[porter] accept: 执行相位 PANIC——agent "
+                              "裁定平台缺口（platform-gap，可改范围之外），"
+                              f"升级报告 {exp_dir / 'execute-panic.md'}——"
+                              "人工介入 rc 1")
             return 1
-        if state != "solved":
-            _park(exp_dir, "修环未解",
-                  f"自动修环终态 {state}。红项："
-                  f"{'、'.join(j['id'] for j in reds)}；详情见 "
-                  "exp-accept/logs/DIAG*。"
-                  + (f"人工诊断后可 --diagnose --session {diag_sid} 续修。"
-                     if diag_sid else "人工诊断后 --diagnose 续修。"))
-            _write_report(ws, exp_dir, acc, ledger, units, judged, None)
-            return 1
-        prev_head = head
+        ex.update(status="parked", blocked_notes=notes[:2000], time=_now())
+        _save_ledger(exp_dir, ledger)
+        _write_run_report(ws, exp_dir, ledger)
+        _log.console_line(f"[porter] accept: 执行相位泊车（blocked："
+                          f"{notes[:120]}）——rc 1")
+        return 1
+
+    # done —— 权威终验（机器再跑一次全阶梯；只有跑通过的才算）
+    recordsF, ladderF = _exec.invoke_ladder(ws, target_os, driver_home_rel,
+                                            "EXECEnd")
+    _record_execute(exp_dir, ledger, recordsF, "EXECEnd")
+    if ladderF:
+        ex.update(status="unverified", problems=ladderF, time=_now())
+        _save_ledger(exp_dir, ledger)
+        _write_run_report(ws, exp_dir, ledger)
+        _log.console_line("[porter] accept: 终验阶梯未全绿——done 不算数"
+                          f"（--execute --session {sid} 续接修）rc 1")
+        return 1
+
+    # 全绿 → commit + 报告
+    try:
+        touched = _exec.touched_paths(ws, range(1, 8))
+        changed = sorted(_mono._git_status(target_os) - baseline)
+        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
+                                     touched)
+        allowed = [p for p in changed
+                   if p == driver_home_rel
+                   or p.startswith(driver_home_rel.rstrip("/") + "/")
+                   or p in touched]
+        commits = _vcs.commit_target(
+            ws, "accept(execute): ladder 7/7 green",
+            paths=allowed or None, phase="accept") or []
+        ex.update(commits=commits, offenders=offenders)
+    except Exception as exn:                     # commit 失败不阻断终态
+        ex["commit_error"] = repr(exn)
+    ex.update(status="pass", time=_now())
+    _save_ledger(exp_dir, ledger)
+    _write_run_report(ws, exp_dir, ledger)
+    _log.console_line("[porter] accept: 执行相位 PASS——阶梯 7/7 全绿，"
+                      f"报告 {exp_dir / 'run-report.md'}——rc 0")
+    return 0
+
+
+# ---------- 七节索引（双批后） ----------
+
+def _register_index(ws: Path, exp_dir: Path, ledger: dict) -> dict:
+    d = _exec.acceptance_dir(ws)
+    sections = []
+    for n in _exec.ALL_SECTIONS:
+        ms = sorted(d.glob(f"{n}-*.json"))
+        if len(ms) != 1:
+            sections.append({"section": n, "status": "missing"})
+            continue
+        j = ms[0]
+        c = j.with_name(j.stem + ".check.py")
+        sections.append({"section": n, "status": "bound",
+                         "json": str(j.relative_to(ws)),
+                         "check": str(c.relative_to(ws)),
+                         "sha16": _gate.sha16_file(j),
+                         "check_sha16": _gate.sha16_file(c)})
+    idx = {"sections": sections, "time": _now()}
+    ledger["acceptance"] = idx
+    _save_ledger(exp_dir, ledger)
+    return idx
+
+
+def _tier_rerun_needed(ws: Path, ledger: dict, tier: str) -> bool:
+    nums = _exec.SECTION_TIER[tier]
+    if _exec.structural_problems(ws, nums):
+        return True
+    return (ledger.get("tiers", {}).get(tier, {})
+            .get("status") in ("invalid", "unverified"))
 
 
 # ---------- 主入口 ----------
 
-def run_exp_accept(ws: Path, mode: str = "resume",
-                   budget: int | None = None,
-                   session: str | None = None) -> int:
+def run_accept(ws: Path, tier: str | None = None,
+               budget: int | None = None,
+               session: str | None = None,
+               execute: bool = False) -> int:
     ws = Path(ws).resolve()
-    needs = ["project.json", "runner.json",
-             "P2/reports/scaffold_manifest.json",
-             "exp-mono/ledger.json"]
+    needs = ["project.json", "exp-mono/ledger.json"]
     missing = [n for n in needs if not (ws / n).exists()]
+    # driver_home 单源 = module-divsion.json（pre-mono 产物）。accept 前置
+    # （exp-mono 全 pass）在链条上蕴含 mono 跑过，而 mono 无条件要求该文件
+    # 在场，故无需回退；旧源（mono-input-manifest / P2 scaffold_manifest）
+    # 在工具内已无生产者与消费者（2026-09-12 裁定单源，不留死路径）。
+    manifest = _mono._read_json(ws / "module-divsion.json") or {}
+    if not manifest.get("driver_home"):
+        missing.append("module-divsion.json[driver_home]")
     if missing:
-        _log.console_line(f"[porter] exp-accept: 前置缺失："
+        _log.console_line(f"[porter] accept: 前置缺失："
                           + "、".join(missing) + "——rc 2")
         return 2
-    proj = _read_json(ws / "project.json") or {}
-    runner = _read_json(ws / "runner.json") or {}
-    manifest = _read_json(ws / "P2" / "reports" /
-                          "scaffold_manifest.json") or {}
-    mono_ledger = _read_json(ws / "exp-mono" / "ledger.json") or {}
+    proj = _mono._read_json(ws / "project.json") or {}
+    if not proj.get("target_os"):
+        _log.console_line("[porter] accept: project 无 target_os——rc 2")
+        return 2
+    mono_ledger = _mono._read_json(ws / "exp-mono" / "ledger.json") or {}
     mods = mono_ledger.get("modules") or {}
     if not mods or not all((e or {}).get("status") == "pass"
                            for e in mods.values()):
-        _log.console_line("[porter] exp-accept: exp-mono 未全 pass——"
-                          "先完成迁移（本流程只接终态）rc 2")
-        return 2
-    if not manifest.get("driver_home") or not proj.get("target_os"):
-        _log.console_line("[porter] exp-accept: manifest 无 driver_home "
-                          "或 project 无 target_os——rc 2")
+        _log.console_line("[porter] accept: exp-mono 未全 pass——先完成迁移"
+                          "（本流程只接终态）rc 2")
         return 2
     exp_dir = ws / "exp-accept"
+    (exp_dir / "acceptance").mkdir(parents=True, exist_ok=True)
     (exp_dir / "logs").mkdir(parents=True, exist_ok=True)
-    ledger = _read_json(exp_dir / "ledger.json") or {}
-    if not (exp_dir / "parking.md").exists():
-        (exp_dir / "parking.md").write_text(
-            "# 泊车记录\n\n> 需要人工裁定/平台侧能力的事项。\n",
-            encoding="utf-8")
-    state = _approval_state(ws, exp_dir, ledger)
-    _save_ledger(exp_dir, ledger)
+    ledger = _mono._read_json(exp_dir / "ledger.json") or {}
 
-    if mode in ("draft", "redraft"):
-        evidence = ""
-        if mode == "redraft":
-            reds = (ledger.get("criteria") or {})
-            red_ids = [i for i, v in reds.items()
-                       if (v or {}).get("ok") is False]
-            evidence = ("\n## 前次执行失败证据（redraft 背景）\n- 红项："
-                        + ("、".join(red_ids) or "（见 ledger/parking）")
-                        + "\n- 上一方案与泊车记录在 exp-accept/ 与 "
-                        "exp-mono/，先诊断数据面缺陷再修订。\n")
-            # 重开：方案回 draft 态，旧放行作废
-            acc_path = exp_dir / "acceptance.json"
-            doc = _read_json(acc_path)
-            if doc and doc.get("status") == "approved":
-                doc["status"] = "draft"
-                acc_path.write_text(json.dumps(
-                    doc, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8")
-                ledger.pop("approval", None)
-        return _run_draft(ws, exp_dir, proj, runner, manifest,
-                          mono_ledger, ledger, budget, session,
-                          evidence_text=evidence)
-
-    if state == "missing":
-        _log.console_line("[porter] exp-accept: 无 acceptance.json——先跑 "
-                          "`--draft`（agent 设计验收方案）rc 2")
-        return 2
-    if state == "draft":
-        _log.console_line("[porter] exp-accept: 方案待人审——评审摘要 "
-                          f"{exp_dir / 'review.md'}；answers.md 写 "
-                          f"`## @{GATE_ID}` + `verdict: approve` 后重跑"
-                          "——rc 3")
-        return 3
-    # approved
-    acc = _read_json(exp_dir / "acceptance.json") or {}
-    acc.setdefault("driver", manifest.get("driver"))
-    if mode == "diagnose":
-        reds = (ledger.get("criteria") or {})
-        red_ids = [i for i, v in reds.items()
-                   if (v or {}).get("ok") is False]
-        if not red_ids:
-            _log.console_line("[porter] exp-accept: ledger 无红项——"
-                              "无需诊断（重跑默认模式续跑验收）rc 2")
+    # ---- 执行相位（--execute）----
+    if execute:
+        if tier:
+            _log.console_line("[porter] accept: --execute 与 --tier 互斥"
+                              "——rc 2")
             return 2
-        judged = [{"id": i, "layer": "?", "boot":
-                   (next((c.get("boot") for c in acc.get("criteria") or []
-                          if c.get("id") == i), "?")),
-                   "origin": "?", "ok": False,
-                   "detail": (reds[i] or {}).get("detail", "")}
-                  for i in red_ids]
-        results = {}
-        for bid in sorted({j["boot"] for j in judged}):
-            u = (ledger.get("units") or {}).get(bid) or {}
-            results[bid] = {"rc": u.get("rc"), "log":
-                            _read_log(u.get("snapshot")),
-                            "log_state": u.get("log_state", "?"),
-                            "green": u.get("green"),
-                            "snapshot": u.get("snapshot", "—")}
-        state_d, _out = _run_diagnose(ws, exp_dir, proj, runner,
-                                      manifest, acc, judged, results,
-                                      ledger, budget, session)
-        _save_ledger(exp_dir, ledger)
-        if state_d == "solved":
-            _log.console_line("[porter] exp-accept: 修环解决——重跑默认"
-                              "模式完成剩余验收")
-            return 0
-        _park(exp_dir, f"续修未解（{state_d}）",
-              "见 exp-accept/logs/DIAG*。")
-        return 1
-    return _run_execute(ws, exp_dir, proj, runner, manifest, acc,
-                        ledger, budget, session)
+        return _run_execute(ws, exp_dir, proj, manifest, ledger,
+                            int(budget or EXEC_BUDGET_SEC), session)
 
 
-def _read_log(path) -> str:
-    if not path:
-        return ""
-    try:
-        return Path(path).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+    # ---- Tier 1（§1-§4：自 mono 执行事实提取；骨架在位、机制未实现）----
+    if not _T1_READY:
+        if tier == "t1":
+            _log.console_line("[porter] accept: Tier1（§1-§4 提取）机制"
+                              "未实现——骨架已接线，定案后置 _T1_READY 并"
+                              "实现 _t1_prompt——rc 2")
+            return 2
+        _log.console_line("[porter] accept: Tier1 未实现——§1-§4 留空跳过"
+                          "（索引将记 missing；--execute 需七节齐备）")
+    elif tier == "t1" or (not tier and _tier_rerun_needed(ws, ledger, "t1")):
+        note = ""
+        if _exec.pair_json(ws, 1) is not None:
+            rnote = _gate.reject_note(ws, GATE_T1)
+            if rnote:
+                note = f"\n## 关口① reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
+                       "t1", int(budget or T1_BUDGET_SEC), session, note)
+        session = None                     # 会话只续接被指名的 tier
+        if rc != 3:
+            return rc
+        st0, _note0 = _gate.gate_state(ws, GATE_T1)
+        if st0 == "rejected":
+            _log.console_line("[porter] accept: 关口① reject（note 见 "
+                              "GATES.md）——重跑 `--tier t1` 载入意见重做"
+                              " rc 3")
+            return 3
+        if st0 != "approved":
+            _log.console_line(f"[porter] accept: 关口① {st0}——人审放行后"
+                              "重跑（answers.md `## @exp-accept.t1` + "
+                              "`verdict: approve`）rc 3")
+            return 3
+
+    # ---- Tier 2（§5/§6）----
+    if tier == "inject" or (not tier
+                            and _tier_rerun_needed(ws, ledger, "inject")):
+        note = ""
+        if _exec.pair_json(ws, 5) is not None:
+            rnote = _gate.reject_note(ws, GATE_INJECT)
+            if rnote:
+                note = f"\n## 关口② reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
+                       "inject", int(budget or INJECT_BUDGET_SEC),
+                       session, note)
+        session = None                     # 会话只续接被指名的 tier
+        if rc != 3:
+            return rc
+    st1, _note1 = _gate.gate_state(ws, GATE_INJECT)
+    if st1 == "rejected":
+        _log.console_line("[porter] accept: 关口② reject（note 见 GATES.md）"
+                          "——重跑 `--tier inject` 载入意见重做 rc 3")
+        return 3
+    if st1 != "approved":
+        _log.console_line(f"[porter] accept: 关口② {st1}——人审放行后重跑"
+                          "（answers.md `## @exp-accept.inject` + "
+                          "`verdict: approve`）rc 3")
+        return 3
+
+    # ---- Tier 3（§7）----
+    if tier == "e2e" or (not tier and _tier_rerun_needed(ws, ledger, "e2e")):
+        note = ""
+        if _exec.pair_json(ws, 7) is not None:
+            rnote = _gate.reject_note(ws, GATE_PLAN)
+            if rnote:
+                note = f"\n## 关口③ reject 意见（重做依据）\n{rnote}\n"
+        rc = _run_tier(ws, exp_dir, proj, manifest, ledger,
+                       "e2e", int(budget or E2E_BUDGET_SEC),
+                       session, note)
+        if rc != 3:
+            return rc
+    st2, _note2 = _gate.gate_state(ws, GATE_PLAN)
+    if st2 == "rejected":
+        _log.console_line("[porter] accept: 关口③ reject——重跑 "
+                          "`--tier e2e` 载入意见重做 rc 3")
+        return 3
+    if st2 != "approved":
+        _log.console_line(f"[porter] accept: 关口③ {st2}——人审放行后重跑"
+                          "（answers.md `## @exp-accept.plan` + "
+                          "`verdict: approve`）rc 3")
+        return 3
+
+    # ---- 双批 → 七节索引 ----
+    idx = _register_index(ws, exp_dir, ledger)
+    bound = [s["section"] for s in idx["sections"]
+             if s.get("status") == "bound"]
+    missing = [s["section"] for s in idx["sections"]
+               if s.get("status") != "bound"]
+    extra = (f"；缺节 §{','.join(map(str, missing))}"
+             "——待 Tier1（机制未实现）" if missing else "")
+    _log.console_line(f"[porter] accept: 验收标准就绪——七节索引已登记"
+                      f"（bound {len(bound)}/7{extra}，见 "
+                      "exp-accept/ledger.json）；缺节期间 --execute 不可用"
+                      "——rc 0")
+    return 0
