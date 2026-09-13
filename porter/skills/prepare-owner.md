@@ -41,6 +41,11 @@ evidence（失败证据绝对文件路径列表）、correction（针对性修�
 - planning：采用范围、模块划分、依赖顺序和建议迁移步骤已经提供。未知项直接交给知识 agent
   记录到 AUTO-DECISION/AUTO-TODO，说明已知影响与后续事项，不要求提前解决全部实现问题。
 
+planning 只有在工作区（`--output-dir` 及其子目录）实际存在非空 `migration-plan.md` 时才能
+pass。推荐放在工作区根目录，其他子目录中的文件同样有效。文件位置由宿主写入工作区根目录
+的 `state.json`；不要因为文件不在当前目录就判定缺失，先读取 `state.json`，索引无效时再扫描
+整个工作区。`module-division.md/json` 与 `migration-plan.json` 在后续 pre-mono 阶段交付。
+
 意图代表完整迁移目标；本阶段默认不要求完整设备认领、业务行为与单测通过。用户明确的阶段
 特殊要求必须遵守。未知范围向用户提出具体问题，保存 blocked 报告，待 answers 后继续。
 模块和顺序可按证据调整并记录决策；更改用户要求的功能范围需用户确认。

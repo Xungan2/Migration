@@ -34,7 +34,7 @@
         （T5/CP0 消费方零改动）。
 
 对外兼容：validate_runner 保留（gate.py 消费）；probe 函数零改动；
-老 R1-R3/R4 循环、runbook 目录注入位（后续由 kb runner 域接替，见
+老 R1-R3/R4 循环、旧命令目录注入位（后续由 kb runner 域接替，见
 TODO #17）一并退役；exit 0=成功 / 3=需人工。
 """
 

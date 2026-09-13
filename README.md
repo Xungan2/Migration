@@ -33,7 +33,7 @@ python3 porter/main.py prepare \
 
 完整执行 `prepare` 后，交付以下成果：
 
-`runner.md` 由迁移 agent 根据目标 OS 日志维护，只记录迁移内部的模块编译、镜像编译、设备自启动、设备注入/交互和单元测试命令；成功、失败均可记录，未涉及项留空。`runbook.md` 只记录 Porter CLI 的调用、退出码和工作区产物。
+`runner.md` 由迁移 agent 根据目标 OS 日志维护，只记录迁移内部的模块编译、镜像编译、设备自启动、设备注入/交互和单元测试命令；成功、失败均可记录，未涉及项留空。
 
 | 交付物 | 内容与位置 |
 | --- | --- |
@@ -43,11 +43,14 @@ python3 porter/main.py prepare \
 | 可复用知识库 | 工作区 `knowledgebase/`，整理调查事实、目标接入经验、失败修法、决策和后续待办 |
 | 验收与执行记录 | 两项验收结论、证据指纹、任务交接、调用日志与知识处理收据，支持审阅和续跑 |
 
-骨架代码直接写入 `--target-os`，其余记录以 `--output-dir` 为工作区。规划文档和构建/载入
-日志的具体路径由任务交接记录与知识库索引给出，不要求统一文件名。以下路径均相对工作区：
+骨架代码直接写入 `--target-os`，其余记录以 `--output-dir` 为工作区。prepare 先交付
+`migration-plan.md`；pre-mono 更新它并补齐另外三个计划文件。四个计划文件推荐放在工作区
+根目录，其他子目录也允许，实际位置登记在根目录 `state.json`。构建/载入日志的具体路径由
+任务交接记录与知识库索引给出。以下路径均相对工作区：
 
 - `project.json`：源驱动、目标 OS、意图来源及附加资料指针；`goals.md` 保存传入的意图内容。
 - `prepare/state.json`：整体状态、两项主 agent 验收状态、证据指纹、会话与知识处理进度。
+- `state.json`：计划文件在工作区内的实际相对路径及内容指纹；`pre-mono` 和 `mono` 启动时先读此索引，失效时递归扫描并修复。
 - `prepare/handoffs/`：任务交付、主 agent 决策、验收与失败交接；历史记录保留。
 - `prepare/logs/`：每次调用的提示与原始输出；`prepare/knowledge/` 保存知识处理收据。
 - `knowledgebase/`：按主题组织的 Markdown；根和主题 README 是按需阅读入口。
@@ -69,7 +72,7 @@ python3 porter/main.py prepare \
 ## mono（exp-mono）模块迁移
 
 `pre-mono`（命令别名 `prepare-mono`）是由 agent 完成的模块划分与计划修订任务。它消费 prepare 成功 handoff，产出
-`module-divsion.md/json`、最新 `migration-plan.md/json` 和 `mono-input/modules/`，再发布
+`module-division.md/json`、最新 `migration-plan.md/json` 和 `mono-input/modules/`，再发布
 `pre-mono` 成功 handoff。`mono` 启动前读取 `runner.md` 与这四个计划文件，只消费
 `pre-mono` 最新成功 handoff；模块 handoff 按模块发布，供后续模块和续跑使用。
 

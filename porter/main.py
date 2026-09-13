@@ -42,9 +42,6 @@ def main(argv=None) -> int:
             if args.command in ('pre-mono', 'prepare-mono'):
                 from porter.pre_mono import run
                 rc = run(ws)
-                workspace.append_runbook(ws, 'pre-mono', rc, sys.argv,
-                                       '- 产物：`module-divsion.md`、`module-divsion.json`、'
-                                       '`migration-plan.md`、`migration-plan.json`')
                 return rc
             if args.command == 'mono':
                 from porter.exp.mono import run_exp_mono
@@ -57,14 +54,9 @@ def main(argv=None) -> int:
             project = workspace.prepare(args)
             if args.prepare_only:
                 print(f'[porter] Inputs ready: {ws}; no acceptance performed.')
-                workspace.append_runbook(ws, 'prepare', 0, sys.argv,
-                                         f'- 产物：`{ws / "project.json"}`、`{ws / "goals.md"}`\n- 阶段结论：`PASS`')
                 return 0
             from porter.workflow import run
             rc = run(ws, project, args.budget)
-            state = ws / 'prepare' / 'state.json'
-            workspace.append_runbook(ws, 'prepare', rc, sys.argv,
-                                     f'- 产物：`{state}`\n- 阶段结论：`{"PASS" if rc == 0 else "BLOCKED"}`')
             return rc
     except (OSError, ValueError, UnicodeError) as exc:
         print(f'[porter] {exc}', file=sys.stderr)

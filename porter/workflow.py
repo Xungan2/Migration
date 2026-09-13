@@ -6,6 +6,7 @@ import time
 import uuid
 
 from porter import provider
+from porter.artifacts import PREPARE_ARTIFACTS, locate
 from porter.workspace import read_json, read_text, write_json
 
 
@@ -182,6 +183,9 @@ class Preparation:
                 raise ValueError('Evidence and inputs must be file or directory paths')
             if value['status'] == 'pass' and (not evidence or not inputs):
                 raise ValueError(f'{name} pass requires evidence and relevant source/config inputs')
+            if name == 'planning' and value['status'] == 'pass':
+                # Prepare planning is valid only when its markdown plan exists.
+                locate(self.ws, required=PREPARE_ARTIFACTS)
             acceptance[name] = dict(value, files=fingerprints(evidence + inputs, allow_directories=True),
                                     context=self.context())
         completed = result.get('completed_goals', {})
@@ -198,6 +202,12 @@ class Preparation:
         self.save()
 
     def finish(self, result: dict):
+        artifact_paths = locate(self.ws, required=PREPARE_ARTIFACTS)
+        self.state['artifacts'] = {
+            name: str(path.relative_to(self.ws))
+            for name, path in artifact_paths.items()
+        }
+        self.save()
         self.refresh()
         latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
         if any(g['required'] and g.get('status') != 'delivered' and not g.get('review') for g in latest.values()):
@@ -219,11 +229,11 @@ class Preparation:
         from porter.handoff import publish_handoff
         from porter.workspace import ensure_runner
         ensure_runner(self.ws)
+        # Plans are mutable input for pre-mono, so keep them out of the
+        # immutable prepare artifact fingerprint. Their locations live in the
+        # workspace state index instead.
         artifacts = [self.ws / 'project.json', self.ws / 'goals.md',
                      self.state_path, self.ws / 'runner.md']
-        plan = self.ws / 'plan' / 'migration-plan.md'
-        if plan.exists():
-            artifacts.append(plan)
         publish_handoff(
             self.ws, 'prepare',
             summary=(self.state.get('acceptance_report') or
@@ -231,7 +241,7 @@ class Preparation:
             artifacts=artifacts,
             verification=['skeleton and planning acceptance passed',
                           'knowledgebase synchronized and reviewed'],
-            materials=(self.ws / 'project.json',),
+            materials=(self.ws / 'project.json', artifact_paths['migration-plan.md']),
         )
 
     def dispatch(self, request: dict):
