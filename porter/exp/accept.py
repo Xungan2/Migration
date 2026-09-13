@@ -5,8 +5,8 @@ Tier 2 收缩为 §5/§6，frozen 机器退场）：
 
   Tier 1（t1）    → §1 模块级编译 / §2 单测 / §3 镜像级编译 /
                     §4 启动-驱动自启动——自 mono 执行事实提取
-                    （源序：runner.md > exp-mono/logs；runner.json 已
-                    从 accept 脱钩），由 agent 从 mono 事实提取，禁改码
+                    （机器命令与判定来自 runner.json；runner.md >
+                    exp-mono/logs 提供解释和证据），由 agent 从 mono 事实提取，禁改码
                     （目标树零变更，仅写验收节文件）。
                     → ★关口① exp-accept.t1
   Tier 2（inject）→ §5 启动-设备注入 / §6 启动-驱动设备简单交互
@@ -45,6 +45,7 @@ from ..exp import mono as _mono
 from ..exp import accept_gate as _gate
 from ..handoff import latest_success, publish_handoff, require_success
 from .. import log as _log
+from ..runner import RunnerError, load as load_runner
 
 SKILL_T1 = "EXP-accept-t1"     # Tier1 mono-fact extraction skill
 SKILL_INJECT = "EXP-accept-inject"
@@ -150,12 +151,10 @@ def _kb_face(ws: Path) -> str:
 
 
 def _boot_face(ws: Path) -> str:
-    """基线启动/执行事实注入面——指针形式（2026-09-12 裁定：runner.json
-    已从 accept 全链脱钩——退役方向定案；执行事实 agent 面 = runner.md
-    三部分手册 + mono gate 实跑日志。runner.md 由 accept 前置（exp-mono
-    全 pass）间接保证在场，指针不悬空）。"""
-    return (f"- 基线启动/编译执行事实（boot 命令、成功/panic 特征、"
-            f"坑史——**先读**）：`{ws / 'runner.md'}`（三部分手册："
+    """机器契约来自 runner.json，解释和历史证据来自 runner.md。"""
+    return (f"- 基线机器契约（命令、超时、成功/panic 特征——**先读**）："
+            f"`{ws / 'runner.json'}`\n"
+            f"- 基线启动/编译解释与证据（坑史——**先读**）：`{ws / 'runner.md'}`（三部分手册："
             "镜像编译/设备自启动/设备注入与交互/单元测试+执行记录）\n"
             f"- 执行证据备查（mono gate 实跑输出）："
             f"`{ws / 'exp-mono' / 'logs'}/`\n")
@@ -197,7 +196,8 @@ def _t1_prompt(ws: Path, proj: dict,
             f"- 目标 OS 源码树：`{proj.get('target_os')}`\n"
             f"- driver_home：`{manifest.get('driver_home')}`\n"
             f"- mono ledger：`{ws / 'exp-mono' / 'ledger.json'}`\n"
-            f"- mono runner：`{ws / 'runner.md'}`\n"
+            f"- runner machine contract：`{ws / 'runner.json'}`\n"
+            f"- runner manual/evidence：`{ws / 'runner.md'}`\n"
             f"- mono logs：`{ws / 'exp-mono' / 'logs'}`\n"
             f"- 输出目录：`{acc}`\n" + _mono_knowledge_face(ws) + (extra or "") +
             _mono_handoff_face(ws) +
@@ -212,6 +212,7 @@ def _inject_prompt(ws: Path, proj: dict,
     return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
             f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
             f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- runner machine contract：`{ws / 'runner.json'}`\n"
             f"- 迁移终态：exp-mono 报告 `{ws / 'exp-mono' / 'report.md'}`；"
             f"泊车 `{ws / 'exp-mono' / 'parking.md'}`；"
             f"负结论（已排除死路）`{ws / 'exp-mono' / 'negatives.md'}`"
@@ -239,6 +240,7 @@ def _e2e_prompt(ws: Path, proj: dict,
     return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
             f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
             f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- runner machine contract：`{ws / 'runner.json'}`\n"
             f"- **已批注入/交互方案（§5/§6 节文件，事实基线，先读）**："
               f"`{inj5}`、`{inj6}`\n"
             f"- 迁移意图：`{ws / 'goals.md'}`；exp-mono 报告 "
@@ -342,6 +344,16 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict,
                   f"accept.{tier}"})
         session_id = outcome.get("session_id") or session_id
         parsed = outcome.get("parsed") or {}
+        if outcome.get("retryable") in ("timeout", "session-unavailable") and session_id \
+                and attempts <= VERIFY_RETRIES:
+            if outcome.get("retryable") == "session-unavailable":
+                session_id = None
+            kind = ("session 不可用，创建新 session" if
+                    outcome.get("retryable") == "session-unavailable" else
+                    "timeout，使用 session 续接")
+            _log.console_line(f"[porter] accept: {tier} {kind}重试"
+                              f"（{attempts}/{VERIFY_RETRIES}）")
+            continue
         if outcome.get("status") != "done" or \
                 parsed.get("status") == "blocked":
             break
@@ -536,6 +548,7 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
     return (f"{skill}\n\n---\n\n## 背景数据（平台事实）\n"
             f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
             f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
+            f"- runner machine contract：`{ws / 'runner.json'}`\n"
             f"- 验收标准（**只读**，指纹冻结）：`{_exec.acceptance_dir(ws)}`"
             "（七节 JSON+check.py 对；判定语义自读各节文件）\n"
             f"- {head}\n"
@@ -599,7 +612,9 @@ def _publish_execute_handoff(ws: Path, exp_dir: Path) -> bool:
             artifacts=[exp_dir / "run-report.md"],
             verification=["execution status=pass", "seven-section ladder green"],
             dependencies=("accept",),
-            materials=(ws / "exp-mono" / "ledger.json", ws / "runner.md"),
+            materials=tuple(p for p in (ws / "exp-mono" / "ledger.json",
+                                         ws / "runner.md", ws / "runner.json")
+                           if p.exists()),
         )
     except (OSError, ValueError) as exc:
         _log.console_line(f"[porter] accept: execute handoff failed: {exc}——rc 1")
@@ -849,12 +864,17 @@ def run_accept(ws: Path, tier: str | None = None,
                session: str | None = None,
                execute: bool = False) -> int:
     ws = Path(ws).resolve()
+    legacy_workspace = not (ws / "exp-mono" / "report.md").exists()
+    try:
+        _runner = load_runner(ws / "runner.json", required=not legacy_workspace)
+    except RunnerError as exc:
+        _log.console_line(f"[porter] accept: {exc}——rc 2")
+        return 2
     mono_handoff = latest_success(ws, "mono")
     mono_task_dir = ws / "handoffs" / "tasks" / "mono"
     # Real mono runs always leave report.md (and the task directory).  Keep
     # the tiny historical fixtures usable when neither exists; they predate
     # the phase handoff and are covered by the legacy compatibility tests.
-    legacy_workspace = not (ws / "exp-mono" / "report.md").exists()
     if (mono_handoff is not None or mono_task_dir.exists()
             or not legacy_workspace):
         try:
@@ -1007,7 +1027,9 @@ def run_accept(ws: Path, tier: str | None = None,
                 verification=["seven acceptance section pairs bound",
                               "human gates approved"],
                 dependencies=("mono",),
-                materials=(ws / "exp-mono" / "ledger.json", ws / "runner.md"),
+                materials=tuple(p for p in (ws / "exp-mono" / "ledger.json",
+                                             ws / "runner.md", ws / "runner.json")
+                               if p.exists()),
             )
         except (OSError, ValueError) as exc:
             _log.console_line(f"[porter] accept: accept handoff failed: {exc}——rc 1")

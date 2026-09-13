@@ -63,6 +63,8 @@ def run(ws: Path) -> int:
 - prepare 成功 handoff：`{prepare.get('handoff', '见 prepare/index.json')}`
 - prepare execution record：`{handoff_record}`
 - `runner.md`（只记录迁移内部的模块编译、镜像编译、设备自启动、设备注入/交互和单元测试命令；Porter CLI 调用不要写入）
+- `runner.json`（参考 runner.md 生成的机器执行契约；固定顶层段落按实际执行需要设计，
+  允许保留 agent 认为有用的扩展字段，必须是可解析的 JSON 对象）
 - `knowledgebase/README.md` 及与当前驱动有关的入口
 - 源码树、目标树和 prepare 交付物中与模块边界有关的文件
 - state.json 当前计划文件位置：
@@ -93,6 +95,10 @@ JSON 至少记录模块的 source_files、target、depends_on、verification、s
         if rc != 0:
             raise RuntimeError(f"pre-mono agent failed ({rc}); inspect {log_dir}")
         paths = canonicalize(ws, locate(ws))
+        # runner.json is agent-authored from runner.md; older fixtures may not
+        # have it yet and remain importable until a real mono run starts.
+        if (ws / "runner.json").is_file():
+            json.loads((ws / "runner.json").read_text(encoding="utf-8"))
         write_state(ws, paths)
         division = json.loads(paths["module-division.json"].read_text(encoding="utf-8"))
         plan = json.loads(paths["migration-plan.json"].read_text(encoding="utf-8"))
@@ -120,7 +126,9 @@ JSON 至少记录模块的 source_files、target、depends_on、verification、s
             summary=lambda value: f"pre-mono produced {len(value['division']['order'])} modules.",
             # Plans are mutable workspace inputs; runner.md is append-only and
             # require_success validates its presence while allowing growth.
-            artifacts=lambda _value: [ws / "runner.md"],
+            artifacts=lambda _value: [p for p in (ws / "runner.md",
+                                                   ws / "runner.json")
+                                      if p.is_file()],
             verification=lambda value: ["four module division and migration plan artifacts are present and parseable",
                                         f"module order: {value['division'].get('order', [])}"],
         )

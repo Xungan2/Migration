@@ -42,6 +42,7 @@ from ..common import scope as _scope
 from ..env import probe as probe_mod
 from .. import log as _log
 from ..workspace import append_runner
+from ..runner import RunnerError, load as load_runner
 from ..artifacts import locate
 from ..handoff import latest_success, publish_handoff, require_success
 
@@ -1066,6 +1067,16 @@ def _run_research(ws: Path, exp_dir: Path, module: str, proj: dict,
                   "task_id": f"exp-mono.research.{module}"})
         session = outcome.get("session_id") or session
         parsed = outcome.get("parsed") or {}
+        if outcome.get("retryable") in ("timeout", "session-unavailable") and session \
+                and attempts <= RESEARCH_RETRIES:
+            if outcome.get("retryable") == "session-unavailable":
+                session = None
+            kind = ("session 不可用，创建新 session" if
+                    outcome.get("retryable") == "session-unavailable" else
+                    "timeout，使用 session 续接")
+            _log.console_line(f"[porter] exp-mono: {module} 研究 {kind}重试"
+                              f"（{attempts}/{RESEARCH_RETRIES}）")
+            continue
         if outcome.get("status") != "done" or parsed.get("status") == "blocked":
             break
         if deliverable.exists():
@@ -1234,6 +1245,7 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
     decl_probs: list[str] = []
     fix_eps: list[dict] = []
     decl_history: list[list[str]] = []
+    timeout_retries = 0
     while True:
         outcome = agent.run_agent_seq(
             prompt, workdir=target_os,
@@ -1255,6 +1267,17 @@ def _run_translate(ws: Path, exp_dir: Path, module: str, proj: dict,
         total_rounds += len(outcome.get("rounds") or [])
         fix_eps.extend(_fix_episodes(outcome))
         parsed = outcome.get("parsed") or {}
+        if outcome.get("retryable") in ("timeout", "session-unavailable") and session \
+                and timeout_retries < DECL_RETRIES:
+            if outcome.get("retryable") == "session-unavailable":
+                session = None
+            timeout_retries += 1
+            kind = ("session 不可用，创建新 session" if
+                    outcome.get("retryable") == "session-unavailable" else
+                    "timeout，使用 session 续接")
+            _log.console_line(f"[porter] exp-mono: {module} 翻译 {kind}重试"
+                              f"（{timeout_retries}/{DECL_RETRIES}）")
+            continue
         blocked = parsed.get("status") == "blocked"
         ok = outcome.get("status") == "done" and not blocked
         marker_delta = (_count_marker(home, ext, marker) - snap["marker"]) \
@@ -1459,7 +1482,11 @@ def _run_exp_mono(ws: Path, module: str | None = None,
     except ValueError as exc:
         _log.console_line(f"[porter] exp-mono: pre-mono handoff 无效：{exc}——rc 2")
         return 2
-    runner = _read_json(ws / "runner.json") or {}
+    try:
+        runner = load_runner(ws / "runner.json")
+    except RunnerError as exc:
+        _log.console_line(f"[porter] exp-mono: {exc}——rc 2")
+        return 2
     deps = _read_json(plan_json) or {}
     manifest = _read_json(input_paths["module-division.json"]) or {}
     order = deps.get("order") or []
@@ -1585,11 +1612,13 @@ def _run_exp_mono(ws: Path, module: str | None = None,
                     summary=f"Module {m} passed research, translation and gates.",
                     artifacts=[exp_dir / "ledger.json", exp_dir / "report.md",
                                exp_dir / "research" / f"{m}.md",
-                               ws / "knowledgebase" / "modules" / f"{m}.md"],
+                               ws / "knowledgebase" / "modules" / f"{m}.md",
+                               ws / "runner.json"],
                     verification=["module ledger status=pass", "module gate passed"],
                     dependencies=("pre-mono",),
                     materials=(input_paths["module-division.json"],
-                               input_paths["migration-plan.json"], ws / "runner.md"),
+                               input_paths["migration-plan.json"],
+                               ws / "runner.md", ws / "runner.json"),
                 )
             except (OSError, ValueError) as exc:
                 _log.console_line(f"[porter] exp-mono: {m} handoff failed: {exc}")
@@ -1622,12 +1651,13 @@ def _run_exp_mono(ws: Path, module: str | None = None,
             summary="All mono modules and terminal verification passed.",
             artifacts=[exp_dir / "ledger.json", exp_dir / "report.md",
                        exp_dir / "contracts.md", exp_dir / "mapping-notes.md",
-                       ws / "runner.md"],
+                       ws / "runner.md", ws / "runner.json"],
             verification=["all module ledger statuses=pass",
                           "terminal unit test and boot checks passed"],
             dependencies=("pre-mono",),
             materials=(input_paths["module-division.json"],
-                       input_paths["migration-plan.json"], ws / "runner.md"),
+                       input_paths["migration-plan.json"], ws / "runner.md",
+                       ws / "runner.json"),
         )
     except (OSError, ValueError) as exc:
         _log.console_line(f"[porter] exp-mono: mono handoff failed: {exc}——rc 1")

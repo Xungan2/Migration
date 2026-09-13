@@ -788,9 +788,8 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             break
         used += elapsed
         outcome["total_agent_sec"] = round(used, 1)
-        # rc≠0（含超时）仍解析 session id 供诊断，但该 provider session
-        # 已终态失败，绝不续接。外层先落 handoff-fail；下一任务 execution
-        # 从 fresh session 重启。
+        # timeout 可能只杀掉本地进程；opencode 会话仍可恢复。把它交给
+        # 外层有限重试，沿用刚解析出的 session_id；其它 rc 仍立即失败。
         parsed_ev = _parse_events(out)
         if parsed_ev and parsed_ev.get("session_id"):
             session_id = parsed_ev["session_id"]
@@ -801,6 +800,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
         phase_obj = _parse_phase(final_text) or _parse_phase(out)
         round_rec: dict = {"seg": seg, "stem": stem, "rc": rc,
                            "elapsed_sec": round(elapsed, 1),
+                           "session_id": session_id,
                            "phase": (phase_obj or {}).get("phase"),
                            "schema_errs": [], "static": None}
         if phase_obj is not None:
@@ -808,7 +808,15 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             if _nonphase:
                 round_rec["nonphase_json_blocks"] = _nonphase
         if rc != 0:
+            lower = out.lower()
+            unavailable = (session_id and "session" in lower and
+                           ("not found" in lower or "does not exist" in lower))
             outcome["status"] = "failed"
+            if rc == -1 and session_id:
+                outcome["retryable"] = "timeout"
+            if unavailable:
+                outcome["retryable"] = "session-unavailable"
+                outcome["session_unavailable"] = True
             outcome["rounds"].append(round_rec)
             _journal()
             break
