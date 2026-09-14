@@ -19,7 +19,21 @@ def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
         prompt += '\nTASK SKILL\n' + (SKILLS / f'prepare-task-{category}.md').read_text(encoding='utf-8')
     prompt += '\nTASK INPUT\n' + json.dumps(data, ensure_ascii=False)
     stem.parent.mkdir(parents=True, exist_ok=True)
-    stem.with_suffix('.prompt.md').write_text(prompt, encoding='utf-8')
+    prompt_path = stem.with_suffix('.prompt.md')
+    log_path = stem.with_suffix('.log')
+    prompt_path.write_text(prompt, encoding='utf-8')
+    # The unified log is the monitor's input.  Keep this low-level transport
+    # observable even when callers do not bind the log context themselves.
+    try:
+        from .log import append_event
+        append_event('agent_start', intent=str(stem), cmd=prompt,
+                     summary=f'role={role}' + (f' session={session}' if session else ''),
+                     ws=Path(data['workspace']), run_id=str(stem),
+                     ref={'log': str(log_path), 'prompt': str(prompt_path)},
+                     phase=role, task_id=data.get('task_id'),
+                     session_id=session)
+    except Exception:
+        pass
     args = ['opencode', 'run', '--auto', '--format', 'json', '--model',
             os.environ.get('PORTER_MODEL', DEFAULT_MODEL), '--dir', str(target)]
     if session:
@@ -55,7 +69,7 @@ def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
     except OSError as exc:
         stderr = str(exc)
     output = stdout + '\n' + stderr
-    stem.with_suffix('.log').write_text(output, encoding='utf-8')
+    log_path.write_text(output, encoding='utf-8')
     texts = []
     for line in stdout.splitlines():
         try:
@@ -72,6 +86,14 @@ def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
         part = event.get('part')
         if event.get('type') == 'text' and isinstance(part, dict) and isinstance(part.get('text'), str):
             texts.append(part['text'])
+    try:
+        from .log import append_event
+        append_event('agent_end', intent=str(stem), rc=rc,
+                     summary=(output or '')[-300:].strip().replace('\n', ' ⏎ '),
+                     ws=Path(data['workspace']), run_id=str(stem), phase=role,
+                     task_id=data.get('task_id'), session_id=session)
+    except Exception:
+        pass
     return rc, (texts[-1] if texts else '') if rc == 0 else output + stderr, session
 
 

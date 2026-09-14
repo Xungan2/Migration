@@ -96,6 +96,8 @@ def run_agent(prompt: str, workdir: Path, log_stem: str,
     ref = {"log": str(log_path), "prompt": str(prompt_path)}
     tmeta = {k: (task or {}).get(k) for k in
              ("phase", "module", "step", "attempt")}
+    if task and task.get("task_id"):
+        tmeta["task_id"] = task["task_id"]
     try:
         from ..log import core as _log
         _log.record("agent_start", intent=stem, cmd=prompt,
@@ -316,6 +318,8 @@ def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
     ref = {"log": str(log_path), "prompt": str(prompt_path)}
     tmeta = {k: (task or {}).get(k) for k in
              ("phase", "module", "step", "attempt")}
+    if task and task.get("task_id"):
+        tmeta["task_id"] = task["task_id"]
     try:
         from ..log import core as _log
         _log.record("agent_start", intent=stem, cmd=message,

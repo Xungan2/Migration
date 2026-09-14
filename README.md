@@ -63,6 +63,11 @@ Porter 将目标 OS 的代码修改直接写入 `--target-os` 指向的源码树
 - `knowledgebase/`：调查事实、目标 OS 接入方式、构建/启动经验和待办；
 - `handoffs/` 与 `state.json`：阶段边界、输入指纹和续跑依据。
 
+每次阶段命令会自动启动独立的后台 monitor。它读取 `events.jsonl` 和阶段
+ledger，生成 `taskboard.md`；超时会记录日志原因并尝试用原 session 续跑一次，
+失败或 blocked 会执行一次有界诊断。自动处理耗尽后生成 `HUMAN.md`；人类把
+prompt 写在该文件标记下方后，monitor 会消费并继续运行。
+
 ## 常用选项
 
 ```bash
@@ -82,6 +87,9 @@ python3 porter/main.py mono --output-dir <ws> \
 # 续接被中断的 agent 会话
 python3 porter/main.py mono --output-dir <ws> --session <session-id>
 python3 porter/main.py accept --output-dir <ws> --session <session-id>
+
+# 手动运行一次 monitor（阶段命令已自动启动时通常不需要）
+python3 porter/main.py monitor --output-dir <ws> --once
 ```
 
 `mono` 运行前必须在 `porter/config.json` 的 `models` 中配置带 provider 前缀的 `reasoning` 和 `coding` 模型。`PORTER_MODEL` 可覆盖其他流程使用的默认模型。

@@ -100,13 +100,20 @@ class Preparation:
         if timeout is not None:
             remaining = min(remaining, timeout)
         stem = self.root / 'logs' / f'{time.time_ns()}-{role}'
-        session = self.state['sessions'].get(role) if role != 'task' else None
+        task_id = data.get('task_id') if role == 'task' else None
+        session_key = f'task:{task_id}' if task_id else role
+        session = self.state['sessions'].get(session_key)
         data = dict(data, role=role, workspace=str(self.ws))
         self.state['last_call'] = {'role': role, 'log': str(stem) + '.log'}
         self.save()
         rc, text, session = provider.run(role, data, self.target, stem, remaining, session)
-        if role != 'task':
-            self.state['sessions'][role] = session
+        self.state['sessions'][session_key] = session
+        if role == 'task' and task_id:
+            for task in self.state.get('tasks', []):
+                if task.get('id') == task_id:
+                    task['session_id'] = session
+                    task['log'] = str(stem.with_suffix('.log'))
+                    break
         self.save()
         if rc == 130:
             raise KeyboardInterrupt
@@ -114,14 +121,13 @@ class Preparation:
             # Only an explicitly unavailable session gets one fresh attempt.
             lower = text.lower()
             if role != 'task' and session and 'session' in lower and ('not found' in lower or 'does not exist' in lower):
-                self.state['sessions'][role] = None
+                self.state['sessions'][session_key] = None
                 self.save()
                 remaining = self.deadline - time.monotonic()
                 if remaining > 0:
                     rc, text, session = provider.run(role, data, self.target,
                                                     Path(str(stem) + '-fresh'), remaining)
-                    if role != 'task':
-                        self.state['sessions'][role] = session
+                    self.state['sessions'][session_key] = session
                     self.save()
             if rc == 130:
                 raise KeyboardInterrupt
