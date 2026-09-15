@@ -1,4 +1,4 @@
-"""One owner, on-demand tasks, one continuing knowledge writer; Markdown evidence."""
+"""One owner, on-demand tasks, continuing knowledge maintenance; Markdown evidence."""
 import hashlib
 import json
 from pathlib import Path
@@ -11,7 +11,11 @@ from porter.workspace import read_json, read_text, write_json
 
 
 class ProviderFailure(RuntimeError):
-    """An execution failure, distinct from workspace integrity or budget failures."""
+    """An execution failure, distinct from storage or budget failures."""
+
+
+class DeliveryError(ValueError):
+    """Agent-correctable delivery or acceptance error."""
 
 
 def digest(path: Path) -> str:
@@ -28,9 +32,9 @@ def fingerprints(paths: list[str], *, allow_directories: bool = False) -> dict:
             result[str(path)] = hashlib.sha256(json.dumps(contents).encode()).hexdigest()
             continue
         if not path.is_absolute() or not path.is_file():
-            raise ValueError(f'Evidence/input must be an absolute regular file: {name}')
+            raise DeliveryError(f'Evidence/input must be an absolute regular file: {name}')
         if not path.stat().st_size:
-            raise ValueError(f'Empty evidence/input: {path}')
+            raise DeliveryError(f'Empty evidence/input: {path}')
         result[str(path)] = digest(path)
     return result
 
@@ -85,13 +89,58 @@ class Preparation:
 
     def handoff(self, role: str, report: str) -> Path:
         if not isinstance(report, str) or not report.strip():
-            raise ValueError(f'{role} must deliver a nonempty report')
+            raise DeliveryError(f'{role} must deliver a nonempty report')
         path = self.handoffs / f'{time.time_ns()}-{role}-{uuid.uuid4().hex[:8]}.md'
         path.write_text(report + '\n', encoding='utf-8')
         return path
 
+    def feedback(self, role: str, error: Exception, response=None):
+        self.state['feedback'] = {
+            'role': role, 'report': str(error), 'response': response,
+            'call': self.state.get('last_call'),
+        }
+        self.save()
+
     def invoke(self, role: str, data: dict, timeout: float | None = None) -> dict:
-        protected = {str(p): digest(p) for p in self.handoffs.glob('*.md')}
+        previous_feedback = self.state.get('feedback', {})
+        deadline = min(self.deadline, time.monotonic() + timeout) if timeout is not None else self.deadline
+        for attempt in range(1 if role == 'owner' else 2):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                if time.monotonic() >= self.deadline:
+                    raise RuntimeError('Total preparation budget exhausted')
+                raise ProviderFailure(f'{role} delivery timeout')
+            text = self._invoke(role, data, remaining)
+            try:
+                result = provider.response(text)
+                if role in ('task', 'knowledge'):
+                    statuses = ('delivered', 'blocked') if role == 'task' else ('updated', 'needs-owner')
+                    if result.get('status') not in statuses:
+                        raise DeliveryError(f'{role} status must be one of {statuses}')
+                    if not isinstance(result.get('report'), str) or not result['report'].strip():
+                        raise DeliveryError(f'{role} must deliver a nonempty report')
+                if role == 'task':
+                    outcomes = result.get('goals')
+                    expected = {g['id'] for g in data['goals']}
+                    if (not isinstance(outcomes, list) or len(outcomes) != len(expected)
+                            or any(not isinstance(g, dict) or not isinstance(g.get('id'), str)
+                                   or g.get('status') not in ('delivered', 'blocked') for g in outcomes)
+                            or {g['id'] for g in outcomes} != expected):
+                        raise DeliveryError('Task must deliver a result for every goal')
+                if attempt:
+                    self.state['feedback'] = previous_feedback
+                    self.save()
+                return result
+            except ValueError as exc:
+                self.feedback(role, exc, text)
+                if role == 'owner' or attempt:
+                    raise DeliveryError(str(exc)) from exc
+                data = dict(data, feedback=self.state['feedback'], correction_only=True)
+
+    def _invoke(self, role: str, data: dict, timeout: float) -> str:
+        # A task's own checkpoint stays writable during its delivery correction.
+        handoffs_before = {str(p): digest(p) for p in self.handoffs.glob('*.md')
+                           if p.is_file() and (role != 'task' or str(p) != data.get('handoff'))}
         kb = self.ws / 'knowledgebase'
         knowledge_before = {str(p): digest(p) for p in kb.rglob('*') if p.is_file()}
         remaining = self.deadline - time.monotonic()
@@ -109,7 +158,7 @@ class Preparation:
         rc, text, session = provider.run(role, data, self.target, stem, remaining, session)
         self.state['sessions'][session_key] = session
         if role == 'task' and task_id:
-            for task in self.state.get('tasks', []):
+            for task in reversed(self.state.get('tasks', [])):
                 if task.get('id') == task_id:
                     task['session_id'] = session
                     task['log'] = str(stem.with_suffix('.log'))
@@ -131,33 +180,51 @@ class Preparation:
                     self.save()
             if rc == 130:
                 raise KeyboardInterrupt
-        if fingerprints(list(protected)) != protected:
-            raise RuntimeError('Historical handoff changed during provider execution')
+        handoffs_after = {str(p): digest(p) for p in self.handoffs.glob('*.md') if p.is_file()}
+        changed = {name: {'before': value, 'after': handoffs_after.get(name)}
+                   for name, value in handoffs_before.items() if handoffs_after.get(name) != value}
         if role != 'knowledge':
             knowledge_after = {str(p): digest(p) for p in kb.rglob('*') if p.is_file()}
-            if knowledge_before != knowledge_after:
-                raise RuntimeError('Only the knowledge agent may write shared knowledge')
+            changed.update({name: {'before': knowledge_before.get(name), 'after': knowledge_after.get(name)}
+                            for name in knowledge_before.keys() | knowledge_after.keys()
+                            if knowledge_before.get(name) != knowledge_after.get(name)})
+        if changed:
+            self.handoff('workspace-change',
+                         f'Files changed during {role}; review affected evidence and reconcile knowledge.\n'
+                         f'Logs: {stem}.log\n' + json.dumps(changed, ensure_ascii=False, indent=2))
+            for name in handoffs_before.keys() - handoffs_after.keys():
+                self.state['incorporated'].pop(name, None)
+            self.state['knowledge_current'] = False
+            self.save()
         if time.monotonic() >= self.deadline:
             raise RuntimeError('Total preparation budget exhausted')
         if rc:
             raise ProviderFailure(f'{role} provider failed ({rc}); logs: {stem}.log')
-        try:
-            return provider.response(text)
-        except ValueError as exc:
-            raise ProviderFailure(f'{role} invalid provider response; logs: {stem}.log') from exc
+        return text
 
     def sync_knowledge(self):
+        removed = [name for name in self.state['incorporated'] if not Path(name).is_file()]
+        if removed:
+            self.handoff('workspace-change', 'Previously incorporated handoffs are missing; reconcile knowledge:\n'
+                         + '\n'.join(removed))
+            for name in removed:
+                self.state['incorporated'].pop(name)
         pending = {str(p): digest(p) for p in sorted(self.handoffs.glob('*.md'))
-                   if self.state['incorporated'].get(str(p)) != digest(p)}
+                   if p.is_file() and self.state['incorporated'].get(str(p)) != digest(p)}
         if not pending:
             return
         self.state['knowledge_current'] = False
         self.save()
-        result = self.invoke('knowledge', {
-            'handoffs': list(pending), 'index': str(self.ws / 'knowledgebase/README.md'),
-            'acceptance': self.state['acceptance'],
-            'previous_receipt': self.state.get('knowledge_receipt'),
-        })
+        try:
+            result = self.invoke('knowledge', {
+                'handoffs': list(pending), 'index': str(self.ws / 'knowledgebase/README.md'),
+                'acceptance': self.state['acceptance'],
+                'previous_receipt': self.state.get('knowledge_receipt'),
+            })
+        except (DeliveryError, ProviderFailure) as exc:
+            if isinstance(exc, ProviderFailure):
+                self.feedback('knowledge', exc)
+            result = {'status': 'needs-owner', 'report': str(exc)}
         receipt = self.root / 'knowledge' / f'{time.time_ns()}.md'
         receipt.parent.mkdir(exist_ok=True)
         receipt.write_text(str(result.get('report', '')) + '\n', encoding='utf-8')
@@ -165,13 +232,12 @@ class Preparation:
         if result.get('status') == 'needs-owner' and str(result.get('report', '')).strip():
             self.save()
             return
-        if result.get('status') != 'updated' or not str(result.get('report', '')).strip():
-            self.save()
-            raise RuntimeError(f'Knowledge needs owner attention: {receipt}')
-        if fingerprints(list(pending)) != pending:
-            raise RuntimeError('A historical handoff changed during knowledge maintenance')
-        self.state['incorporated'].update(pending)
-        self.state['knowledge_current'] = True
+        current = {str(p): digest(p) for p in self.handoffs.glob('*.md') if p.is_file()}
+        # Changes made during maintenance belong to the next batch, including
+        # the change notice. An updated receipt only covers unchanged inputs.
+        self.state['incorporated'].update({name: value for name, value in pending.items()
+                                           if current.get(name) == value})
+        self.state['knowledge_current'] = current == self.state['incorporated']
         self.save()
 
     def accept(self, result: dict):
@@ -179,28 +245,31 @@ class Preparation:
         for name in ('skeleton', 'planning'):
             value = result.get(name)
             if not isinstance(value, dict) or value.get('status') not in ('pass', 'blocked'):
-                raise ValueError(f'Owner must separately accept or block {name}')
+                raise DeliveryError(f'Owner must separately accept or block {name}')
             if not isinstance(value.get('reason'), str) or not value['reason'].strip():
-                raise ValueError(f'{name} needs an acceptance reason')
+                raise DeliveryError(f'{name} needs an acceptance reason')
             evidence, inputs = value.get('evidence', []), value.get('inputs', [])
             if not isinstance(evidence, list) or not isinstance(inputs, list):
-                raise ValueError('Evidence and inputs must be lists')
+                raise DeliveryError('Evidence and inputs must be lists')
             if not all(isinstance(p, str) for p in evidence + inputs):
-                raise ValueError('Evidence and inputs must be file or directory paths')
+                raise DeliveryError('Evidence and inputs must be file or directory paths')
             if value['status'] == 'pass' and (not evidence or not inputs):
-                raise ValueError(f'{name} pass requires evidence and relevant source/config inputs')
+                raise DeliveryError(f'{name} pass requires evidence and relevant source/config inputs')
             if name == 'planning' and value['status'] == 'pass':
                 # Prepare planning is valid only when its markdown plan exists.
-                locate(self.ws, required=PREPARE_ARTIFACTS)
+                try:
+                    locate(self.ws, required=PREPARE_ARTIFACTS)
+                except ValueError as exc:
+                    raise DeliveryError(str(exc)) from exc
             acceptance[name] = dict(value, files=fingerprints(evidence + inputs, allow_directories=True),
                                     context=self.context())
         completed = result.get('completed_goals', {})
         latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
         if (not isinstance(completed, dict) or any(
-                goal_id not in latest or not latest[goal_id]['required']
+                goal_id not in latest
                 or not isinstance(name, str) or name not in acceptance or acceptance[name]['status'] != 'pass'
                 for goal_id, name in completed.items())):
-            raise ValueError('Completed goals must reference required goals and a passing acceptance')
+            raise DeliveryError('Completed goals must reference known goals and a passing acceptance')
         report = self.handoff('owner-acceptance', result.get('report', ''))
         for goal_id, name in completed.items():
             latest[goal_id]['review'] = {'acceptance': name, 'report': str(report)}
@@ -208,27 +277,33 @@ class Preparation:
         self.save()
 
     def finish(self, result: dict):
-        artifact_paths = locate(self.ws, required=PREPARE_ARTIFACTS)
+        try:
+            artifact_paths = locate(self.ws, required=PREPARE_ARTIFACTS)
+        except ValueError as exc:
+            raise DeliveryError(str(exc)) from exc
         self.state['artifacts'] = {
             name: str(path.relative_to(self.ws))
             for name, path in artifact_paths.items()
         }
         self.save()
         self.refresh()
-        latest = {g['id']: g for task in self.state['tasks'] for g in task['goals']}
-        if any(g['required'] and g.get('status') != 'delivered' and not g.get('review') for g in latest.values()):
-            raise RuntimeError('Required goals remain unfinished; deliver a correction or blocker')
         kb = self.ws / 'knowledgebase'
         required = ['README.md', 'verification.md', 'AUTO-DECISION.md', 'AUTO-TODO.md',
                     'AUTO-FIXME.md', 'build/README.md', 'boot/README.md', 'plan/README.md']
         required += [str(p.relative_to(kb) / 'README.md') for p in kb.iterdir() if p.is_dir()] if kb.exists() else []
         for name in required:
-            read_text(kb / name)
+            try:
+                read_text(kb / name)
+            except ValueError as exc:
+                raise DeliveryError(str(exc)) from exc
         if (result.get('knowledge_reviewed') is not True or not self.state.get('knowledge_current')
                 or set(self.state['acceptance']) != {'skeleton', 'planning'}
                 or any(v['status'] != 'pass' for v in self.state['acceptance'].values())):
-            raise RuntimeError('Both owner acceptances and current, owner-reviewed knowledge are required')
-        self.state['status'] = 'complete'
+            raise DeliveryError('Both owner acceptances and current, owner-reviewed knowledge are required; '
+                                + json.dumps({'acceptance': self.state['acceptance'],
+                                              'knowledge_current': self.state.get('knowledge_current'),
+                                              'knowledge_reviewed': result.get('knowledge_reviewed')}, ensure_ascii=False))
+        self.state.update(status='complete', finished_at=time.time())
         self.save()
         # Publish the immutable prepare boundary only after owner acceptance
         # and knowledge synchronization have both passed.
@@ -254,52 +329,36 @@ class Preparation:
         inputs = request.get('inputs', [])
         try:
             if not isinstance(inputs, list) or not all(isinstance(p, str) for p in inputs):
-                raise ValueError('Task inputs must be a list of absolute file or directory paths')
+                raise DeliveryError('Task inputs must be a list of absolute file or directory paths')
             for name in inputs:
                 path = Path(name)
                 if not path.is_absolute() or not (path.is_file() or path.is_dir()):
-                    raise ValueError(f'Task input must be an existing absolute file or directory: {name}')
-        except (OSError, ValueError) as exc:
+                    raise DeliveryError(f'Task input must be an existing absolute file or directory: {name}')
+        except DeliveryError as exc:
             self.state['task_feedback'] = {'rejected': True, 'report': str(exc)}
-            self.save()
+            self.feedback('owner', exc, request)
             return
         for key in ('id', 'prompt'):
             if not isinstance(request.get(key), str) or not request[key].strip():
-                raise ValueError(f'Task requires {key}')
+                raise DeliveryError(f'Task requires {key}')
         if request.get('category') not in ('source', 'skeleton', 'planning'):
-            raise ValueError('Task category must be source, skeleton or planning')
+            raise DeliveryError('Task category must be source, skeleton or planning')
         timeout = request.get('timeout')
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not 0 < timeout < float('inf'):
-            raise ValueError('Task requires a finite positive timeout in seconds')
+            raise DeliveryError('Task requires a finite positive timeout in seconds')
         goals = request.get('goals')
         if not isinstance(goals, list) or not goals:
-            raise ValueError('Task requires goals')
+            raise DeliveryError('Task requires goals')
         seen = set()
         for goal in goals:
             if not isinstance(goal, dict):
-                raise ValueError('Task goal must be an object')
+                raise DeliveryError('Task goal must be an object')
             for key in ('id', 'objective', 'reason', 'completion'):
                 if not isinstance(goal.get(key), str) or not goal[key].strip():
-                    raise ValueError(f'Task goal requires {key}')
+                    raise DeliveryError(f'Task goal requires {key}')
             if type(goal.get('required')) is not bool or goal['id'] in seen:
-                raise ValueError('Goals require boolean necessity and unique IDs')
+                raise DeliveryError('Goals require boolean necessity and unique IDs')
             seen.add(goal['id'])
-            previous = [g for task in self.state['tasks'] for g in task['goals'] if g['id'] == goal['id']]
-            if previous and any(not g['required'] for g in previous):
-                rejection = f"Rejected repeated supplemental goal {goal['id']}; retain its handoff and AUTO-TODO."
-                path = self.handoff('task-rejected', rejection)
-                self.state['task_feedback'] = {'rejected': True, 'report': rejection, 'handoff': str(path)}
-                self.save()
-                return
-            if previous:
-                if goal['required'] != previous[-1]['required']:
-                    raise ValueError('An attempted goal cannot change necessity')
-                retry = goal.get('retry')
-                if (not isinstance(retry, dict) or not isinstance(retry.get('correction'), str)
-                        or not retry['correction'].strip() or not isinstance(retry.get('evidence'), list)
-                        or not retry['evidence'] or not all(isinstance(p, str) for p in retry['evidence'])):
-                    raise ValueError(f"Required goal {goal['id']} retry needs failure evidence and a correction")
-                fingerprints(retry['evidence'])
         goals = [{key: goal[key] for key in ('id', 'objective', 'required', 'reason', 'completion', 'retry')
                   if key in goal} | {'status': 'running'} for goal in goals]
         delivery = self.handoffs / f'{time.time_ns()}-task-{uuid.uuid4().hex[:8]}.md'
@@ -314,24 +373,18 @@ class Preparation:
                                          'task_id': task['id'], 'timeout': timeout,
                                          'category': task['category'], 'goals': goals,
                                          'handoff': str(delivery)}, timeout=timeout)
-            if result.get('status') not in ('delivered', 'blocked'):
-                raise ValueError('Task status must be delivered or blocked')
-            report = result.get('report')
-            if not isinstance(report, str) or not report.strip():
-                raise ValueError('Task must deliver a nonempty report')
-            outcomes = result.get('goals', [])
-            if (not isinstance(outcomes, list) or len(outcomes) != len(goals)
-                    or any(not isinstance(g, dict) or not isinstance(g.get('id'), str)
-                           or g.get('status') not in ('delivered', 'blocked')
-                           for g in outcomes) or {g.get('id') for g in outcomes} != seen):
-                raise ValueError('Task must deliver a result for every goal')
+            report = result['report']
+            outcomes = result['goals']
             for goal in goals:
                 status = next(g['status'] for g in outcomes if g['id'] == goal['id'])
                 goal['status'] = 'deferred' if status == 'blocked' and not goal['required'] else status
             task['status'] = result['status']
-            delivery.write_text(f"# Task: {task['status']}\n\n{report}\n\nGoals: "
-                                + json.dumps(goals, ensure_ascii=False) + '\n', encoding='utf-8')
-        except ProviderFailure as exc:
+            with delivery.open('a', encoding='utf-8') as stream:
+                stream.write(f"\n\n# Task: {task['status']}\n\n{report}\n\nGoals: "
+                             + json.dumps(goals, ensure_ascii=False) + '\n')
+        except (ProviderFailure, DeliveryError) as exc:
+            if isinstance(exc, ProviderFailure):
+                self.feedback('task', exc)
             task['status'] = 'blocked' if any(g['required'] for g in goals) else 'deferred'
             for goal in goals:
                 goal['status'] = 'blocked' if goal['required'] else 'deferred'
@@ -368,34 +421,43 @@ class Preparation:
             self.refresh()
             self.sync_knowledge()
             while True:
-                result = self.invoke('owner', {
-                    'project': self.project, 'acceptance': self.state['acceptance'],
-                    'previous_call': self.state.get('last_call'),
-                    'acceptance_report': self.state.get('acceptance_report'),
-                    'knowledge_receipt': self.state.get('knowledge_receipt'),
-                    'knowledge_index': str(self.ws / 'knowledgebase/README.md'),
-                    'handoff_index': [str(p) for p in sorted(self.handoffs.glob('*.md'))],
-                    'goals': str(self.ws / 'goals.md'), 'answers': str(self.ws / 'answers.md'),
-                    'hints': str(self.ws / 'inputs/hints'),
-                    'tasks': self.state['tasks'], 'task_feedback': self.state.get('task_feedback', {}),
-                })
+                try:
+                    result = self.invoke('owner', {
+                        'project': self.project, 'acceptance': self.state['acceptance'],
+                        'previous_call': self.state.get('last_call'),
+                        'acceptance_report': self.state.get('acceptance_report'),
+                        'knowledge_receipt': self.state.get('knowledge_receipt'),
+                        'knowledge_index': str(self.ws / 'knowledgebase/README.md'),
+                        'handoff_index': [str(p) for p in sorted(self.handoffs.glob('*.md'))],
+                        'goals': str(self.ws / 'goals.md'), 'answers': str(self.ws / 'answers.md'),
+                        'hints': str(self.ws / 'inputs/hints'),
+                        'tasks': self.state['tasks'], 'task_feedback': self.state.get('task_feedback', {}),
+                        'feedback': self.state.get('feedback', {}),
+                        'knowledge_current': self.state.get('knowledge_current', False),
+                    })
+                except DeliveryError:
+                    continue
+                self.state.pop('feedback', None)
                 self.refresh()
-                action = result.get('action')
-                if action == 'finish':
-                    self.finish(result)
-                    return 0
-                if action == 'accept':
-                    self.accept(result)
-                elif action == 'record':
-                    self.handoff('owner', result.get('report', ''))
-                elif action == 'task':
-                    self.dispatch(result)
-                elif action == 'blocked':
-                    self.handoff('owner-blocked', result.get('report', ''))
-                    self.sync_knowledge()
-                    raise RuntimeError('Owner reported a blocker; see latest handoff')
-                else:
-                    raise ValueError(f'Unknown owner action: {action}')
+                try:
+                    action = result.get('action')
+                    if action == 'finish':
+                        self.finish(result)
+                        return 0
+                    if action == 'accept':
+                        self.accept(result)
+                    elif action == 'record':
+                        self.handoff('owner', result.get('report', ''))
+                    elif action == 'task':
+                        self.dispatch(result)
+                    elif action == 'blocked':
+                        self.handoff('owner-blocked', result.get('report', ''))
+                        self.sync_knowledge()
+                        raise RuntimeError('Owner reported a blocker; see latest handoff')
+                    else:
+                        raise DeliveryError(f'Unknown owner action: {action}')
+                except DeliveryError as exc:
+                    self.feedback('owner', exc, result)
                 self.refresh()
                 self.sync_knowledge()
         except KeyboardInterrupt:
@@ -407,8 +469,10 @@ class Preparation:
             self.handoff('failure', str(exc))
             return 3
         finally:
-            self.state['finished_at'] = time.time()
-            self.save()
+            # Successful state is already fingerprinted by the published handoff.
+            if self.state['status'] != 'complete':
+                self.state['finished_at'] = time.time()
+                self.save()
             print(f"[porter] {self.state['status']}: {self.state.get('error') or self.ws}")
 
 

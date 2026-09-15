@@ -1,11 +1,7 @@
-"""Small, durable handoff protocol shared by prepare, pre-mono, mono and accept.
+"""Durable task results and input changes shared by all migration phases.
 
-The workflow only needs one rule: a downstream task consumes the latest
-successful execution and its input fingerprints.  Keep the storage boring so
-the files remain useful when the provider is unavailable.
-
-The workspace runner manual is an append-only cross-phase log.  Handoffs check
-that it still exists while allowing later phases to append execution records.
+Consumers require a successful upstream execution. Ordinary artifact changes are
+recorded for agent review; approved acceptance criteria use their own gates.
 """
 
 from __future__ import annotations
@@ -18,6 +14,8 @@ from pathlib import Path
 import re
 import time
 import uuid
+
+from ..workspace import write_json
 
 
 _ACTIVE: ContextVar["Execution | None"] = ContextVar("porter_handoff", default=None)
@@ -84,8 +82,7 @@ class Execution:
             encoding="utf-8")
 
     def _save(self) -> None:
-        self.record_path.write_text(json.dumps(self.record, ensure_ascii=False,
-                                               indent=2) + "\n", encoding="utf-8")
+        write_json(self.record_path, self.record)
 
     def record_provider(self, *, invocation_id: str, provider: str, session_id: str | None,
                         rc: int, log_path: Path, prompt_path: Path,
@@ -138,12 +135,12 @@ def _update_index(ws: Path, task_id: str, execution: Execution,
     index.setdefault("task_id", task_id)
     index.setdefault("executions", [])
     item = {"execution_id": execution.execution_id, "status": execution.record["status"],
+            "handoff_sha256": digest(handoff),
             "handoff": str(handoff), "record": str(execution.record_path)}
     index["executions"].append(item)
     if ok:
         index["latest_success"] = item
-    index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2) + "\n",
-                          encoding="utf-8")
+    write_json(index_path, index)
 
 
 def latest_success(ws: Path, task_id: str) -> dict | None:
@@ -153,6 +150,8 @@ def latest_success(ws: Path, task_id: str) -> dict | None:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
         return None
     item = value.get("latest_success")
     if not isinstance(item, dict):
@@ -164,7 +163,7 @@ def latest_success(ws: Path, task_id: str) -> dict | None:
         record = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if record.get("status") != "succeeded":
+    if not isinstance(record, dict) or record.get("status") != "succeeded":
         return None
     return {**item, "record_data": record}
 
@@ -173,19 +172,24 @@ def require_success(ws: Path, task_id: str) -> dict:
     value = latest_success(ws, task_id)
     if value is None:
         raise ValueError(f"Required handoff is missing or not successful: {task_id}")
-    for name, expected in (value.get("record_data", {}).get("artifacts") or {}).items():
+    changes = []
+    current = {}
+    artifacts = dict(value.get("record_data", {}).get("artifacts") or {})
+    if value.get("handoff"):
+        artifacts[value["handoff"]] = value.get("handoff_sha256")
+    for name, expected in artifacts.items():
         path = Path(name)
-        # runner.md is an append-only execution log shared by phases.  Its
-        # contents are expected to grow after a handoff is published.
-        if path.name == "runner.md":
-            if not path.exists():
-                raise ValueError(f"Handoff artifact missing: {path}")
+        actual = (fingerprints([path], allow_directories=True).get(str(path.resolve()))
+                  if path.exists() else None)
+        # Commands append their own audit log during validation.
+        if path.name == "runner.md" and actual is not None:
+            current[name] = "present"
             continue
-        if not path.exists():
-            raise ValueError(f"Handoff artifact changed: {path}")
-        actual = fingerprints([path], allow_directories=True).get(str(path.resolve()))
+        current[name] = actual
         if actual != expected:
-            raise ValueError(f"Handoff artifact changed: {path}")
+            changes.append({"path": name, "before": expected, "after": actual})
+    value["changes"] = changes
+    value["current_artifacts"] = current
     return value
 
 
@@ -200,7 +204,7 @@ def prepare_agent_prompt(prompt: str, *, new_session: bool = True) -> str:
     return (prompt.rstrip() + "\n\n---\n\n## Handoff protocol\n"
             f"Task: `{execution.spec.task_id}`\n"
             f"Execution record: `{execution.record_path}`\n"
-            "Read only the supplied handoff inputs; report evidence and unresolved items.\n")
+            "Review supplied handoffs and current workspace evidence; reconcile changes and report unresolved items.\n")
 
 
 def run_task(workspace: Path, spec: TaskSpec, fn, *, success=None,
@@ -211,9 +215,10 @@ def run_task(workspace: Path, spec: TaskSpec, fn, *, success=None,
     their existing business protocol while the handoff records the boundary.
     """
     manager = Manager(workspace)
-    for dep in spec.dependencies:
-        require_success(manager.workspace, dep)
+    inputs = {dep: require_success(manager.workspace, dep) for dep in spec.dependencies}
     execution = Execution(manager, spec)
+    execution.record["input_changes"] = {dep: item["changes"] for dep, item in inputs.items()}
+    execution._save()
     token = _ACTIVE.set(execution)
     try:
         value = fn()

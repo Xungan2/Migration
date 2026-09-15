@@ -24,6 +24,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from support.sequence import replay
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -136,7 +137,7 @@ def _deliverable_text(module: str, valid: bool = True, oq: bool = False) -> str:
     data = {
         "module": module,
         "mappings": [{"symbol": f"api_{stem}",
-                      "verdict": "equivalent" if valid else "SAME",
+                      "verdict": "equivalent" if valid else 42,
                       "usage": f"目标等价物 {stem}_eq",
                       "evidence": "home/drv/reg.txt:1",
                       "notes": "语义一致"}],
@@ -176,10 +177,20 @@ class _FakeSplitSeq:
         self.static_results = []
         self._decl_seq = {}
 
-    def __call__(self, prompt, workdir, log_stem, static=None,
+    def __call__(self, prompt, workdir, log_stem, **kwargs):
+        static = kwargs.get("static")
+        if static:
+            def check():
+                ok, detail = static["fn"]()
+                self.static_results.append({"module": kwargs["task"]["module"], "ok": ok, "out": detail})
+                return ok, detail
+            kwargs["static"] = {**static, "fn": check}
+        return replay(self._turn, prompt, workdir, log_stem, **kwargs)
+
+    def _turn(self, prompt, workdir, log_stem, static=None,
                  gen_schema=None, final_static=False, agent_budget_sec=0,
                  task=None, model=None, resume_session=None,
-                 fix_floor_sec=0, stall_meta_rounds=0):
+                 fix_floor_sec=0, stall_meta_rounds=0, **kwargs):
         task = task or {}
         step = task.get("step", "translate")
         module = task.get("module")
@@ -205,15 +216,6 @@ class _FakeSplitSeq:
                     "total_agent_sec": 0.3}
         # ---- 翻译任务（旧 _FakeSeq 行为） ----
         self.translate_work(module)
-        if static is not None:
-            ok, out = static["fn"]()
-            self.static_results.append({"module": module, "ok": ok,
-                                        "out": out})
-            if not ok:
-                return {"status": self.static_fail_status,
-                        "session_id": None, "fallback": False,
-                        "rounds": [{"seg": 1}], "parsed": None,
-                        "total_agent_sec": 0.1}
         stem = module.replace("-", "_")
         if module in self._decl_seq and self._decl_seq[module]:
             d = self._decl_seq[module].pop(0)
@@ -404,18 +406,15 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertEqual(r2["rc"], 0)
         self.assertEqual(r2["seq"].calls, [])
 
-    def test_gate_short_circuit(self):
-        def work(module):        # 什么都不写 → 翻译产物守卫必败
-            pass
-
+    def test_missing_build_registration_is_repair_feedback(self):
+        def work(module):
+            _write_module_product(self.fx["home"], module.replace("-", "_"), register=False)
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 1)
         self.assertEqual(r["ut_calls"], [])
         self.assertEqual(r["commits"], [])
-        self.assertNotEqual(self._ledger()["modules"]["fx-a"]["status"],
-                            "pass")
-        self.assertFalse(r["seq"].static_results[0]["ok"])
-        self.assertIn("产物守卫", r["seq"].static_results[0]["out"])
+        self.assertIn("登记", r["seq"].static_results[0]["out"])
+        self.assertGreater(len(r["seq"].static_results), 3)
 
     def test_gate_boot_fail_short_circuits_ut(self):
         def work(module):
@@ -428,6 +427,33 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertFalse(r["seq"].static_results[0]["ok"])
         self.assertIn("③ 启动 FAIL", r["seq"].static_results[0]["out"])
         self.assertEqual(r["commits"], [])
+
+    def test_terminal_failure_returns_to_agent(self):
+        r = _run_with_fakes(self, self.fx,
+            lambda m: _write_module_product(self.fx["home"], m.replace("-", "_")))
+        self.assertEqual(r["rc"], 0)
+        checks = [
+            {"ut_ok": False, "ut_detail": "late failure", "boot_ok": True, "boot": {}},
+            {"ut_ok": True, "ut_detail": "passed", "boot_ok": True, "boot": {}}]
+        with mock.patch.object(mono_mod, "_terminal", side_effect=checks), \
+                mock.patch.object(mono_mod, "_load_models", return_value=FX_MODELS), \
+                mock.patch.object(mono_mod.agent, "_opencode_json_runner", return_value=(
+                    0, '{"type":"text","sessionID":"terminal","part":{"text":"{\\"phase\\":\\"done\\"}"}}')) as provider:
+            self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 0)
+        provider.assert_called_once()
+        self.assertIn("late failure", provider.call_args.args[0])
+        self.assertEqual(self._ledger()["terminal"]["status"], "done")
+
+    def test_gate_reads_repaired_runner(self):
+        ws = self.fx["ws"]
+        old = json.loads((ws / "runner.json").read_text())
+        gate = mono_mod._make_gate(ws / "exp-mono", self.fx["tree"], old,
+                                  {}, "m", 0, "home/drv-x", {"status": mono_mod._git_status(self.fx["tree"])})
+        repaired = {**old, "build": {"cmd": "repaired-build"}}
+        (ws / "runner.json").write_text(json.dumps(repaired))
+        with mock.patch.object(mono_mod.probe_mod, "probe_build", return_value={"ok": False}) as build:
+            self.assertFalse(gate["fn"]()[0])
+        self.assertEqual(build.call_args.args[2]["build"]["cmd"], "repaired-build")
 
     def test_gate_four_stage_all_green(self):
         def work(module):
@@ -448,15 +474,15 @@ class TestExpMonoLoop(unittest.TestCase):
         r = _run_with_fakes(self, self.fx, work)
         self.assertEqual(r["rc"], 1)
         # 每次翻译调用都跑四段 gate（重试也全量验证）→ ut 3 次
-        self.assertEqual(len(r["ut_calls"]), 3)
+        self.assertEqual(len(r["ut_calls"]), 0)
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["status"], "decl-mismatch")
-        self.assertEqual(led.get("decl_retries"), 2)
+        self.assertEqual(led.get("decl_retries"), 5)
         # 自动重试走同 session 续接
         tr = r["seq"].steps("translate", "fx-a")
-        self.assertEqual(len(tr), 3)
+        self.assertEqual(len(tr), 5)
         self.assertEqual(tr[1]["resume_session"], "ses_fx")
-        self.assertIn("声明面核对未通过", tr[1]["prompt"])
+        self.assertIn("完成交付检查未通过", tr[1]["prompt"])
 
     def test_decl_auto_retry_recovers(self):
         # 首轮记账漏挂 1 单元 → 自动重试补齐 → pass（进程内闭环，零人工）
@@ -515,9 +541,9 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertIn("## fx-a 翻译兜底", notes)
         self.assertIn("- api_z | helper | 组合 SpinLock 加 timer | "
                       "home/drv/reg.txt:2（兜底：翻译期发现）", notes)
-        self.assertNotIn("api_bad", notes)
+        self.assertIn("api_bad", notes)
         led = self._ledger()["modules"]["fx-a"]
-        self.assertEqual(led.get("dict_adhoc"), 1)
+        self.assertEqual(led.get("dict_adhoc"), 2)
 
     def test_research_notes_and_open_questions_in_ledger(self):
         # 研究侧 notes pass 路径持久化（对称化）+ open_questions 摘录入
@@ -611,7 +637,7 @@ class TestExpMonoLoop(unittest.TestCase):
                                gen_schema=None, final_static=False,
                                agent_budget_sec=0, task=None, model=None,
                                resume_session=None, fix_floor_sec=0,
-                               stall_meta_rounds=0):
+                               stall_meta_rounds=0, **kwargs):
             task = task or {}
             if task.get("step") == "research":
                 module = task.get("module")
@@ -632,7 +658,8 @@ class TestExpMonoLoop(unittest.TestCase):
                     "total_agent_sec": 0.2}
 
         with mock.patch.object(mono_mod.agent, "run_agent_seq",
-                               _blocked_translate), \
+                               lambda prompt, workdir, log_stem, **kw: replay(
+                                   _blocked_translate, prompt, workdir, log_stem, **kw)), \
                 mock.patch.object(mono_mod, "_load_models",
                                   return_value=FX_MODELS), \
                 mock.patch("porter.common.vcs.commit_target") as _c:
@@ -705,7 +732,7 @@ class TestExpMonoLoop(unittest.TestCase):
         res = r["seq"].steps("research", "fx-a")
         self.assertEqual(len(res), 2)
         self.assertEqual(res[1]["resume_session"], "ses_r_fx-a")
-        self.assertIn("交付物校验未通过", res[1]["prompt"])
+        self.assertIn("完成交付检查未通过", res[1]["prompt"])
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["research"]["status"], "pass")
         self.assertEqual(led["research"]["validate_attempts"], 2)
@@ -719,10 +746,10 @@ class TestExpMonoLoop(unittest.TestCase):
                             research_bad={"fx-a": 99})
         self.assertEqual(r["rc"], 1)
         self.assertEqual(len(r["seq"].steps("research", "fx-a")),
-                         1 + mono_mod.RESEARCH_RETRIES)
+                         4)
         led = self._ledger()["modules"]["fx-a"]
         self.assertEqual(led["research"]["status"],
-                         "invalid-deliverable")
+                         "budget-exhausted")
         # 研究未过 → 翻译不跑
         self.assertEqual(r["seq"].steps("translate"), [])
 
@@ -793,9 +820,13 @@ class TestExpMonoLoop(unittest.TestCase):
         self.assertIsNone(tr[0]["resume_session"])
 
     def test_preconditions_rc2(self):
-        (self.fx["ws"] / "migration-plan.json").unlink()
-        self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 2)
-        self.setUp()                     # 重建 fixture
+        plan = self.fx["ws"] / "migration-plan.json"
+        original = plan.read_text()
+        plan.unlink()
+        with mock.patch.object(mono_mod.agent, "_opencode_json_runner", return_value=(127, "unavailable")) as provider:
+            self.assertEqual(mono_mod.run_exp_mono(self.fx["ws"]), 1)
+        provider.assert_called_once()
+        plan.write_text(original)
         with mock.patch.object(mono_mod, "_load_models",
                                return_value=FX_MODELS):
             self.assertEqual(
@@ -818,11 +849,17 @@ class TestExpMonoUnits(unittest.TestCase):
         self.assertEqual(mono_mod._budget_research(800), 1200)
         self.assertEqual(mono_mod._budget_research(9000), 2400)
 
-    def test_code_lines_strips_comments(self):
-        p = Path(tempfile.mkdtemp(prefix="exp_mono_u_")) / "f.cx"
-        p.write_text("// note\n/* block\n * still */\ncode_a = 1;\n\n"
-                     "# script note\ncode_b = 2;\n", encoding="utf-8")
-        self.assertEqual(mono_mod._code_lines(p), 2)
+    def test_data_only_research_and_zero_growth(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            verdict = mono_mod._validate_research('{"module":"constants"}',
+                                                   "constants", root, "driver", root)
+            self.assertTrue(verdict["ok"], verdict)
+            with mock.patch.object(mono_mod, "_git_status", return_value=set()):
+                self.assertEqual(mono_mod._guard_products(root, "driver", {},
+                                                         {"status": set()}, 1000, root), [])
+            (root / "runner.md").write_text("# Build instructions\nUse the machine contract.")
+            self.assertIn("Build", mono_mod._read_runner_md(root))
 
     def test_run_ut_placeholder_substitution(self):
         tmp = Path(tempfile.mkdtemp(prefix="exp_mono_ut_"))

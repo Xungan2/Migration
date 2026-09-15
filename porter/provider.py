@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import subprocess
 
@@ -94,20 +95,36 @@ def run(role: str, data: dict, target: Path, stem: Path, timeout: float,
                      task_id=data.get('task_id'), session_id=session)
     except Exception:
         pass
-    return rc, (texts[-1] if texts else '') if rc == 0 else output + stderr, session
+    text = texts[-1] if texts else ''
+    if rc == 0:
+        try:
+            response(text)
+        except ValueError:
+            # Keep split deliveries and a delivery followed by commentary available
+            # to the parser. Ambiguity is returned to the agent for correction.
+            text = ''.join(texts)
+    return rc, text if rc == 0 else output + stderr, session
 
 
 def response(text: str) -> dict:
-    text = text.strip()
-    # Allow introductory prose, but decode the entire first structured block.
-    lines = text.splitlines(keepends=True)
-    for index, line in enumerate(lines):
-        if line.lstrip().startswith(('{', '[', '```')):
-            text = ''.join(lines[index:]).strip()
-            break
-    if text.startswith('```json\n') and text.endswith('```'):
-        text = text[8:-3].strip()
-    value = json.loads(text)
+    # Decode the first structured block, never a nested object in a broken one.
+    start = re.search(r'```|[\[{]', text)
+    if start is None:
+        raise ValueError('Provider response must contain a JSON object')
+    text = text[start.start():].strip()
+    fenced = text.startswith('```')
+    if fenced:
+        opening, separator, text = text.partition('\n')
+        if opening.strip().lower() not in ('```', '```json') or not separator:
+            raise ValueError('Provider response needs a plain or JSON code fence')
+    value, end = json.JSONDecoder().raw_decode(text.lstrip())
+    remainder = text.lstrip()[end:].strip()
+    if fenced:
+        if not remainder.startswith('```'):
+            raise ValueError('Provider response has an unclosed code fence')
+        remainder = remainder[3:]
+    if re.search(r'[{}\[\]]|```', remainder):
+        raise ValueError('Provider response contains ambiguous structured output')
     if not isinstance(value, dict):
         raise ValueError('Provider response must be an object')
     return value

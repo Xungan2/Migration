@@ -45,14 +45,15 @@ def _ensure_prepare(ws: Path) -> None:
 
 def run(ws: Path) -> int:
     ws = Path(ws).resolve()
-    _ensure_prepare(ws)
-
-    prepare = require_success(ws, "prepare")
+    try:
+        _ensure_prepare(ws)
+        prepare = require_success(ws, "prepare")
+    except (ValueError, OSError) as exc:
+        print(f"pre-mono: {exc}")
+        return 1
     try:
         prepare_paths = locate(ws, required=PREPARE_ARTIFACTS)
     except ValueError:
-        if (ws / "state.json").exists():
-            raise
         prepare_paths = {}
     location_lines = "\n".join(
         f"- `{name}`: `{path}`" for name, path in prepare_paths.items())
@@ -89,31 +90,53 @@ JSON 至少记录模块的 source_files、target、depends_on、verification、s
     def build() -> dict:
         log_dir = ws / "handoffs" / "tasks" / "pre-mono" / "agent-logs"
         log_dir.mkdir(parents=True, exist_ok=True)
-        rc, output = agent.run_agent(prompt, ws, str(log_dir / "decompose"),
-                                     timeout_sec=1800,
-                                     task={"phase": "pre-mono", "task_id": "pre-mono"})
-        if rc != 0:
-            raise RuntimeError(f"pre-mono agent failed ({rc}); inspect {log_dir}")
-        paths = canonicalize(ws, locate(ws))
-        # runner.json is agent-authored from runner.md; older fixtures may not
-        # have it yet and remain importable until a real mono run starts.
-        if (ws / "runner.json").is_file():
-            json.loads((ws / "runner.json").read_text(encoding="utf-8"))
-        write_state(ws, paths)
-        division = json.loads(paths["module-division.json"].read_text(encoding="utf-8"))
-        plan = json.loads(paths["migration-plan.json"].read_text(encoding="utf-8"))
-        if not isinstance(division, dict) or not division.get("order"):
-            raise ValueError("agent produced an empty module-division.json")
-        if not isinstance(plan, dict) or not plan.get("order"):
-            raise ValueError("agent produced an empty migration-plan.json")
-        modules = division.get("modules") or {}
-        for name in division["order"]:
-            if name not in modules:
-                raise ValueError(f"module-division.json order references missing module: {name}")
-            mdir = ws / "mono-input" / "modules" / name
-            if not (mdir / "module.json").is_file() or not (mdir / "spec.md").is_file():
-                raise ValueError(f"agent did not produce mono input for {name}")
-        return {"division": division, "plan": plan, "output": output}
+        checked = {}
+
+        def validate(_parsed):
+            paths = canonicalize(ws, locate(ws, record=False))
+            runner_path = ws / "runner.json"
+            if runner_path.is_file():
+                if not isinstance(json.loads(runner_path.read_text(encoding="utf-8")), dict):
+                    raise ValueError("runner.json must be a JSON object")
+            division = json.loads(paths["module-division.json"].read_text(encoding="utf-8"))
+            plan = json.loads(paths["migration-plan.json"].read_text(encoding="utf-8"))
+            for name, data in (("module-division.json", division), ("migration-plan.json", plan)):
+                if not isinstance(data, dict) or not isinstance(data.get("order"), list) or not data["order"]:
+                    raise ValueError(f"{name} requires a nonempty order array")
+            modules = division.get("modules")
+            if not isinstance(modules, dict):
+                raise ValueError("module-division.json requires a modules object")
+            for name in division["order"] + plan["order"]:
+                if not isinstance(name, str) or name not in modules:
+                    raise ValueError(f"order references missing module: {name!r}")
+                mdir = (ws / "mono-input" / "modules" / name).resolve()
+                if not mdir.is_relative_to((ws / "mono-input" / "modules").resolve()):
+                    raise ValueError(f"module path leaves workspace: {name}")
+                for filename in ("module.json", "spec.md"):
+                    path = mdir / filename
+                    if not path.is_file() or not path.read_text(encoding="utf-8").strip():
+                        raise ValueError(f"Missing nonempty mono input: {path}")
+                if not isinstance(json.loads((mdir / "module.json").read_text(encoding="utf-8")), dict):
+                    raise ValueError(f"{mdir / 'module.json'} must be an object")
+            checked.update(division=division, plan=plan, paths=paths)
+            return True, "Module inputs validated"
+
+        previous = log_dir / "decompose.seq.json"
+        resume = None
+        if previous.is_file():
+            try:
+                resume = json.loads(previous.read_text()).get("session_id")
+            except ValueError:
+                pass
+        outcome = agent.run_agent_seq(
+            prompt, ws, str(log_dir / "decompose"), agent_budget_sec=1800,
+            resume_session=resume, complete_check=validate,
+            handoff_inputs=(ws, ("prepare",)),
+            task={"phase": "pre-mono", "task_id": "pre-mono"})
+        if outcome.get("status") != "done" or (outcome.get("parsed") or {}).get("status") == "blocked":
+            raise RuntimeError(f"pre-mono incomplete: {outcome.get('status')}; inspect {log_dir}")
+        write_state(ws, checked["paths"])
+        return {**checked, "output": outcome.get("parsed")}
 
     try:
         result = run_task(

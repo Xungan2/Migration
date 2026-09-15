@@ -18,6 +18,8 @@ import time
 import uuid
 from pathlib import Path
 
+from ..workspace import write_json
+
 DEFAULT_MODEL = "zhipu-ai/glm-5.2"
 TOOL_ROOT = Path(__file__).resolve().parent.parent.parent
 SKILLS_DIR = TOOL_ROOT / "porter" / "skills"
@@ -231,17 +233,17 @@ def extract_json(out: str) -> dict | None:
 #   兜底    解析不到 session id 时，退化为"模仿交互式对话轮次"的
 #           prompt 注入（任务原文 + 用户/助手交替轮次 + 新消息）
 #
-# 防打转（不设轮数上限，两道针对性护栏）：
+# 连续修复（轮次由预算约束）：
 #   ① 连续 SEQ_SAME_SIG_REPEAT 次静态段失败结果规范化签名相同
-#     （同一个错误修不动）→ stalled 早退
-#   ② 每段必带上下文（会话记忆 / 兜底 transcript），避免重复已做的事
+#     → 反馈提醒，agent 自主决定修复方法或报告阻塞
+#   ② 每段携带会话记忆或兜底 transcript，保留已有工作
 #
 # 观测：每段经 _opencode_json_runner 照常落 .log/.prompt.md 并记
 # agent_start/end 事件（run_agent 同款约定）；另落 <stem>.seq.json
 # 轮次日志。run_agent 本身一字节不动（向后兼容）。
 # =====================================================================
 
-SEQ_SAME_SIG_REPEAT = 2    # 同签名静态失败连发次数 = 零进展早退（工具惯例）
+SEQ_SAME_SIG_REPEAT = 2    # 同签名只提醒，不决定停止
 SEQ_TRANSCRIPT_TURNS = 8   # 兜底 transcript 保留的最近轮数（更早压一行）
 SEQ_TAIL_LINES = 40        # 静态段结果注入尾行数（同 p4/errorloop 惯例）
 SEQ_TURN_CHARS = 1500      # 兜底 transcript 单轮文本上限（防膨胀）
@@ -250,35 +252,43 @@ _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _parse_events(out: str) -> dict | None:
-    """从 opencode --format json 的 JSONL 事件流提取 {session_id, text}。
-
-    实测格式（1.18.28）：每行一个 JSON 对象，顶层 sessionID；
-    type=="text" 事件的 part.text 为助手文本（可多条，按序拼接）。
-    防御式兼容：字段名变体（sessionID/session_id）、非 { 开头的
-    噪音行（stderr 合并）一律跳过。无可解析事件返回 None。
-    """
+    """Read assistant messages only; preserve fragment bytes and message boundaries."""
     session_id = None
-    texts: list[str] = []
-    for ln in (out or "").splitlines():
-        ln = ln.strip()
-        if not ln.startswith("{"):
-            continue
+    messages = []
+    current_id = None
+    boundary = True
+    seen = False
+    for line in (out or "").splitlines():
         try:
-            ev = json.loads(ln)
-        except json.JSONDecodeError:
+            ev = json.loads(line)
+        except (ValueError, TypeError):
             continue
         if not isinstance(ev, dict):
             continue
-        sid = ev.get("sessionID") or ev.get("session_id")
-        if sid and session_id is None:
-            session_id = str(sid)
-        if ev.get("type") == "text":
-            part = ev.get("part")
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                texts.append(part["text"])
-    if session_id is None and not texts:
+        session_id = ev.get("sessionID") or ev.get("session_id") or session_id
+        if not isinstance(ev.get("type"), str):
+            seen = seen or bool(session_id)
+            continue
+        seen = True
+        part = ev.get("part") or {}
+        if not isinstance(part, dict):
+            continue
+        if ev["type"] in ("step_start", "step_finish"):
+            boundary = True
+        if ev["type"] != "text" or ev.get("role", "assistant") != "assistant":
+            continue
+        fragment = part.get("text")
+        if not isinstance(fragment, str):
+            continue
+        mid = part.get("messageID") or ev.get("messageID")
+        if not messages or (mid and mid != current_id) or (not mid and boundary):
+            messages.append("")
+        messages[-1] += fragment
+        current_id, boundary = mid, False
+    if not seen:
         return None
-    return {"session_id": session_id, "text": "\n".join(texts).strip()}
+    return {"session_id": session_id, "text": messages[-1] if messages else "",
+            "messages": messages}
 
 
 def _opencode_json_runner(message: str, workdir: Path, log_stem: str,
@@ -441,11 +451,39 @@ def _parse_phase(text: str) -> dict | None:
             return {**obj, "phase": "done"}
         return None
 
-    for obj in _response_objects(text):
+    decoder = json.JSONDecoder()
+    hits = []
+    position = 0
+    while match := re.search(r"\[[^\]\n]*\]\([^\n)]*\)|```[^\n]*\n|[\[{]", text[position:]):
+        start = position + match.start()
+        opening = match.group()
+        if opening.startswith("[") and "](" in opening:
+            position += match.end()
+            continue
+        if opening.startswith("```"):
+            # A closing fence may have been consumed immediately below.
+            body = position + match.end()
+            if opening.strip().lower() not in ("```", "```json"):
+                end = text.find("```", body)
+                if end < 0:
+                    return None
+                position = end + 3
+                continue
+            start = body + len(text[body:]) - len(text[body:].lstrip())
+        try:
+            obj, end = decoder.raw_decode(text, start)
+        except ValueError:
+            return None  # Never promote a nested object in malformed JSON.
+        if opening.startswith("```"):
+            closing = end + len(text[end:]) - len(text[end:].lstrip())
+            if not text.startswith("```", closing):
+                return None
+            end = closing + 3
         hit = _ok(obj)
-        if hit:
-            return hit
-    return None
+        if hit is not None:
+            hits.append(hit)
+        position = end
+    return hits[0] if len(hits) == 1 else None
 
 
 def _count_nonphase_json(text: str) -> int:
@@ -646,7 +684,7 @@ def run_agent_structured(prompt: str, workdir, log_stem: str, *,
             feedback = ("---\n\n## 上一次输出的问题\n"
                         + "；".join(errs) + "。重新输出完整 JSON。")
         else:
-            feedback = ("---\n\n## 上一次输出的问题\n未见合法 phase JSON"
+            feedback = ("---\n\n## 上一次输出的问题\n未见唯一合法 phase JSON（可能缺失或存在歧义）"
                         '（{"phase":"done",...}）。重新输出。')
         msg = base + "\n\n" + feedback
     return rc, out, None
@@ -657,6 +695,8 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                   agent_budget_sec: int = 1200,
                   gen_schema: dict | None = None,
                   final_static: bool = False,
+                  complete_check=None,
+                  handoff_inputs=None,
                   model: str | None = None,
                   task: dict | None = None,
                   resume_session: str | None = None,
@@ -674,6 +714,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
       gen_schema      done 时必填字段+浅类型，如 {"files": "list"}
       final_static    True 时 done 后编排器再强制跑一次静态段终验，
                       失败则带结果回循环（仿 p4 probe_build 后验）
+      complete_check  (parsed) -> (ok, feedback)，完成检查失败回灌同 session。
       resume_session  续接既有 provider 会话（此前超时/中断的 session
                       id）；段 1 即以该会话续跑——task_prompt 重发为
                       再锚定，agent 保留原上下文继续
@@ -681,15 +722,12 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                       时给**一次性**宽限段（防主段吃光预算后修复段被
                       秒杀——ids S4 3s 被杀先例）；总时长上界 =
                       预算 + fix_floor_sec
-      stall_meta_rounds 停滞元反馈轮数（opt-in，默认 0 = 同签名连败
-                      即 stalled 旧行为）：达到阈值时先注入一轮"换思路"
-                      元反馈继续循环，再败才 stalled——自欺型盲点
-                      （replaceAll 只匹配一种形态）靠元提示打破
+      stall_meta_rounds 保留旧调用兼容；重复错误始终仅作为反馈。
 
     段间接续：主路径 --session（无信息损失）；session id 解析不到时
     兜底为"模仿交互式轮次"的 prompt 注入（outcome["fallback"]=True）。
 
-    返回 outcome：{"status": done|stalled|budget-exhausted|failed|no-agent,
+    返回 outcome：{"status": done|interrupted|budget-exhausted|failed|no-agent,
       "session_id", "fallback", "rounds": [{seg, stem, rc, elapsed_sec,
       phase, schema_errs, static: {ok, sig}|None}], "parsed",
       "total_agent_sec", "floor_grace"?, "stall_meta_used"?}。
@@ -697,6 +735,25 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
     """
     workdir = Path(workdir)
     stem_base = str(log_stem)
+    Path(stem_base).parent.mkdir(parents=True, exist_ok=True)
+    journal_path = Path(f"{stem_base}.seq.json")
+    saved = {}
+    segment_base = stem_base
+    if journal_path.is_file():
+        try:
+            saved = json.loads(journal_path.read_text(encoding="utf-8"))
+        except ValueError:
+            pass
+        # Preserve prior attempts and their segment logs on explicit resumption.
+        import shutil
+        attempt_id = time.time_ns()
+        segment_base = f"{stem_base}.{attempt_id}"
+        archive = journal_path.parent / f"{journal_path.stem}.{attempt_id}"
+        archive.mkdir()
+        shutil.copy2(journal_path, archive / journal_path.name)
+        if not resume_session and saved.get("status") not in ("done", "no-agent"):
+            resume_session = saved.get("session_id")
+            task_prompt += "\n\n## 保存的进度\n" + json.dumps(saved.get("transcript", []), ensure_ascii=False)
     outcome: dict = {"status": None, "session_id": resume_session,
                      "fallback": False,
                      "rounds": [], "parsed": None, "total_agent_sec": 0.0}
@@ -711,12 +768,37 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
         return outcome
 
     def _journal() -> None:
-        try:
-            Path(f"{stem_base}.seq.json").write_text(
-                json.dumps(outcome, ensure_ascii=False, indent=2),
-                encoding="utf-8")
-        except OSError:
-            pass
+        outcome["feedback"] = pending_user
+        outcome["transcript"] = turns
+        write_json(journal_path, outcome)
+
+    input_snapshot = {}
+    if handoff_inputs:
+        from ..handoff import require_success
+        input_ws, input_tasks = handoff_inputs
+        def read_inputs():
+            return {name: require_success(input_ws, name) for name in input_tasks}
+        inputs = read_inputs()
+        input_snapshot = {name: value["current_artifacts"] for name, value in inputs.items()}
+        outcome["input_reviews"] = [inputs]
+        task_prompt += ("\n\n## 上游交接与当前材料\n"
+                        "复核变更并据当前证据继续；缺失材料可定位或补齐。\n"
+                        + json.dumps(inputs, ensure_ascii=False))
+
+    def inputs_changed():
+        nonlocal input_snapshot, pending_user
+        if not handoff_inputs:
+            return False
+        inputs = read_inputs()
+        current = {name: value["current_artifacts"] for name, value in inputs.items()}
+        if current == input_snapshot:
+            return False
+        input_snapshot = current
+        outcome["input_reviews"].append(inputs)
+        pending_user = ("上游材料在本轮期间再次变化，请复核受影响结论后重新交付：\n"
+                        + json.dumps(inputs, ensure_ascii=False))
+        turns.append({"role": "user", "text": pending_user})
+        return True
 
     turns: list[dict] = []          # 兜底 transcript（用户/助手轮次）
     used = 0.0
@@ -724,31 +806,15 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
     prev_sig = ""
     sig_repeat = 1
     floor_grace_used = False
-    meta_used = 0
     pending_user: str = ""          # 下一段要发的新增消息（静态结果/反馈）
     session_id: str | None = resume_session
 
-    def _stall_or_meta() -> bool:
-        """同签名连发达阈值：先元反馈续命（有配额时），再败返回 True。
-
-        返回 True = 应置 stalled；False = 已注入元反馈，继续循环。
-        """
-        nonlocal meta_used, pending_user
-        if sig_repeat < SEQ_SAME_SIG_REPEAT:
-            return False
-        if meta_used < stall_meta_rounds:
-            meta_used += 1
-            outcome["stall_meta_used"] = meta_used
-            meta_text = (
-                "\n\n## 停滞预警（元反馈）\n"
-                f"静态验证已连续 {sig_repeat} 次返回**相同错误签名**——"
-                "你此前的修复思路没有生效。请停止重复同款修改：重读"
-                "完整日志定位**第一个**错误、枚举你尚未检查的假设、"
-                "换一条修复路径。若确实无解，输出 blocked 交人工。")
-            pending_user += meta_text
-            turns.append({"role": "user", "text": meta_text.strip()})
-            return False
-        return True
+    def _warn_repeat() -> None:
+        # Signature repetition is evidence for the agent, never a stop condition.
+        nonlocal pending_user
+        if sig_repeat == SEQ_SAME_SIG_REPEAT:
+            pending_user += ("\n\n静态检查连续返回相似错误。请查看完整日志、"
+                             "检查尚未验证的假设并调整修复方法。")
 
     while outcome["status"] is None:
         remaining = agent_budget_sec - used
@@ -763,9 +829,9 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                 outcome["status"] = "budget-exhausted"
                 break
         seg += 1
-        stem = f"{stem_base}_S{seg}"
+        stem = f"{segment_base}_S{seg}"
         budget_note = (f"\n\n（agent 时间预算剩余约 "
-                       f"{int(agent_budget_sec - used)}s；继续任务，按运行"
+                       f"{int(remaining)}s；继续任务，按运行"
                        "协议输出下一 phase JSON。）")
         if seg == 1:
             message = task_prompt + "\n" + _seq_preamble(static, gen_schema)
@@ -778,11 +844,18 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
                        + "\n\n---\n\n" + _transcript_block(turns)
                        + "\n\n---\n\n## 请继续\n" + pending_user
                        + budget_note)
-        t_seg = time.time()
-        rc, out = _opencode_json_runner(
-            message, workdir, stem, timeout_sec=int(remaining) + 1,
-            session_id=session_id, model=model, task=task)
-        elapsed = time.time() - t_seg
+        t_seg = time.monotonic()
+        _journal()
+        try:
+            rc, out = _opencode_json_runner(
+                message, workdir, stem, timeout_sec=remaining,
+                session_id=session_id, model=model, task=task)
+        except KeyboardInterrupt:
+            outcome["status"] = "interrupted"
+            outcome["total_agent_sec"] = used + time.monotonic() - t_seg
+            _journal()
+            break
+        elapsed = time.monotonic() - t_seg
         if rc == 127:               # opencode 缺失：立即失败不烧预算
             outcome["status"] = "failed"
             outcome["rounds"].append({"seg": seg, "stem": stem, "rc": rc,
@@ -801,7 +874,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
         final_text = (parsed_ev or {}).get("text") or ""
         assistant_text = final_text or _raw_tail(out)
         turns.append({"role": "assistant", "text": assistant_text})
-        phase_obj = _parse_phase(final_text) or _parse_phase(out)
+        phase_obj = _parse_phase(final_text if parsed_ev is not None else out)
         round_rec: dict = {"seg": seg, "stem": stem, "rc": rc,
                            "elapsed_sec": round(elapsed, 1),
                            "session_id": session_id,
@@ -815,13 +888,18 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             lower = out.lower()
             unavailable = (session_id and "session" in lower and
                            ("not found" in lower or "does not exist" in lower))
-            outcome["status"] = "failed"
-            if rc == -1 and session_id:
-                outcome["retryable"] = "timeout"
-            if unavailable:
-                outcome["retryable"] = "session-unavailable"
-                outcome["session_unavailable"] = True
             outcome["rounds"].append(round_rec)
+            if rc == -1 or unavailable:
+                if unavailable:
+                    session_id = None
+                    outcome["session_id"] = None
+                    outcome["fallback"] = True
+                pending_user = ("上次调用中断或会话不可用。检查已保存产物和日志，"
+                                "从现有进度继续，保留已完成工作。")
+                turns.append({"role": "user", "text": pending_user})
+                _journal()
+                continue
+            outcome["status"] = "failed"
             _journal()
             break
 
@@ -859,8 +937,8 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             turns.append({"role": "user", "text": pending_user})
 
         if phase_obj is None:
-            pending_user = ("## 上一段输出的问题\n未见合法 phase JSON"
-                            "（run_static/done）。请按运行协议重新输出。")
+            pending_user = ("## 上一段输出的问题\n未见唯一合法 phase JSON（可能缺失或存在歧义）"
+                            "（run_static/done）。保留已完成工作，只修正交付输出。")
             turns.append({"role": "user", "text": pending_user})
             outcome["rounds"].append(round_rec)
             _journal()
@@ -877,9 +955,7 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             _run_static()
             outcome["rounds"].append(round_rec)
             _journal()
-            if _stall_or_meta():
-                outcome["status"] = "stalled"
-                break
+            _warn_repeat()
             continue
 
         # ---- phase == done ----
@@ -901,17 +977,36 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
             outcome["rounds"].append(round_rec)
             _journal()
             continue
+        if inputs_changed():
+            outcome["rounds"].append(round_rec)
+            _journal()
+            continue
+        if complete_check:
+            try:
+                complete_ok, feedback = complete_check(phase_obj)
+            except (ValueError, FileNotFoundError) as exc:
+                complete_ok, feedback = False, str(exc)
+            round_rec["completion"] = {"ok": bool(complete_ok), "feedback": feedback}
+            if not complete_ok:
+                pending_user = ("## 完成交付检查未通过\n" + str(feedback)
+                                + "\n保留已完成工作，修复问题后重新交付。")
+                turns.append({"role": "user", "text": pending_user})
+                outcome["rounds"].append(round_rec)
+                _journal()
+                continue
         if final_static and static:
             _run_static()
             outcome["rounds"].append(round_rec)
             _journal()
-            if round_rec["static"] and round_rec["static"]["ok"]:
+            if round_rec["static"] and round_rec["static"]["ok"] and not inputs_changed():
                 outcome["status"] = "done"
                 outcome["parsed"] = phase_obj
                 break
-            if _stall_or_meta():
-                outcome["status"] = "stalled"
-                break
+            _warn_repeat()
+            continue
+        if inputs_changed():
+            outcome["rounds"].append(round_rec)
+            _journal()
             continue
         outcome["status"] = "done"
         outcome["parsed"] = phase_obj
@@ -936,6 +1031,29 @@ def run_agent_seq(task_prompt: str, workdir, log_stem: str, *,
         pass
     _journal()
     return outcome
+
+
+def repair_inputs(read, workspace: Path, log_stem: str, *, budget: int, task: dict,
+                  handoff_inputs=None):
+    """Resolve executable inputs; let the stage agent repair a failed read."""
+    try:
+        return read()
+    except (ValueError, FileNotFoundError) as exc:
+        issue = str(exc)
+    result = []
+
+    def validate(_parsed):
+        value = read()
+        result[:] = [value]
+        return True, "执行输入已就绪"
+
+    outcome = run_agent_seq(
+        "当前阶段输入需要修正。定位、补齐或修复现有材料，保留已完成工作。\n" + issue,
+        workspace, log_stem, agent_budget_sec=budget, complete_check=validate,
+        handoff_inputs=handoff_inputs, task=task)
+    if outcome.get("status") != "done" or (outcome.get("parsed") or {}).get("status") == "blocked":
+        raise ValueError(f"Input repair incomplete: {outcome.get('status')}; {log_stem}.seq.json")
+    return result[0]
 
 
 def _raw_tail(out: str, lines: int = 20) -> str:

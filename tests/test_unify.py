@@ -67,25 +67,25 @@ class UnifiedTest(unittest.TestCase):
         self.assertEqual(owners[1]['data']['tasks'], [])
         self.assertEqual(len([c for c in calls if c['role'] == 'task']), 2)
 
-    def test_optional_failure_is_deferred_and_renamed_retry_is_not_dispatched(self):
+    def test_owner_can_retry_optional_goal_with_history_preserved(self):
         self.env['SCENARIO'] = 'optional-once'
         result = self.cli()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
-        self.assertEqual(len([c for c in calls if c['role'] == 'task']), 1)
+        self.assertEqual(len([c for c in calls if c['role'] == 'task']), 2)
         todo = (self.ws / 'knowledgebase/AUTO-TODO.md').read_text()
         self.assertIn('Protocol check failed', todo)
         self.assertIn('controller is available', todo)
         self.assertEqual(json.loads((self.ws / 'prepare/state.json').read_text())['status'], 'complete')
 
-    def test_optional_execution_failure_and_timeout_defer_without_swallowing_integrity_failure(self):
+    def test_optional_execution_failure_and_timeout_preserve_knowledge_edits(self):
         for scenario in ('optional-error', 'optional-error-timeout', 'optional-error-integrity'):
             with self.subTest(scenario=scenario):
                 if self.ws.exists():
                     shutil.rmtree(self.ws)
                 self.env['SCENARIO'] = scenario
                 result = self.cli()
-                expected = 3 if scenario.endswith('integrity') else 0
+                expected = 0
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 if not expected:
                     todo = (self.ws / 'knowledgebase/AUTO-TODO.md').read_text()
@@ -93,8 +93,8 @@ class UnifiedTest(unittest.TestCase):
                     self.assertIn('Controller responds', todo)
                     self.assertIn('AUTO-TODO', todo)
 
-    def test_required_retry_needs_failure_evidence_and_a_correction(self):
-        for scenario, expected, attempts in (('required-retry-no-evidence', 3, 1),
+    def test_owner_retry_does_not_require_a_fixed_retry_schema(self):
+        for scenario, expected, attempts in (('required-retry-no-evidence', 0, 2),
                                              ('required-retry-with-evidence', 0, 2)):
             with self.subTest(scenario=scenario):
                 if self.ws.exists():
@@ -118,11 +118,13 @@ class UnifiedTest(unittest.TestCase):
                 self.assertEqual(state['tasks'][0]['category'], category)
                 self.assertEqual([g['status'] for g in state['tasks'][0]['goals']], ['delivered', 'deferred'])
 
-    def test_unresolved_required_goal_cannot_be_hidden_by_owner_finish(self):
+    def test_owner_acceptance_can_close_historical_unresolved_goal(self):
         self.env['SCENARIO'] = 'required-unresolved'
         result = self.cli()
-        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertIn('Required goals remain unfinished', result.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads((self.ws / 'prepare/state.json').read_text())
+        self.assertEqual(state['tasks'][0]['goals'][0]['status'], 'blocked')
+        self.assertEqual(state['acceptance']['skeleton']['status'], 'pass')
 
     def test_owner_can_accept_preserved_plan_after_mixed_provider_failure_without_rerunning(self):
         self.env['SCENARIO'] = 'mixed-provider-failure'
@@ -135,11 +137,93 @@ class UnifiedTest(unittest.TestCase):
     def test_malformed_goal_delivery_leaves_a_blocked_handoff(self):
         self.env.update(SCENARIO='malformed-goal', TASK_CATEGORY='planning')
         result = self.cli()
-        self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
-        self.assertTrue(any('Task did not finish' in p.read_text()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(any('Task must deliver a result for every goal' in p.read_text()
                             for p in (self.ws / 'prepare/handoffs').glob('*task*.md')))
+        calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+        tasks = [c for c in calls if c['role'] == 'task']
+        self.assertEqual(len(tasks), 2)
+        self.assertTrue(tasks[-1]['data']['correction_only'])
+        self.assertEqual(tasks[0]['session'], tasks[-1]['session'])
+        self.assertTrue(any(c['role'] == 'owner' and c['data'].get('feedback', {}).get('role') == 'task'
+                            for c in calls))
 
-    def test_interrupted_optional_attempt_is_deferred_and_cannot_run_again_on_resume(self):
+    def test_owner_corrects_delivery_and_acceptance_without_exiting(self):
+        for scenario in ('owner-corrected', 'owner-json-corrected', 'finish-early',
+                         'evidence-corrected', 'review-corrected', 'task-request-corrected'):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                corrected = [c for c in calls if c['role'] == 'owner' and c['data'].get('feedback')]
+                self.assertTrue(corrected)
+                self.assertTrue(corrected[0]['resumed'])
+                feedback = corrected[0]['data']['feedback']
+                self.assertEqual(feedback['role'], 'owner')
+                self.assertTrue(feedback['response'])
+                self.assertTrue(Path(feedback['call']['log']).is_file())
+
+    def test_task_correction_resumes_checkpoint_without_reexecution(self):
+        for scenario in ('task-corrected', 'task-json-corrected'):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((self.ws / 'task-executions').read_text(), 'executed\n')
+                state = json.loads((self.ws / 'prepare/state.json').read_text())
+                self.assertEqual(len(state['tasks']), 1)
+                self.assertEqual(state['tasks'][0]['status'], 'delivered')
+                self.assertIn('Preserved task checkpoint.', Path(state['tasks'][0]['handoff']).read_text())
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                tasks = [c for c in calls if c['role'] == 'task']
+                self.assertEqual(len(tasks), 2)
+                self.assertEqual(tasks[0]['data']['handoff'], tasks[1]['data']['handoff'])
+                self.assertTrue(tasks[1]['resumed'])
+                self.assertTrue(tasks[1]['data']['correction_only'])
+
+    def test_knowledge_corrects_receipt_or_returns_control_to_owner(self):
+        for scenario, expected in (('knowledge-corrected', 0), ('knowledge-malformed', 3)):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                knowledge = [c for c in calls if c['role'] == 'knowledge']
+                self.assertTrue(knowledge[1]['data']['correction_only'])
+                self.assertEqual(knowledge[0]['session'], knowledge[1]['session'])
+                state = json.loads((self.ws / 'prepare/state.json').read_text())
+                self.assertEqual(state['knowledge_current'], expected == 0)
+                if expected:
+                    self.assertIn('Owner reported a blocker', result.stdout)
+                    self.assertFalse(state['incorporated'])
+
+    def test_owner_can_adjust_goal_necessity_without_rewriting_history(self):
+        self.env['SCENARIO'] = 'goal-adjustment'
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        tasks = json.loads((self.ws / 'prepare/state.json').read_text())['tasks']
+        self.assertEqual([t['goals'][0]['required'] for t in tasks], [True, False])
+        self.assertEqual([t['goals'][0]['status'] for t in tasks], ['blocked', 'delivered'])
+        self.assertIn('compiler unavailable', Path(tasks[0]['handoff']).read_text())
+        self.assertNotEqual(tasks[0]['log'], tasks[1]['log'])
+
+    def test_provider_preserves_split_delivery_and_trailing_commentary(self):
+        for scenario in ('split-delivery', 'trailing-commentary'):
+            with self.subTest(scenario=scenario):
+                if self.ws.exists():
+                    shutil.rmtree(self.ws)
+                self.env['SCENARIO'] = scenario
+                result = self.cli()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_owner_can_retry_interrupted_optional_attempt_on_resume(self):
         for stop_signal in (signal.SIGINT, signal.SIGKILL):
             with self.subTest(signal=stop_signal):
                 if self.ws.exists():
@@ -161,7 +245,7 @@ class UnifiedTest(unittest.TestCase):
                 result = self.cli()
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
-                self.assertEqual(len([c for c in calls if c['role'] == 'task']), 1)
+                self.assertEqual(len([c for c in calls if c['role'] == 'task']), 2)
                 state = json.loads((self.ws / 'prepare/state.json').read_text())
                 self.assertEqual(state['tasks'][0]['goals'][0]['status'], 'deferred')
                 self.assertIn('controller unavailable', (self.ws / 'knowledgebase/AUTO-TODO.md').read_text())
@@ -175,9 +259,12 @@ class UnifiedTest(unittest.TestCase):
         self.assertEqual(state['acceptance']['planning']['status'], 'pass')
         self.assertTrue((self.ws / 'knowledgebase/verification.md').is_file())
         self.assertFalse((self.ws / 'P1/modules').exists())
+        from porter.pre_mono import _ensure_prepare
+        _ensure_prepare(self.ws)
 
     def test_partial_acceptance_missing_evidence_and_unsynced_knowledge_block(self):
-        for scenario in ('skeleton-only', 'planning-only', 'missing-evidence', 'knowledge-failed'):
+        for scenario in ('skeleton-only', 'planning-only', 'missing-evidence', 'knowledge-failed',
+                         'knowledge-unsynced'):
             with self.subTest(scenario=scenario):
                 if self.ws.exists():
                     shutil.rmtree(self.ws)
@@ -187,6 +274,8 @@ class UnifiedTest(unittest.TestCase):
                 state = json.loads((self.ws / 'prepare/state.json').read_text())
                 self.assertEqual(state['status'], 'blocked')
                 self.assertTrue(list((self.ws / 'prepare/handoffs').glob('*.md')))
+                from porter.handoff import latest_success
+                self.assertIsNone(latest_success(self.ws, 'prepare'))
 
     def test_knowledge_conflict_returns_to_owner_for_resolution(self):
         self.env['SCENARIO'] = 'knowledge-conflict'
@@ -357,7 +446,7 @@ class UnifiedTest(unittest.TestCase):
 
     def test_malformed_delivery_and_missing_provider_are_blocked(self):
         self.env['SCENARIO'] = 'bad-response'
-        self.assertEqual(self.cli().returncode, 3)
+        self.assertEqual(self.cli('--budget', '1').returncode, 3)
         (self.bin / 'opencode').unlink()
         self.env['PATH'] = str(self.bin)
         self.assertEqual(self.cli().returncode, 3)
@@ -365,15 +454,42 @@ class UnifiedTest(unittest.TestCase):
         self.assertEqual(state['status'], 'blocked')
         self.assertIn('127', state['error'])
 
-    def test_task_cannot_publish_shared_knowledge_or_rewrite_history(self):
-        for scenario in ('task-writes-knowledge', 'rewrite-handoff'):
+    def test_workspace_edits_are_reconciled_without_stopping(self):
+        for scenario in ('task-writes-knowledge', 'rewrite-handoff', 'delete-handoff',
+                         'move-handoff', 'owner-edits-knowledge'):
             with self.subTest(scenario=scenario):
                 if self.ws.exists():
                     shutil.rmtree(self.ws)
                 self.env['SCENARIO'] = scenario
                 result = self.cli()
-                self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
-                self.assertEqual(json.loads((self.ws / 'prepare/state.json').read_text())['status'], 'blocked')
+                self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+                state = json.loads((self.ws / 'prepare/state.json').read_text())
+                self.assertEqual(state['status'], 'complete')
+                self.assertTrue(state['knowledge_current'])
+                notices = list((self.ws / 'prepare/handoffs').glob('*workspace-change*.md'))
+                self.assertTrue(notices)
+                self.assertTrue(all(str(p) in state['incorporated'] for p in notices))
+                calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
+                self.assertTrue(any(c['role'] == 'owner' and str(notices[0]) in c['data']['handoff_index']
+                                    for c in calls))
+                if scenario in ('rewrite-handoff', 'delete-handoff', 'move-handoff'):
+                    self.assertTrue(any(c['role'] == 'owner' and not c['data']['knowledge_current']
+                                        and str(notices[0]) in c['data']['handoff_index'] for c in calls))
+                if scenario == 'owner-edits-knowledge':
+                    self.assertTrue(any(c['role'] == 'owner' and c['data'].get('feedback') for c in calls))
+
+    def test_missing_incorporated_handoff_is_reconciled_on_resume(self):
+        self.assertEqual(self.cli().returncode, 0)
+        state = json.loads((self.ws / 'prepare/state.json').read_text())
+        removed = next(iter(state['incorporated']))
+        Path(removed).unlink()
+        result = self.cli()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        state = json.loads((self.ws / 'prepare/state.json').read_text())
+        self.assertNotIn(removed, state['incorporated'])
+        self.assertTrue(state['knowledge_current'])
+        self.assertTrue(any(removed in p.read_text()
+                            for p in (self.ws / 'prepare/handoffs').glob('*workspace-change*.md')))
 
     def test_provider_progress_text_does_not_replace_final_delivery(self):
         self.env['SCENARIO'] = 'commentary'
@@ -408,7 +524,7 @@ class UnifiedTest(unittest.TestCase):
         self.assertEqual(state['acceptance'], accepted)
         calls = [json.loads(line) for line in (self.ws / 'provider-calls.jsonl').read_text().splitlines()]
         knowledge = [c for c in calls if c['role'] == 'knowledge']
-        self.assertEqual([c['resumed'] for c in knowledge], [False, True, False])
+        self.assertEqual([c['resumed'] for c in knowledge][-2:], [True, False])
         self.assertEqual(knowledge[-1]['data']['handoffs'], knowledge[-2]['data']['handoffs'])
         self.assertTrue(all(p in state['incorporated'] for p in knowledge[-1]['data']['handoffs']))
 

@@ -57,9 +57,10 @@ class TestPreMono(unittest.TestCase):
                 module.mkdir(parents=True)
                 (module / "module.json").write_text("{}", encoding="utf-8")
                 (module / "spec.md").write_text("# m\n", encoding="utf-8")
-                return 0, "written"
+                return 0, json.dumps({"type": "text", "sessionID": "pre-session",
+                                     "part": {"text": '{"phase":"done"}'}})
 
-            with mock.patch.object(pre_mono.agent, "run_agent", fake_agent):
+            with mock.patch.object(pre_mono.agent, "_opencode_json_runner", fake_agent):
                 self.assertEqual(pre_mono.run(ws), 0)
             self.assertTrue(latest_success(ws, "pre-mono"))
             self.assertTrue((ws / "module-divsion.json").exists())

@@ -25,6 +25,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from support.sequence import replay
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -175,8 +176,10 @@ def _make_agent(calls, bad_inject=False, bad_e2e_expect=False,
                            "notes": "fx-notes"},
                 "rounds": [{"seg": 1}], "total_agent_sec": 0.1}
 
-    fake.state = state
-    return fake
+    def sequence(prompt, workdir, log_stem, **kw):
+        return replay(fake, prompt, workdir, log_stem, **kw)
+    sequence.state = state
+    return sequence
 
 
 class _ctx:
@@ -330,10 +333,10 @@ class TestAcceptFlow(_Base):
         led = self._ledger()
         self.assertEqual(led["tiers"]["inject"]["status"], "invalid")
         self.assertEqual(led["tiers"]["inject"]["validate_attempts"],
-                         1 + accept_mod.VERIFY_RETRIES)
+                         4)
         self.assertEqual(len([c for c in self.calls
                               if c["step"] == "inject"]),
-                         1 + accept_mod.VERIFY_RETRIES)
+                         4)
 
     def test_invoke_red_is_unverified(self):
         self.assertEqual(self._run(), 3)
@@ -343,7 +346,7 @@ class TestAcceptFlow(_Base):
         agent.state["tree"] = str(self.fx["tree"])
         self.assertEqual(self._run(agent), 1)
         led = self._ledger()
-        self.assertEqual(led["tiers"]["e2e"]["status"], "unverified")
+        self.assertEqual(led["tiers"]["e2e"]["status"], "invalid")
         self.assertTrue(any("§7" in p for p in
                             led["tiers"]["e2e"]["problems"]))
 
@@ -404,8 +407,8 @@ class TestAcceptUnits(_Base):
         (self.fx["tree"] / "elsewhere.txt").write_text("x", encoding="utf-8")
         with _ctx([]):
             ok2, out2 = static["fn"]()                # 越界 → False
-        self.assertFalse(ok2)
-        self.assertIn("越出白名单", out2)
+        self.assertTrue(ok2)
+        self.assertIn("需要说明", out2)
         # 节文件缺失 → 结构问题
         for num in (5, 6):
             for p in acc.glob(f"{num}-*"):
@@ -537,7 +540,7 @@ class TestAcceptExecute(_Base):
         with _ctx(self._patches(agent)):
             rc = accept_mod.run_accept(self.fx["ws"], execute=True)
         self.assertEqual(rc, 1)
-        self.assertEqual(self._ledger()["execute"]["status"], "unverified")
+        self.assertEqual(self._ledger()["execute"]["status"], "interrupted")
         self.assertTrue(any("§5" in p for p in
                             self._ledger()["execute"]["problems"]))
 
@@ -602,14 +605,91 @@ class TestAcceptExecute(_Base):
         self.assertEqual(ex["status"], "interrupted")
         self.assertEqual(ex["session_id"], "ses-exe")
 
-    def test_fingerprint_drift_rc2(self):
+    def test_fingerprint_drift_prepares_review(self):
         self._ready_index()
         j = next(iter((self.fx["ws"] / "exp-accept" / "acceptance")
                       .glob("5-*.json")))
         j.write_text(j.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         with _ctx(self._patches()):
             rc = accept_mod.run_accept(self.fx["ws"], execute=True)
-        self.assertEqual(rc, 2)
+        self.assertEqual(rc, 3)
+        self.assertTrue(Path(self._ledger()["execute"]["revision"]["review"]).is_file())
+
+    def test_revision_approval_resumes_and_preserves_other_gate(self):
+        self._ready_index()
+        ws = self.fx["ws"]
+        pair = next((ws / "exp-accept/acceptance").glob("5-*.json"))
+        pair.write_text(pair.read_text() + "\n")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self.assertEqual(gate_mod.gate_state(ws, accept_mod.GATE_PLAN)[0], "approved")
+        count = len(self.calls)
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self.assertEqual(len(self.calls), count)
+        self._answer(accept_mod.GATE_INJECT, "approve", note="Reviewed the candidate revision")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 0)
+        self.assertNotIn("revision", self._ledger()["execute"])
+        self.assertEqual(len(self._ledger()["execute"]["revision_history"]), 1)
+        old_review = Path(self._ledger()["execute"]["revision_history"][0]["review"])
+        old_contents = old_review.read_text()
+        e2e = next((ws / "exp-accept/acceptance").glob("7-*.json"))
+        e2e.write_text(e2e.read_text() + "\n")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self.assertEqual(gate_mod.gate_state(ws, accept_mod.GATE_INJECT)[0], "approved")
+        self.assertEqual(old_review.read_text(), old_contents)
+
+
+    def test_changed_candidate_requires_another_review(self):
+        self._ready_index()
+        ws = self.fx["ws"]
+        pair = next((ws / "exp-accept/acceptance").glob("5-*.json"))
+        pair.write_text(pair.read_text() + "\n")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self._answer(accept_mod.GATE_INJECT, "approve", note="Review version one")
+        pair.write_text(pair.read_text() + "\n")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self.assertEqual(self._ledger()["execute"]["status"], "pending-approval")
+        self.assertIn("再次变化", self.calls[-1]["prompt"])
+
+    def test_rejected_revision_returns_feedback_to_agent(self):
+        self._ready_index()
+        ws = self.fx["ws"]
+        pair = next((ws / "exp-accept/acceptance").glob("5-*.json"))
+        pair.write_text(pair.read_text() + "\n")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self._answer(accept_mod.GATE_INJECT, "reject", note="Explain the changed criterion")
+        with _ctx(self._patches()):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 3)
+        self.assertIn("Explain the changed criterion", self.calls[-1]["prompt"])
+        self.assertEqual(self._ledger()["execute"]["status"], "pending-approval")
+
+    def test_canonical_manifest_and_late_final_check_repair(self):
+        self._ready_index(self._exe_agent(s5_tree_dep=True))
+        self._revert_driver()
+        ws = self.fx["ws"]
+        (ws / "module-divsion.json").rename(ws / "module-division.json")
+        calls = []
+        def provider(message, *_args, **kw):
+            calls.append((message, kw.get("session_id")))
+            if len(calls) == 4:
+                driver = self.fx["home"] / "driver.cx"
+                driver.write_text(driver.read_text() + "\nprobe-ok\n")
+            return 0, json.dumps({"type": "text", "sessionID": "repair",
+                                 "part": {"text": '{"status":"done","notes":"fixed"}'}})
+        from support.sequence import RUN_SEQUENCE
+        with _ctx(self._patches()), \
+                mock.patch.object(accept_mod.agent, "run_agent_seq", RUN_SEQUENCE), \
+                mock.patch.object(accept_mod.agent, "_opencode_json_runner", provider):
+            self.assertEqual(accept_mod.run_accept(ws, execute=True), 0)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[-1][1], "repair")
+        self.assertIn("未全绿", calls[1][0])
 
     def test_execute_without_index_rc2(self):
         with _ctx(self._patches()):
@@ -628,7 +708,7 @@ class TestAcceptExecute(_Base):
             accept_mod._mono._git_status(tree))
         with _ctx([]):
             ok, out = static["fn"]()                # §5 红 → 回灌结果
-        self.assertTrue(ok)
+        self.assertFalse(ok)
         self.assertIn("§5", out)
         self.assertIn("未跑", out)                   # fail-fast：§6-7 skipped
         led2 = json.loads((ws / "exp-accept" / "ledger.json")
@@ -637,19 +717,19 @@ class TestAcceptExecute(_Base):
                          "skipped")
         with _ctx([]):
             ok2, out2 = static["fn"]()              # 仍红（幂等可重跑）
-        self.assertTrue(ok2)
+        self.assertFalse(ok2)
         (tree / "elsewhere.txt").write_text("x", encoding="utf-8")
         with _ctx([]):
             ok3, out3 = static["fn"]()              # 越界 → False
         self.assertFalse(ok3)
-        self.assertIn("越出白名单", out3)
+        self.assertIn("§5", out3)
         (tree / "elsewhere.txt").unlink()
         j = next(iter((ws / "exp-accept" / "acceptance").glob("5-*.json")))
         j.write_text(j.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         with _ctx([]):
             ok4, out4 = static["fn"]()              # 指纹漂移 → False
         self.assertFalse(ok4)
-        self.assertIn("指纹不符", out4)
+        self.assertIn("§5", out4)
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ if scenario == 'session-lost' and '--session' in sys.argv:
     sys.exit(1)
 if scenario == 'task-writes-knowledge' and role == 'task':
     (ws / 'knowledgebase').mkdir(exist_ok=True)
-    (ws / 'knowledgebase/unauthorized.md').write_text('task must not own this')
+    (ws / 'knowledgebase/task-notes.md').write_text('Task corrected a shared note; knowledge agent should reconcile it.')
 if scenario == 'mixed-provider-failure' and role == 'task':
     (ws / 'partial-plan.md').write_text('Scope: driver. Module: core (driver.c). Dependencies: none. Order: core.')
     Path(data['handoff']).write_text('Planning complete: partial-plan.md. Protocol check failed; cause unknown.')
@@ -47,13 +47,16 @@ if scenario.startswith('optional-error') and role == 'task':
         time.sleep(60)
     if scenario == 'optional-error-integrity':
         (ws / 'knowledgebase').mkdir(exist_ok=True)
-        (ws / 'knowledgebase/unauthorized.md').write_text('unauthorized')
+        (ws / 'knowledgebase/task-notes.md').write_text('Partial shared note from the failed task.')
     sys.exit(1)
 if role == 'owner':
     tasks = [c for c in history if c['role'] == 'task']
     latest_goals = {g['id']: (g, t) for t in data.get('tasks', []) for g in t['goals']}
     unfinished = [(g, t) for g, t in latest_goals.values() if g['required'] and g.get('status') != 'delivered']
-    if scenario == 'success' and unfinished:
+    if scenario in ('skeleton-only', 'planning-only', 'missing-evidence', 'knowledge-failed',
+                    'knowledge-malformed', 'knowledge-unsynced') and data.get('feedback'):
+        result = {'action': 'blocked', 'report': 'Owner reviewed feedback; external assistance required.'}
+    elif scenario == 'success' and unfinished:
         goal, previous = unfinished[0]
         result = {'action': 'task', 'id': previous['id'], 'category': previous['category'],
                   'prompt': 'Resume the interrupted source investigation from its checkpoint.',
@@ -68,14 +71,15 @@ if role == 'owner':
     elif scenario == 'required-unresolved' and not tasks:
         result = {'action': 'task', 'id': 'must-build', 'category': 'skeleton',
                   'prompt': 'Build skeleton', 'inputs': []}
-    elif scenario in ('selected-category', 'malformed-goal', 'mixed-provider-failure') and not tasks:
+    elif scenario in ('selected-category', 'malformed-goal', 'task-corrected',
+                      'task-json-corrected', 'mixed-provider-failure') and not tasks:
         result = {'action': 'task', 'id': 'selected', 'category': os.environ.get('TASK_CATEGORY', 'planning'),
                   'prompt': 'Deliver the requested work and optional protocol check.', 'inputs': [],
                   'goals': [{'id': 'main', 'objective': 'Deliver work', 'required': True,
                              'reason': 'Planning or skeleton acceptance', 'completion': 'Evidence delivered'},
                             {'id': 'protocol', 'objective': 'Check protocol', 'required': False,
                              'reason': 'Supplemental only', 'completion': 'Check succeeds'}]}
-    elif scenario.startswith('required-retry') and len(tasks) < 2:
+    elif (scenario.startswith('required-retry') or scenario == 'goal-adjustment') and len(tasks) < 2:
         result = {'action': 'task', 'id': 'build', 'category': 'skeleton',
                   'prompt': 'Build and load skeleton', 'inputs': [],
                   'goals': [{'id': 'build-load', 'objective': 'Build and load', 'required': True,
@@ -83,6 +87,8 @@ if role == 'owner':
         if tasks and scenario == 'required-retry-with-evidence':
             result['goals'][0]['retry'] = {'evidence': [tasks[-1]['data']['handoff']],
                                          'correction': 'Use the supported compiler after missing-tool failure'}
+        if tasks and scenario == 'goal-adjustment':
+            result['goals'][0].update(required=False, reason='Owner found this check supplemental; retry available now.')
     elif scenario.startswith('optional-error') and not tasks:
         result = {'action': 'task', 'id': 'optional-error', 'category': 'planning',
                   'prompt': 'Check controller once', 'inputs': [], 'timeout': 0.2,
@@ -90,7 +96,7 @@ if role == 'owner':
                              'reason': 'Supplemental', 'completion': 'Controller responds'}]}
         if scenario == 'optional-error-interrupted':
             result['timeout'] = 5
-    elif scenario == 'optional-once' and not data.get('task_feedback', {}).get('rejected'):
+    elif scenario == 'optional-once' and len(tasks) < 2:
         result = {'action': 'task', 'id': 'plan-check', 'category': 'planning',
                   'prompt': 'Deliver plan and check protocol once.', 'inputs': [], 'timeout': 2,
                   'goals': [{'id': 'protocol', 'objective': 'Check protocol', 'required': False,
@@ -118,7 +124,7 @@ if role == 'owner':
         code.write_text('int init(void) { return 0; }\n')
         evidence = ws / 'build-load.log'
         evidence.write_text('fixture build and load evidence; not a real OS experiment\n')
-        plan = ws / 'suggested-plan.md'
+        plan = ws / 'migration-plan.md'
         plan.write_text('Scope: driver. Module: core (driver.c). Dependencies: none. Order: core.\n')
         result = {'action': 'accept', 'report': 'Owner reviewed skeleton and proposed plan.',
                   'skeleton': {'status': 'pass', 'reason': 'build and load reviewed',
@@ -153,6 +159,13 @@ elif role == 'knowledge':
         sys.exit(1)
     if scenario == 'rewrite-handoff':
         Path(data['handoffs'][0]).write_text('rewritten history')
+    if scenario in ('delete-handoff', 'move-handoff') and not (ws / 'mutation-done').exists():
+        (ws / 'mutation-done').touch()
+        original = Path(data['handoffs'][0])
+        if scenario == 'delete-handoff':
+            original.unlink()
+        else:
+            original.rename(original.with_name('moved.md'))
     kb = ws / 'knowledgebase'
     kb.mkdir(exist_ok=True)
     for name in ('README.md', 'AUTO-DECISION.md', 'AUTO-TODO.md', 'AUTO-FIXME.md', 'verification.md'):
@@ -173,7 +186,7 @@ else:
         result = {'status': 'blocked', 'report': 'Protocol check failed; cause unknown. Evidence: protocol.log. '
                   'AUTO-TODO: retry when a controller is available; completion: protocol check succeeds.',
                   'goals': [{'id': 'protocol', 'status': 'blocked'}]}
-    if scenario.startswith('required-retry') and len([c for c in history if c['role'] == 'task']) == 1:
+    if (scenario.startswith('required-retry') or scenario == 'goal-adjustment') and len([c for c in history if c['role'] == 'task']) == 1:
         result = {'status': 'blocked', 'report': 'Build failed: compiler unavailable.'}
     if scenario == 'required-unresolved':
         result = {'status': 'blocked', 'report': 'Build failed: compiler unavailable.'}
@@ -183,6 +196,15 @@ else:
                   'goals': [{'id': 'main', 'status': 'delivered'}, {'id': 'protocol', 'status': 'blocked'}]}
     if scenario == 'malformed-goal':
         result['goals'] = [{'id': [], 'status': 'delivered'}, {'id': 'protocol', 'status': 'blocked'}]
+    if scenario in ('task-corrected', 'task-json-corrected'):
+        if data.get('correction_only'):
+            assert Path(data['handoff']).read_text() == 'Preserved task checkpoint.\n'
+            Path(data['handoff']).write_text('Preserved task checkpoint.\nCorrected delivery.\n')
+        else:
+            Path(data['handoff']).write_text('Preserved task checkpoint.\n')
+            with (ws / 'task-executions').open('a') as stream:
+                stream.write('executed\n')
+            result['goals'] = []
 if role == 'knowledge' and (scenario in ('optional-once', 'optional-resume', 'mixed-provider-failure') or scenario.startswith('optional-error')):
     (kb / 'AUTO-TODO.md').write_text('\n'.join(p.read_text() for p in (ws / 'prepare/handoffs').glob('*task*.md')))
 if role == 'owner' and result.get('action') == 'task':
@@ -193,6 +215,41 @@ if role == 'owner' and result.get('action') == 'task':
                                'required': True, 'reason': 'Needed for planning', 'completion': 'Evidence delivered'}])
 if role == 'task':
     result.setdefault('goals', [{'id': g['id'], 'status': result['status']} for g in data['goals']])
+if role == 'owner':
+    owner_calls = [c for c in history if c['role'] == 'owner']
+    if len(owner_calls) == 1:
+        if scenario == 'owner-corrected':
+            result = {'action': 'unknown'}
+        if scenario == 'finish-early':
+            (ws / 'migration-plan.md').unlink()
+            result = {'action': 'finish', 'knowledge_reviewed': True}
+        if scenario == 'evidence-corrected':
+            Path(result['skeleton']['evidence'][0]).unlink()
+        if scenario == 'task-request-corrected':
+            result = {'action': 'task', 'id': 'invalid', 'prompt': 'Invalid timeout',
+                      'category': 'source', 'timeout': -1}
+    if scenario == 'review-corrected' and result['action'] == 'finish' and not data.get('feedback'):
+        result['knowledge_reviewed'] = False
+    if scenario == 'owner-edits-knowledge' and result['action'] == 'finish' and not (ws / 'mutation-done').exists():
+        (ws / 'mutation-done').touch()
+        (ws / 'knowledgebase/README.md').write_text('Owner corrected the knowledge index.')
+if role == 'knowledge' and (scenario == 'knowledge-malformed' or
+                            (scenario == 'knowledge-corrected' and not data.get('correction_only'))):
+    result = {'status': 'done', 'report': 'Knowledge checkpoint saved; correct status needed.'}
+if role == 'knowledge' and scenario == 'knowledge-unsynced':
+    result = {'status': 'needs-owner', 'report': 'Unresolved conflict; this batch is not incorporated.'}
 if scenario == 'commentary':
     print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': 'I will inspect the supplied source.'}}))
-print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': json.dumps(result)}}))
+payload = json.dumps(result)
+if scenario == 'task-json-corrected' and role == 'task' and not data.get('correction_only'):
+    payload = 'Delivery saved in checkpoint; JSON omitted.'
+if scenario == 'owner-json-corrected' and role == 'owner' and len(owner_calls) == 1:
+    payload = 'Owner response needs correction.'
+parts = [payload]
+if scenario == 'split-delivery':
+    middle = len(payload) // 2
+    parts = [payload[:middle], payload[middle:]]
+if scenario == 'trailing-commentary':
+    parts += ['\nDelivery complete.']
+for part in parts:
+    print(json.dumps({'type': 'text', 'sessionID': session, 'part': {'text': part}}))

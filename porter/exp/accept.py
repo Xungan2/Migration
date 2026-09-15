@@ -1,35 +1,9 @@
-"""accept.py — accept：迁移验收标准制定（节文件 + 消费脚本对形态）。
+"""Acceptance design and execution with real checks and human approval.
 
-三段 tier（§1-§7 七节梯；2026-09-12 归属修正：§1-§4 归 Tier1、
-Tier 2 收缩为 §5/§6，frozen 机器退场）：
-
-  Tier 1（t1）    → §1 模块级编译 / §2 单测 / §3 镜像级编译 /
-                    §4 启动-驱动自启动——自 mono 执行事实提取
-                    （机器命令与判定来自 runner.json；runner.md >
-                    exp-mono/logs 提供解释和证据），由 agent 从 mono 事实提取，禁改码
-                    （目标树零变更，仅写验收节文件）。
-                    → ★关口① exp-accept.t1
-  Tier 2（inject）→ §5 启动-设备注入 / §6 启动-驱动设备简单交互
-                    两对节文件（acceptance/N-slug.json + .check.py）
-                    → ★关口② exp-accept.inject
-  Tier 3（e2e）  → §7 端到端 一对节文件 → ★关口③ exp-accept.plan
-  三关口放行 → ledger 登记七节索引；--execute 需七节全部绑定
-
-设计要点（2026-09-12 定案，格式自由化）：
-- 每节交付物 = JSON 标准（须含按序命令 + 成功判定标准，其余自由）+
-  消费脚本（python check.py <json>，exit 0=过/非零=不过，stdout=证据）；
-  调用契约/环境见 accept_exec 模块头注。工具零格式假设。
-- agent 直接改码（范围守卫 = driver_home ∪ 各节 JSON 顶层 "paths"
-  并集；paths 缺席则该节无机器白名单，git 变更全量进评审材料归人判）。
-  （Tier1 例外：禁改码——提取错修节文件、环境漂移/标准错上报，
-  随 _t1_prompt 一并落地。）
-- 启动/执行一律走外部静态段（运行协议禁自启）：先把候选写进节文件对
-  再 run_static；外部按契约真实调用并归档，agent 读指针判定与迭代。
-- 只有跑通过的进标准：done 后编排器逐节真实 invoke，全绿才 commit、
-  登记关口（绑定节文件对联合指纹）；诚实性由人审把关。
-- 超时设计沿用 exp-mono：--budget 只计 agent 段；耗尽存 session 可续接。
-
-本文件零目标 OS 假设：命令/判据全部来自节文件数据面。
+Each section is an agent-authored JSON contract plus a check script. Delivery and
+verification failures return to the same session. Changes to approved criteria
+or scope produce a candidate review before waiting for approval; only approved,
+verified criteria can produce formal acceptance success.
 """
 
 from __future__ import annotations
@@ -38,6 +12,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from ..artifacts import locate
 from ..common import agent
 from ..common import vcs as _vcs
 from ..exp import accept_exec as _exec
@@ -45,7 +20,7 @@ from ..exp import mono as _mono
 from ..exp import accept_gate as _gate
 from ..handoff import latest_success, publish_handoff, require_success
 from .. import log as _log
-from ..runner import RunnerError, load as load_runner
+from ..workspace import read_json
 
 SKILL_T1 = "EXP-accept-t1"     # Tier1 mono-fact extraction skill
 SKILL_INJECT = "EXP-accept-inject"
@@ -58,9 +33,8 @@ T1_BUDGET_SEC = 3600
 INJECT_BUDGET_SEC = 3600      # Tier 2/3 agent 段总预算缺省（CLI 可覆盖）
 E2E_BUDGET_SEC = 3600
 EXEC_BUDGET_SEC = 3600        # 执行相位 agent 段总预算缺省
-VERIFY_RETRIES = 2            # 结构校验不过的同 session 回灌上限
 
-# Tier1（§1-§4 提取）由 agent 消费 mono 的执行事实，且禁止修改目标树。
+# Tier1 derives criteria from mono execution evidence.
 _T1_READY = True
 
 _TIER_TITLES = {"t1": "§1/§2/§3/§4（模块编译/单测/镜像编译/自启动）",
@@ -102,20 +76,8 @@ def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
                      if not allow_target_changes else
                      _scope_offenders(target_os, baseline, driver_home_rel,
                                       _exec.touched_paths(ws, nums)))
-        if offenders:
-            scope = ("Tier1 禁止修改目标树" if not allow_target_changes else
-                     "改动越出白名单（driver_home ∪ 各节 JSON 顶层 paths 并集）")
-            return False, (scope + "："
-                           + "、".join(offenders)
-                           + "——收回改动（git checkout -- <路径>）后重试")
         records, _p = _exec.invoke_sections(ws, target_os, driver_home_rel,
                                             nums, prefix)
-        if not allow_target_changes:
-            post_offenders = sorted(_mono._git_status(target_os) - baseline)
-            if post_offenders:
-                return False, ("Tier1 执行节脚本改动了目标树："
-                               + "、".join(post_offenders)
-                               + "——检查脚本必须保持只读")
         lines = [f"外部执行完成：{len(records)} 节（输出已归档，"
                  "自行 tail/grep 以下文件）"]
         for n in sorted(records):
@@ -127,7 +89,9 @@ def _make_static(ws: Path, target_os: Path, driver_home_rel: str,
                 lines.append("  尾部摘录：\n"
                              + "\n".join("  | " + ln for ln in
                                          _exec._tail_of(r["output"]).splitlines()))
-        return True, "\n".join(lines)
+        if offenders:
+            lines.append("需要说明的目标树改动：" + "、".join(offenders))
+        return not _p, "\n".join(lines)
 
     return {"describe": "按 acceptance/ 节文件对真实执行并归档证据"
                         "（编译/启动/差分试跑）",
@@ -192,7 +156,7 @@ def _t1_prompt(ws: Path, proj: dict,
                manifest: dict, extra: str) -> str:
     skill = agent.load_skill(SKILL_T1)
     acc = _exec.acceptance_dir(ws)
-    return (f"{skill}\n\n---\n\n## 背景数据（mono 终态，只读事实）\n"
+    return (f"{skill}\n\n---\n\n## 背景数据（mono 终态与证据）\n"
             f"- 目标 OS 源码树：`{proj.get('target_os')}`\n"
             f"- driver_home：`{manifest.get('driver_home')}`\n"
             f"- mono ledger：`{ws / 'exp-mono' / 'ledger.json'}`\n"
@@ -201,7 +165,7 @@ def _t1_prompt(ws: Path, proj: dict,
             f"- mono logs：`{ws / 'exp-mono' / 'logs'}`\n"
             f"- 输出目录：`{acc}`\n" + _mono_knowledge_face(ws) + (extra or "") +
             _mono_handoff_face(ws) +
-            "\n先读取上述文件，从已执行且 pass 的事实提取 §1-§4；禁止修改目标树。"
+            "\n先读取上述文件，从已执行且 pass 的事实提取 §1-§4；补充验证与必要修复须留证据并交评审。"
             "每节写 JSON + .check.py 成对文件，并最终输出 done JSON。")
 
 
@@ -329,45 +293,25 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict,
     attempts = 0
     problems: list[str] = []
     outcome: dict = {}
-    while True:
+    records = {}
+
+    def validate(_parsed):
+        nonlocal problems, attempts, records
         attempts += 1
-        outcome = agent.run_agent_seq(
-            prompt, workdir=target_os,
-            log_stem=str(exp_dir / "logs" / f"{prefix}"),
-            static=static,
-            gen_schema={"status": "str", "deliverable": "str",
-                        "notes": "str"},
-            final_static=False,
-            agent_budget_sec=int(budget),
-            resume_session=session_id,
-            task={"phase": "accept", "step": tier, "task_id":
-                  f"accept.{tier}"})
-        session_id = outcome.get("session_id") or session_id
-        parsed = outcome.get("parsed") or {}
-        if outcome.get("retryable") in ("timeout", "session-unavailable") and session_id \
-                and attempts <= VERIFY_RETRIES:
-            if outcome.get("retryable") == "session-unavailable":
-                session_id = None
-            kind = ("session 不可用，创建新 session" if
-                    outcome.get("retryable") == "session-unavailable" else
-                    "timeout，使用 session 续接")
-            _log.console_line(f"[porter] accept: {tier} {kind}重试"
-                              f"（{attempts}/{VERIFY_RETRIES}）")
-            continue
-        if outcome.get("status") != "done" or \
-                parsed.get("status") == "blocked":
-            break
         problems = _exec.structural_problems(ws, nums)
         if not problems:
-            break
-        if attempts > VERIFY_RETRIES:
-            break
-        _log.console_line(f"[porter] accept: {tier} 节文件结构校验未过"
-                          f"（第 {attempts} 次）——同 session 回灌修")
-        prompt = ("## 节文件结构校验未通过\n"
-                  + "\n".join(f"- {p}" for p in problems)
-                  + "\n请修复上述节文件（只修这些问题，不要重做已完成的"
-                  "工作），然后按运行协议重新输出 done JSON。")
+            records, problems = _exec.invoke_sections(ws, target_os, driver_home_rel, nums,
+                                                       f"{prefix}FV{attempts}")
+        return not problems, "\n".join(problems)
+
+    outcome = agent.run_agent_seq(
+        prompt, workdir=target_os, log_stem=str(exp_dir / "logs" / prefix),
+        static=static, complete_check=validate,
+        gen_schema={"status": "str", "deliverable": "str", "notes": "str"},
+        agent_budget_sec=int(budget), resume_session=session_id,
+        handoff_inputs=(ws, ("mono",)) if latest_success(ws, "mono") else None,
+        task={"phase": "accept", "step": tier, "task_id": f"accept.{tier}"})
+    session_id = outcome.get("session_id") or session_id
     parsed = outcome.get("parsed") or {}
     blocked = parsed.get("status") == "blocked"
     ok = (not problems and outcome.get("status") == "done" and not blocked)
@@ -392,21 +336,6 @@ def _run_tier(ws: Path, exp_dir: Path, proj: dict,
                               "续接或 --tier 重跑")
         return 1
 
-    # 全量终验：逐节真实 invoke（只有跑通过的进标准）
-    try:
-        records, fv_problems = _exec.invoke_sections(
-            ws, target_os, driver_home_rel, nums, f"{prefix}FV")
-    except Exception as ex:            # 执行异常按终验失败处理
-        records, fv_problems = {}, [f"全量终验异常：{ex!r}"]
-    if fv_problems:
-        entry.update(status="unverified", problems=fv_problems)
-        _save_ledger(exp_dir, ledger)
-        _log.console_line(f"[porter] accept: {tier} 全量终验未过——"
-                          "节标准未全部真实执行通过：\n- "
-                          + "\n- ".join(fv_problems[:6])
-                          + f"\n修复后重跑（--tier {tier} --session "
-                          f"{session_id} 续接）rc 1")
-        return 1
     entry["verify"] = {str(n): {"rc": r["rc"], "status": r["status"],
                                 "output": r["output"],
                                 "duration_sec": r["duration_sec"]}
@@ -498,29 +427,11 @@ def _ladder_lines(records: dict) -> list[str]:
 def _make_exec_static(ws: Path, exp_dir: Path, target_os: Path,
                       driver_home_rel: str, ledger: dict,
                       baseline: set[str]) -> dict:
-    """执行期静态段：指纹复核 + 范围守卫 + invoke_ladder + 回灌。"""
+    """Execute current candidates and return the real ladder verdict."""
     import itertools
     counter = itertools.count(1)
 
     def _fn() -> tuple[bool, str]:
-        probs = _exec.fingerprint_problems(ws, ledger.get("acceptance")
-                                           or {})
-        if probs:
-            return False, ("标准文件指纹不符（标准在执行期被改动）：\n- "
-                           + "\n- ".join(probs)
-                           + "\n——标准只读：恢复原内容；若你认为标准本身"
-                           "有错，按 blocked + criteria-defect 上报，"
-                           "不要改它")
-        offenders = _scope_offenders(target_os, baseline, driver_home_rel,
-                                     _exec.touched_paths(ws,
-                                                         range(1, 8)))
-        if offenders:
-            return False, ("改动越出白名单（driver_home ∪ 各节 JSON "
-                           "顶层 paths 并集）："
-                           + "、".join(offenders)
-                           + "——收回越界改动（git checkout -- <路径>）"
-                           "或在对应节 JSON 的 paths 里声明（标准文件"
-                           "本身不许改，声明须在设计期完成）")
         tag = f"EXEC{next(counter)}"
         records, ladder_probs = _exec.invoke_ladder(ws, target_os,
                                                     driver_home_rel, tag)
@@ -530,7 +441,8 @@ def _make_exec_static(ws: Path, exp_dir: Path, target_os: Path,
             lines.append("阶梯未全绿——按归因修复后再次请求执行。")
         else:
             lines.append("阶梯全绿——验收可收敛，请输出 done JSON。")
-        return True, "\n".join(lines)
+        ledger["execute"]["problems"] = ladder_probs
+        return not ladder_probs, "\n".join(lines)
 
     return {"describe": "按序执行验收阶梯（§1→§7，首错即停）并归档证据",
             "fn": _fn}
@@ -549,7 +461,7 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
             f"- 目标 OS 源码树（你的工作目录）：`{proj.get('target_os')}`\n"
             f"- 驱动目录 driver_home：`{manifest.get('driver_home')}`\n"
             f"- runner machine contract：`{ws / 'runner.json'}`\n"
-            f"- 验收标准（**只读**，指纹冻结）：`{_exec.acceptance_dir(ws)}`"
+            f"- 验收标准（修订后须重新审批）：`{_exec.acceptance_dir(ws)}`"
             "（七节 JSON+check.py 对；判定语义自读各节文件）\n"
             f"- {head}\n"
             f"- 阶梯实况（基线/最近一轮，输出已归档自行读）：\n"
@@ -565,11 +477,10 @@ def _execute_prompt(ws: Path, proj: dict, manifest: dict,
               " 纪律；供后续沉淀 knowledgebase）\n"
             + f"\n## 输出契约\n- 修复完成后输出 done JSON：`status` / "
               "`notes`（≤200 字：归因、改了什么、为何预期转绿）。\n"
-              "- blocked 时：`status: blocked`，notes 说清卡点，且首行"
-              "按结论打标记：**标准本身有错** → `criteria-defect:` 并附"
-              "判据定义 vs 实测对照（人工裁决标准修订）；**平台缺口**"
-              "（断点在目标 OS 侧、且在可改范围 driver_home ∪ paths 之外）"
-              " → `platform-gap:` 并附缺口位置与建议（人工裁决处置）。")
+              "- 需要修改标准或批准范围时，完成候选修订，并在 notes 说明理由、"
+              "影响及验证结果，输出 done 交付评审。候选验证不代表正式通过。\n"
+              "- 无法继续时输出 status: blocked，说明证据和缺失条件；"
+              "可选 reason_kind: criteria-defect/platform-gap，分类不依赖措辞。")
 
 
 def _write_run_report(ws: Path, exp_dir: Path, ledger: dict) -> None:
@@ -637,11 +548,11 @@ def _write_panic(exp_dir: Path, ledger: dict, notes: str,
     lines = [f"# accept 执行相位 PANIC —— {title}", ""]
     if kind == "standard":
         lines += ["> agent 裁定验收标准本身有错（criteria-defect）。标准在"
-                  "执行期只读（指纹冻结），此争议只能人工裁决。", ""]
+                  "修订需形成候选文件、理由和验证材料后交人工审批。", ""]
     else:
         lines += ["> agent 裁定断点在目标 OS 侧且在其可改范围"
                   "（driver_home ∪ 各节 paths）之外（platform-gap）。"
-                  "缺口无法在修环内合法闭合，只能人工裁决。", ""]
+                  "agent 报告尚缺必要条件；已完成诊断及可行修复，待补齐条件后续接。", ""]
     lines += ["## 阶梯实况（各节最新 invoke 记录）", ""]
     for n in _exec.ALL_SECTIONS:
         r = secs.get(str(n)) or {}
@@ -682,7 +593,7 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
     """执行相位：基线阶梯 → agent session 循环（静态段=阶梯）→ 终验。
 
     终态 rc：0=pass / 1=interrupted|parked|panic|unverified|failed /
-    2=前置（索引缺失、指纹漂移、缺 agent）。
+    2=前置（索引缺失、缺 agent）；3=候选修订待审批。
     """
     import os
     if os.environ.get("PORTER_NO_AGENT"):
@@ -692,30 +603,56 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
     target_os = Path(proj["target_os"])
     driver_home_rel = str(manifest["driver_home"])
     idx = ledger.get("acceptance") or {}
-    if not idx.get("sections"):
+    if (not idx.get("sections") or any(s.get("status") != "bound" for s in idx["sections"])
+            or {s.get("section") for s in idx["sections"]} != set(range(1, 8))):
         _log.console_line("[porter] accept: 七节索引缺失——先完成标准制定"
                           "（双关口放行后索引自动登记）rc 2")
         return 2
-    fprobs = _exec.fingerprint_problems(ws, idx)
-    if fprobs:
-        unbound = {s.get("section") for s in idx["sections"]
-                   if s.get("status") != "bound"}
-        t1hint = ("\n（§1-§4 未绑定属 Tier1——先运行 Tier1 agent）"
-                  if unbound & {1, 2, 3, 4} else "")
-        _log.console_line("[porter] accept: 标准未齐备/指纹漂移——执行前"
-                          "标准须七节齐备且未被改动：\n- "
-                          + "\n- ".join(fprobs) + t1hint + "\nrc 2")
-        return 2
     ex = ledger.setdefault("execute", {})
+    revision = ex.get("revision")
+    revision_note = ""
+    rejected_tiers = []
+    if revision:
+        states = {tier: _gate.gate_state(ws, _GATE_OF[tier]) for tier in revision["tiers"]}
+        candidate_unchanged = revision.get("fingerprint") == _gate.combined_sha16(
+            [Path(p) for p in revision.get("artifacts", [])])
+        if candidate_unchanged and all(state == "approved" for state, _ in states.values()):
+            ex["approved_paths"] = revision.get("paths", [])
+            _register_index(ws, exp_dir, ledger)
+            ex.setdefault("revision_history", []).append(revision)
+            ex.pop("revision", None)
+        elif any(state == "rejected" for state, _ in states.values()):
+            revision_note = "\n## 修订审批意见\n" + json.dumps(states, ensure_ascii=False)
+        else:
+            # Rebuild review if the submitted candidate changed while waiting.
+            if revision.get("fingerprint") == _gate.combined_sha16(
+                    [Path(p) for p in revision.get("artifacts", [])]):
+                return 3
+            revision_note = "\n待审批候选再次变化，请更新修订说明和验证。"
+    if not ex.get("revision"):
+        for gate in _gate._load(ws).get("gates", []):
+            if gate.get("id") in (GATE_T1, GATE_INJECT, GATE_PLAN):
+                state, note = _gate.gate_state(ws, gate["id"])
+                if state == "rejected":
+                    revision_note += f"\n{gate['id']} 审批意见：{note}"
+                    rejected_tiers.extend(tier for tier, gid in _GATE_OF.items() if gid == gate["id"])
+                elif state != "approved" and not _exec.fingerprint_problems(ws, ledger.get("acceptance") or {}):
+                    return 3
+    fprobs = _exec.fingerprint_problems(ws, ledger.get("acceptance") or {})
     ex["status"] = "running"
     _save_ledger(exp_dir, ledger)
-    baseline = _mono._git_status(target_os)
+    baseline = set(ex.setdefault("baseline", sorted(_mono._git_status(target_os))))
+    session = session or ex.get("session_id")
 
     # 基线阶梯（零 agent 入口：全绿即验收复验通过）
     records0, ladder0 = _exec.invoke_ladder(ws, target_os, driver_home_rel,
                                             "EXEC0")
     _record_execute(exp_dir, ledger, records0, "EXEC0")
-    if not ladder0:
+    upstream_changes = (require_success(ws, "mono")["changes"]
+                        if latest_success(ws, "mono") else [])
+    scope_changes = _scope_offenders(target_os, baseline, driver_home_rel,
+                                    _exec.touched_paths(ws, range(1, 8)) + ex.get("approved_paths", []))
+    if not ladder0 and not fprobs and not revision_note and not upstream_changes and not scope_changes:
         ex.update(status="pass", zero_agent=True, time=_now(),
                   session_id=None, agent_sec=0)
         _save_ledger(exp_dir, ledger)
@@ -729,13 +666,40 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
 
     static = _make_exec_static(ws, exp_dir, target_os, driver_home_rel,
                                ledger, baseline)
-    prompt = _execute_prompt(ws, proj, manifest, records0)
+    prompt = _execute_prompt(ws, proj, manifest, records0) + revision_note
+    if fprobs:
+        prompt += "\n标准发生变化，请完成候选修订和影响说明，再交付审批：\n" + "\n".join(fprobs)
+    revision_tiers = []
+    revision_paths = []
+
+    def validate(parsed):
+        nonlocal revision_tiers, revision_paths
+        problems = _exec.structural_problems(ws, range(1, 8))
+        if problems:
+            return False, "\n".join(problems)
+        ok, detail = static["fn"]()
+        changed = [section["section"] for section in ledger["acceptance"]["sections"]
+                   if _exec.fingerprint_problems(ws, {"sections": [section]})]
+        revision_paths = _scope_offenders(
+            target_os, baseline, driver_home_rel,
+            _exec.touched_paths(ws, range(1, 8)) + ex.get("approved_paths", []))
+        revision_tiers = [tier for tier, nums in _exec.SECTION_TIER.items()
+                          if set(nums) & set(changed) or revision_paths]
+        if revision_note and not revision_tiers:
+            revision_tiers = list((ex.get("revision") or {}).get("tiers", [])) or rejected_tiers
+        if revision_tiers:
+            if not str(parsed.get("notes", "")).strip():
+                return False, "请补充候选修订理由、影响范围及验证结果，再交付审批。"
+            return True, "候选修订已验证，等待人工审批；" + detail
+        return ok, detail
+
     outcome = agent.run_agent_seq(
         prompt, workdir=target_os,
         log_stem=str(exp_dir / "logs" / "EXE"),
         static=static,
         gen_schema={"status": "str", "notes": "str"},
-        final_static=True,
+        complete_check=validate,
+        handoff_inputs=(ws, ("mono",)) if latest_success(ws, "mono") else None,
         agent_budget_sec=int(budget),
         resume_session=session,
         task={"phase": "accept", "step": "execute", "task_id":
@@ -746,7 +710,7 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
     parsed = outcome.get("parsed") or {}
 
     if outcome.get("status") != "done":
-        st = {"budget-exhausted": "interrupted",
+        st = {"budget-exhausted": "interrupted", "interrupted": "interrupted",
               "stalled": "parked"}.get(outcome.get("status"), "failed")
         ex.update(status=st, time=_now())
         _save_ledger(exp_dir, ledger)
@@ -758,7 +722,7 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
         return 1
     if parsed.get("status") == "blocked":
         notes = str(parsed.get("notes", ""))
-        flat = notes.strip().lower()
+        flat = str(parsed.get("reason_kind") or notes).strip().lower()
         if flat.startswith("criteria-defect"):
             ex.update(status="panic", panic_kind="standard",
                       panic_notes=notes[:4000], time=_now())
@@ -788,17 +752,33 @@ def _run_execute(ws: Path, exp_dir: Path, proj: dict, manifest: dict,
                           f"{notes[:120]}）——rc 1")
         return 1
 
-    # done —— 权威终验（机器再跑一次全阶梯；只有跑通过的才算）
-    recordsF, ladderF = _exec.invoke_ladder(ws, target_os, driver_home_rel,
-                                            "EXECEnd")
-    _record_execute(exp_dir, ledger, recordsF, "EXECEnd")
-    if ladderF:
-        ex.update(status="unverified", problems=ladderF, time=_now())
+    if revision_tiers:
+        review = exp_dir / f"execute-revision-{datetime.now():%Y%m%d%H%M%S%f}.md"
+        review.write_text("# 验收修订评审\n\n" + str(parsed.get("notes", ""))
+                          + "\n\n## 影响与验证\n\n"
+                          + json.dumps({"tiers": revision_tiers, "paths": revision_paths,
+                                        "changes": _exec.fingerprint_problems(ws, ledger["acceptance"]),
+                                        "sections": ex.get("sections", {})},
+                                       ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        artifacts = [review]
+        for tier in revision_tiers:
+            arts = []
+            for n in _exec.SECTION_TIER[tier]:
+                j = _exec.pair_json(ws, n)
+                arts.extend([j, j.with_name(j.stem + ".check.py")])
+            artifacts.extend(arts)
+            _gate.register_gate(ws, _GATE_OF[tier],
+                                question="验收修订审批：审阅理由、影响及候选验证后批准当前版本。",
+                                context_files=[str(review.relative_to(ws))],
+                                artifact_path=arts + [review])
+            ledger.setdefault("tiers", {}).setdefault(tier, {}).update(status="pending-approval", verify={})
+        ex.update(status="pending-approval", revision={
+            "tiers": revision_tiers, "paths": sorted(set(ex.get("approved_paths", []) + revision_paths)),
+            "artifacts": [str(p) for p in artifacts],
+            "fingerprint": _gate.combined_sha16(artifacts), "review": str(review)})
         _save_ledger(exp_dir, ledger)
         _write_run_report(ws, exp_dir, ledger)
-        _log.console_line("[porter] accept: 终验阶梯未全绿——done 不算数"
-                          f"（--execute --session {sid} 续接修）rc 1")
-        return 1
+        return 3
 
     # 全绿 → commit + 报告
     try:
@@ -865,11 +845,6 @@ def run_accept(ws: Path, tier: str | None = None,
                execute: bool = False) -> int:
     ws = Path(ws).resolve()
     legacy_workspace = not (ws / "exp-mono" / "report.md").exists()
-    try:
-        _runner = load_runner(ws / "runner.json", required=not legacy_workspace)
-    except RunnerError as exc:
-        _log.console_line(f"[porter] accept: {exc}——rc 2")
-        return 2
     mono_handoff = latest_success(ws, "mono")
     mono_task_dir = ws / "handoffs" / "tasks" / "mono"
     # Real mono runs always leave report.md (and the task directory).  Keep
@@ -885,24 +860,30 @@ def run_accept(ws: Path, tier: str | None = None,
     # Historical workspaces without mono/report are kept usable; every current
     # mono run creates report.md and therefore takes the strict path above.
     mono_ready = mono_handoff is not None
-    needs = ["project.json", "exp-mono/ledger.json"]
-    missing = [n for n in needs if not (ws / n).exists()]
-    # driver_home 单源 = module-divsion.json（pre-mono 产物）。accept 前置
-    # （exp-mono 全 pass）在链条上蕴含 mono 跑过，而 mono 无条件要求该文件
-    # 在场，故无需回退；旧源（mono-input-manifest / P2 scaffold_manifest）
-    # 在工具内已无生产者与消费者（2026-09-12 裁定单源，不留死路径）。
-    manifest = _mono._read_json(ws / "module-divsion.json") or {}
-    if not manifest.get("driver_home"):
-        missing.append("module-divsion.json[driver_home]")
-    if missing:
-        _log.console_line(f"[porter] accept: 前置缺失："
-                          + "、".join(missing) + "——rc 2")
-        return 2
-    proj = _mono._read_json(ws / "project.json") or {}
-    if not proj.get("target_os"):
-        _log.console_line("[porter] accept: project 无 target_os——rc 2")
-        return 2
-    mono_ledger = _mono._read_json(ws / "exp-mono" / "ledger.json") or {}
+    def read_inputs():
+        paths = locate(ws, required=("module-division.json",), record=False)
+        manifest = read_json(paths["module-division.json"])
+        proj = read_json(ws / "project.json")
+        target = proj.get("target_os")
+        home = manifest.get("driver_home")
+        if not isinstance(target, str) or not Path(target).is_dir():
+            raise ValueError("project.json requires an accessible target_os directory")
+        if not isinstance(home, str) or not home or not (Path(target) / home).resolve().is_relative_to(Path(target).resolve()):
+            raise ValueError("module-division.json requires driver_home inside target_os")
+        return proj, manifest, read_json(ws / "exp-mono/ledger.json")
+
+    try:
+        if mono_ready:
+            proj, manifest, mono_ledger = agent.repair_inputs(
+                read_inputs, ws, str(ws / "exp-accept/logs/inputs"),
+                budget=budget if budget is not None else EXEC_BUDGET_SEC,
+                handoff_inputs=(ws, ("mono",)),
+                task={"phase": "accept", "step": "inputs", "task_id": "accept.inputs"})
+        else:
+            proj, manifest, mono_ledger = read_inputs()
+    except (ValueError, FileNotFoundError) as exc:
+        _log.console_line(f"[porter] accept: {exc}")
+        return 1 if mono_ready else 2
     mods = mono_ledger.get("modules") or {}
     if not mods or not all((e or {}).get("status") == "pass"
                            for e in mods.values()):
@@ -956,6 +937,12 @@ def run_accept(ws: Path, tier: str | None = None,
             _log.console_line(f"[porter] accept: 关口① {st0}——人审放行后"
                               "重跑（answers.md `## @exp-accept.t1` + "
                               "`verdict: approve`）rc 3")
+            return 3
+
+    if mono_ready:
+        state, note = _gate.gate_state(ws, GATE_T1)
+        if state != "approved":
+            _log.console_line(f"[porter] accept: Tier1 等待审批：{note}——rc 3")
             return 3
 
     # ---- Tier 2（§5/§6）----

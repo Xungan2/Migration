@@ -25,15 +25,15 @@ class TestRunnerContract(unittest.TestCase):
             with self.assertRaises(RunnerError):
                 load(path)
 
-    def test_timeout_keeps_session_for_outer_retry(self):
+    def test_timeout_keeps_session_when_budget_exhausted(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(agent, "_opencode_json_runner",
-                                  return_value=(-1, '{"sessionID":"sid-1"}')):
+                                  return_value=(-1, '{"sessionID":"sid-1"}')), \
+                mock.patch.object(agent.time, "monotonic", side_effect=[0, 2]):
             outcome = agent.run_agent_seq("continue", Path(tmp),
                                           str(Path(tmp) / "run"),
                                           agent_budget_sec=1)
-        self.assertEqual(outcome["status"], "failed")
-        self.assertEqual(outcome["retryable"], "timeout")
+        self.assertEqual(outcome["status"], "budget-exhausted")
         self.assertEqual(outcome["session_id"], "sid-1")
 
 
