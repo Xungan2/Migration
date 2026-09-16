@@ -65,6 +65,11 @@ def _path(ws: Path, value) -> Path | None:
 def _tail(path: Path | None, lines: int = 30) -> str:
     if path is None or not path.is_file():
         return ""
+    try:
+        return "\n".join(path.read_text(encoding="utf-8", errors="replace")
+                         .splitlines()[-lines:])
+    except OSError:
+        return ""
 
 
 def _status(value) -> str | None:
@@ -77,11 +82,6 @@ def _status(value) -> str | None:
             "stalled": "blocked", "invalid": "fail",
             "invalid-deliverable": "fail", "unverified": "fail",
             "parked": "blocked"}.get(value, value)
-    try:
-        return "\n".join(path.read_text(encoding="utf-8", errors="replace")
-                         .splitlines()[-lines:])
-    except OSError:
-        return ""
 
 
 def analyze_log(path: Path | str | None) -> dict:
@@ -104,8 +104,8 @@ def analyze_log(path: Path | str | None) -> dict:
             value = event.get("sessionID") or event.get("session_id")
             if value:
                 session_id = str(value)
-    timeout = ("timeout" in lower or "timed out" in lower or
-               "timeoutexpired" in lower)
+    # Only the transport's standalone marker is evidence of a timeout.
+    timeout = bool(re.search(r"^TIMEOUT(?: after [0-9.]+s)?$", text, re.MULTILINE))
     blocked = bool(re.search(r'"status"\s*:\s*"blocked"', lower))
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     reason = next((line for line in reversed(lines)
@@ -202,7 +202,7 @@ def _declared_tasks(ws: Path) -> list[dict]:
             if not isinstance(entry, dict):
                 continue
             for step in ("research", "translate"):
-                sub = entry.get(step) or {}
+                sub = (entry if step == "translate" else entry.get(step)) or {}
                 if isinstance(sub, dict) and sub:
                     result.append({"task_id": f"{phase}.{step}.{module}",
                                    "status": _status(sub.get("status")),
@@ -272,24 +272,28 @@ def discover_tasks(ws: Path) -> list[dict]:
                      "prompt": str(path.with_suffix(".prompt.md")),
                      "time_start": None, "rc": None if not info["timeout"]
                      and not info["blocked"] else -1,
-                     "summary": None})
+                     "summary": None, "untracked": True})
+    # Events retain history; the taskboard and recovery use the latest run.
+    latest = {_task_name(run): run for run in runs}
     records = []
-    for run in runs:
+    for run in latest.values():
         path = _path(ws, run.get("log"))
         info = analyze_log(path)
         rc = run.get("rc")
-        if rc is None:
+        if run.get("untracked"):
+            status = "unknown"
+        elif rc is None:
             status = "running"
-        elif info["timeout"] or rc in (-1, 124):
-            status = "timeout"
-        elif info["blocked"]:
-            status = "blocked"
         elif rc == 0:
             status = "done"
+        elif rc in (-1, 124):
+            status = "timeout"
         else:
             status = "fail"
         task_id = _task_name(run)
         decl = declared.get(task_id, {})
+        if rc is not None and decl.get("status") in ("done", "fail", "blocked", "timeout"):
+            status = decl["status"]
         handoff = _handoff_for(ws, task_id, decl.get("handoff"))
         if status == "done" and decl.get("handoff") and handoff is None:
             info["reason"] = "task completed without its declared handoff"
@@ -305,11 +309,12 @@ def discover_tasks(ws: Path) -> list[dict]:
             "handoff": str(handoff or _path(ws, decl.get("handoff")))
             if (handoff or decl.get("handoff")) else None,
             "handoff_ok": handoff is not None,
+            "handoff_required": bool(decl.get("handoff")),
             "reason": info.get("reason", ""),
             "tail": info.get("tail", ""),
             "time": run.get("time_end") or run.get("time_start"),
         })
-    # Keep one row per run.  Declared tasks with no events get a useful row.
+    # Declared tasks with no events get a useful row.
     seen_ids = {r["task_id"] for r in records}
     for task_id, decl in declared.items():
         if task_id in seen_ids:
@@ -329,6 +334,7 @@ def discover_tasks(ws: Path) -> list[dict]:
                         "prompt": None,
                         "handoff": str(expected_handoff) if expected_handoff else None,
                         "handoff_ok": declared_handoff is not None,
+                        "handoff_required": bool(decl.get("handoff")),
                         "reason": decl_info.get("reason", ""),
                         "tail": decl_info.get("tail", ""), "time": None})
     return records
@@ -487,6 +493,7 @@ class Monitor:
         if session_id and argv and argv[0] in ("mono", "accept") and "--session" not in argv:
             argv = [*argv, "--session", session_id]
         env = {**os.environ, "PORTER_NO_MONITOR": "1"}
+        (self.workspace / ".porter-exit.json").unlink(missing_ok=True)
         try:
             process = subprocess.Popen([sys.executable, str(Path(__file__).with_name("main.py")), *argv],
                                        cwd=command.get("cwd") or str(Path.cwd()),
@@ -494,8 +501,6 @@ class Monitor:
         except OSError:
             return
         self.owner_pid = process.pid
-        command.update(owner_pid=process.pid, restarted_at=time.time())
-        write_json(self.workspace / ".porter-command.json", command)
 
     def _write_human(self, item: dict, reason: str) -> None:
         path = self.workspace / HUMAN_FILE
@@ -607,7 +612,11 @@ class Monitor:
         command = _json(self.workspace / ".porter-command.json", {}) or {}
         if isinstance(command, dict) and command.get("owner_pid"):
             try:
-                self.owner_pid = int(command["owner_pid"])
+                recorded_pid = int(command["owner_pid"])
+                # The child registers itself after launch; do not replace a
+                # live recovery PID with the previous command's dead owner.
+                if _pid_alive(recorded_pid) or not _pid_alive(self.owner_pid):
+                    self.owner_pid = recorded_pid
             except (TypeError, ValueError):
                 pass
         records = discover_tasks(self.workspace)
@@ -615,19 +624,31 @@ class Monitor:
         host_busy = _workspace_busy(self.workspace)
         host_stopped = (self.owner_pid is None or
                         (not owner_alive and not host_busy))
+        exit_info = _json(self.workspace / ".porter-exit.json", {}) or {}
+        clean_exit = host_stopped and exit_info.get("owner_pid") == self.owner_pid and bool(exit_info)
         for item in records:
             key = str(item.get("task_id") or item.get("run_id"))
             prior = self.state["tasks"].get(key, {})
+            handoff_missing = (item["status"] == "done" and item.get("handoff_required")
+                               and not item.get("handoff_ok"))
+            if item["status"] == "done" and not handoff_missing:
+                prior = {"attempts": 0, "run_id": item.get("run_id")}
+                self.state["tasks"][key] = prior
+            elif prior.get("run_id") != item.get("run_id"):
+                prior = {"attempts": prior.get("attempts", 0), "run_id": item.get("run_id")}
+                self.state["tasks"][key] = prior
             if prior.get("status") in ("waiting-human", "human-applied"):
                 item["status"] = prior["status"]
                 item["reason"] = prior.get("reason") or item.get("reason", "")
             if item["status"] == "running" and self.owner_pid and not owner_alive:
                 item["status"] = "timeout"
                 item["reason"] = "owner exited while this session had no agent_end event"
-            handoff_missing = item["status"] == "done" and not item.get("handoff_ok")
-            if (item["status"] in ("timeout", "fail", "blocked") or handoff_missing) and host_stopped:
+            if (item["status"] in ("timeout", "fail", "blocked") or handoff_missing) \
+                    and host_stopped and not clean_exit:
                 self._recover(item)
-        if not host_busy:
+                # A restarted host owns all remaining work, even before locking.
+                host_stopped = not _pid_alive(self.owner_pid) and not _workspace_busy(self.workspace)
+        if host_stopped and not clean_exit:
             self._consume_human()
         self._persist()
         write_taskboard(self.workspace, records,
@@ -645,8 +666,10 @@ class Monitor:
             self.poll_once()
             if once:
                 break
-            exit_file = self.workspace / ".porter-exit.json"
-            if exit_file.exists() and self.owner_pid and not _pid_alive(self.owner_pid):
+            exit_info = _json(self.workspace / ".porter-exit.json", {}) or {}
+            if (self.owner_pid and exit_info.get("owner_pid") == self.owner_pid
+                    and not _pid_alive(self.owner_pid)
+                    and not _workspace_busy(self.workspace)):
                 break
             time.sleep(self.interval)
         if self.workspace.exists():

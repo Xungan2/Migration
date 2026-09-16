@@ -13,6 +13,15 @@ from porter import workspace
 
 def _start_monitor(ws: Path, argv) -> object | None:
     """Start one detached monitor and persist enough context for recovery."""
+    # A marker belongs to the previous invocation; leaving it would make a
+    # fresh monitor mistake a later owner crash for a clean exit.
+    try:
+        (ws / ".porter-exit.json").unlink()
+    except FileNotFoundError:
+        pass
+    workspace.write_json(ws / ".porter-command.json", {
+        "argv": list(argv), "cwd": str(Path.cwd()), "owner_pid": os.getpid(),
+        "started_at": __import__("time").time()})
     if os.environ.get("PORTER_NO_MONITOR") or os.environ.get("PORTER_MONITOR_CHILD"):
         return None
     from porter.monitor import start
@@ -29,15 +38,6 @@ def _start_monitor(ws: Path, argv) -> object | None:
                 pid_file.unlink()
             except OSError:
                 pass
-    # A marker belongs to the previous invocation; leaving it would make a
-    # fresh monitor mistake a later owner crash for a clean exit.
-    try:
-        (ws / ".porter-exit.json").unlink()
-    except FileNotFoundError:
-        pass
-    workspace.write_json(ws / ".porter-command.json", {
-        "argv": list(argv), "cwd": str(Path.cwd()), "owner_pid": os.getpid(),
-        "started_at": __import__("time").time()})
     try:
         return start(ws, owner_pid=os.getpid())
     except OSError:
@@ -49,7 +49,7 @@ def _finish_monitor(ws: Path, rc: int | None, *, stop: bool = False) -> None:
     if stop:
         try:
             workspace.write_json(ws / ".porter-exit.json", {
-                "rc": rc, "finished_at": __import__("time").time()})
+                "rc": rc, "owner_pid": os.getpid(), "finished_at": __import__("time").time()})
         except OSError:
             pass
     try:
@@ -173,8 +173,7 @@ def main(argv=None) -> int:
         result = 130
         return result
     finally:
-        if monitor_ws is not None and not os.environ.get("PORTER_NO_MONITOR") \
-                and not os.environ.get("PORTER_MONITOR_CHILD"):
+        if monitor_ws is not None and not os.environ.get("PORTER_MONITOR_CHILD"):
             _finish_monitor(monitor_ws, result, stop=stop_monitor)
         if monitor_proc is not None and result in (0, 2) and stop_monitor:
             # Successful phases have no recovery work left.  Failed phases
